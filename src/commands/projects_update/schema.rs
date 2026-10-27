@@ -5,6 +5,14 @@ use std::{
     path::{Path, PathBuf},
 };
 
+/// Generated-file scopes a profile can enroll. `ci` is required and is the
+/// only qualification set; the others are carried update-only consumptions.
+pub const SUPPORTED_SCOPES: &[&str] = &["ci", "ci-extra", "release", "flake", "readme"];
+/// Built-in forge adapter protocols (`simit projects update-<name>-adapter`).
+pub const UPDATER_ADAPTERS: &[&str] = &["github", "forgejo"];
+/// How a qualified candidate reaches the target branch.
+pub const SUPPORTED_LANDINGS: &[&str] = &["direct", "pull-request"];
+
 #[derive(Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct Config {
@@ -53,6 +61,9 @@ pub struct Forge {
     pub host: String,
     pub api_url: String,
     pub credential_file: Option<PathBuf>,
+    /// Second API credential for a separate check authority (Crow beside Forgejo).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ci_credential_file: Option<PathBuf>,
     pub adapter: Command,
     pub adapter_sha256: Option<String>,
     #[serde(default)]
@@ -79,6 +90,27 @@ pub struct Profile {
     pub enroll_current: bool,
     #[serde(default)]
     pub required_checks: Vec<Requirement>,
+    /// `direct` pushes the target branch; `pull-request` has the updater merge
+    /// a pull request. Omitted when direct, so existing policy digests hold.
+    #[serde(default = "direct", skip_serializing_if = "is_direct")]
+    pub landing: String,
+    /// Regenerate CI for another provider/platform, retiring the old workflows.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub migrate: Option<Migration>,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct Migration {
+    pub provider: String,
+    pub platform: String,
+    pub runner: String,
+}
+fn direct() -> String {
+    "direct".into()
+}
+fn is_direct(landing: &str) -> bool {
+    landing == "direct"
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -233,9 +265,15 @@ pub struct Override {
     #[serde(default = "yes")]
     pub enable: bool,
     pub reason: Option<String>,
+    /// Machine-readable kebab-case code for why a coordinate is disabled.
+    /// Omitted when absent so existing policy digests stay stable.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub blocker: Option<String>,
     pub target_branch: Option<String>,
     #[serde(default)]
     pub required_checks: Vec<Requirement>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub landing: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
@@ -385,7 +423,11 @@ impl Config {
                     );
                 }
             }
-            if let Some(path) = &forge.credential_file {
+            for path in forge
+                .credential_file
+                .iter()
+                .chain(&forge.ci_credential_file)
+            {
                 absolute(path)?;
                 ensure!(
                     !path.starts_with("/nix/store"),
@@ -396,16 +438,43 @@ impl Config {
                     "adapter credential overlaps code inputs"
                 );
             }
+            ensure!(
+                forge.ci_credential_file.is_none()
+                    || forge.ci_credential_file != forge.credential_file,
+                "forge and CI credentials must be distinct files"
+            );
         }
         for profile in self.profiles.values() {
             ensure!(
                 self.workspaces.contains_key(&profile.workspace),
                 "unknown workspace"
             );
+            let scopes = profile.scopes.iter().collect::<BTreeSet<_>>();
             ensure!(
-                profile.scopes == ["ci"],
-                "only primary CI scope is supported"
+                scopes.len() == profile.scopes.len()
+                    && scopes
+                        .iter()
+                        .all(|scope| SUPPORTED_SCOPES.contains(&scope.as_str()))
+                    && scopes.contains(&"ci".to_owned()),
+                "profile scopes must be unique, supported and include ci (ci-extra extends it)"
             );
+            if let Some(migration) = &profile.migrate {
+                ensure!(
+                    matches!(
+                        (migration.provider.as_str(), migration.platform.as_str()),
+                        ("actions", "github") | ("crow", "forgejo")
+                    ),
+                    "migration provider/platform must be actions on github or crow on forgejo (the forgejo adapter qualifies Crow pipelines only)"
+                );
+                crate::user_config::validate_runner_label(&migration.runner)?;
+                // The rewritten [ci] table is a ci-extra patch; badges would
+                // describe the pre-migration workflows.
+                ensure!(
+                    scopes.contains(&"ci-extra".to_owned())
+                        && !scopes.contains(&"readme".to_owned()),
+                    "migration requires the ci-extra scope and excludes readme"
+                );
+            }
             ensure!(
                 !profile.select.coordinates.is_empty(),
                 "profiles require operator-owned coordinate enrollment"
@@ -478,6 +547,14 @@ impl Config {
                     "selection paths must be workspace-relative"
                 );
             }
+            for landing in std::iter::once(&profile.landing)
+                .chain(profile.project_overrides.values().flat_map(|o| &o.landing))
+            {
+                ensure!(
+                    matches!(landing.as_str(), "direct" | "pull-request"),
+                    "unsupported landing mode {landing}"
+                );
+            }
             for (key, value) in &profile.project_overrides {
                 coordinate(key)?;
                 requirements(&value.required_checks)?;
@@ -488,6 +565,19 @@ impl Config {
                     value.enable || value.reason.as_ref().is_some_and(|s| !s.trim().is_empty()),
                     "disabled project override requires a reason"
                 );
+                if let Some(blocker) = &value.blocker {
+                    ensure!(
+                        !value.enable,
+                        "override blocker requires a disabled project"
+                    );
+                    ensure!(
+                        blocker.starts_with(|c: char| c.is_ascii_lowercase())
+                            && blocker
+                                .bytes()
+                                .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-'),
+                        "override blocker must be a kebab-case token"
+                    );
+                }
             }
         }
         Ok(())
@@ -646,6 +736,97 @@ mod tests {
         );
         cfg.forges.get_mut("weaker").unwrap().host = "other.example".into();
         cfg.validate().unwrap();
+    }
+
+    #[test]
+    fn scopes_are_unique_supported_and_always_include_ci() {
+        for scopes in [
+            &[][..],
+            &["ci-extra"],
+            &["release", "readme"],
+            &["ci", "ci"],
+            &["ci", "lock"],
+        ] {
+            let mut cfg = config();
+            cfg.profiles.get_mut("fleet").unwrap().scopes =
+                scopes.iter().map(|scope| scope.to_string()).collect();
+            assert!(cfg.validate().is_err(), "{scopes:?}");
+        }
+        let mut cfg = config();
+        cfg.profiles.get_mut("fleet").unwrap().scopes = SUPPORTED_SCOPES
+            .iter()
+            .rev()
+            .map(|scope| scope.to_string())
+            .collect();
+        cfg.validate().unwrap();
+    }
+
+    #[test]
+    fn migrations_need_a_supported_backend_ci_extra_and_no_readme() {
+        let migrated = |scopes: &[&str], migrate: serde_json::Value| {
+            let mut cfg = config();
+            let profile = cfg.profiles.get_mut("fleet").unwrap();
+            profile.scopes = scopes.iter().map(|scope| scope.to_string()).collect();
+            profile.migrate = Some(serde_json::from_value(migrate).unwrap());
+            cfg.validate()
+        };
+        let actions =
+            serde_json::json!({"provider":"actions","platform":"github","runner":"ubuntu-24.04"});
+        migrated(&["ci", "ci-extra"], actions.clone()).unwrap();
+        migrated(
+            &["ci", "ci-extra", "release", "flake"],
+            serde_json::json!({"provider":"crow","platform":"forgejo","runner":"codeberg-small"}),
+        )
+        .unwrap();
+        for (scopes, migrate) in [
+            (&["ci"][..], actions.clone()),
+            (&["ci", "ci-extra", "readme"], actions.clone()),
+            (
+                &["ci", "ci-extra"],
+                serde_json::json!({"provider":"crow","platform":"github","runner":"ubuntu-24.04"}),
+            ),
+            (
+                &["ci", "ci-extra"],
+                serde_json::json!({"provider":"actions","platform":"gitlab","runner":"ubuntu-24.04"}),
+            ),
+            (
+                &["ci", "ci-extra"],
+                serde_json::json!({"provider":"actions","platform":"forgejo","runner":"docker"}),
+            ),
+            (
+                &["ci", "ci-extra"],
+                serde_json::json!({"provider":"actions","platform":"github","runner":"two words"}),
+            ),
+        ] {
+            assert!(migrated(scopes, migrate.clone()).is_err(), "{migrate}");
+        }
+    }
+
+    #[test]
+    fn plan_patches_derive_protocol_version_two() {
+        let mut request: AdapterRequest = serde_json::from_value(serde_json::json!({
+            "schemaVersion":1, "operation":"admit", "coordinate":"forge.example/team/demo",
+            "apiUrl":"https://forge.example/api", "authority":"777", "revision":"a".repeat(40),
+            "branch":"maintenance/candidate", "workflows":[], "requiredChecks":[],
+            "plan":{"schema":"simit.ci-update-plan.v2","files":[],"obsolete":[],
+                "patches":[{"relative_path":"README.md","content":"# demo\n"}]}
+        }))
+        .unwrap();
+        assert!(request.validate().is_err());
+        request.schema_version = 2;
+        request.validate().unwrap();
+        request.plan.as_mut().unwrap().schema = "simit.ci-update-plan.v1".into();
+        assert!(request.validate().is_err());
+        request.plan.as_mut().unwrap().schema = "simit.ci-update-plan.v2".into();
+        let mut response: AdapterResponse = serde_json::from_value(serde_json::json!({
+            "schemaVersion":1,"coordinate":request.coordinate,"repositoryId":"42","defaultBranch":"trunk",
+            "revision":request.revision,"remote":"https://forge.example/team/demo.git","policyDigest":"b".repeat(64),
+            "requirements":[],"status":"pending","checks":[]
+        }))
+        .unwrap();
+        assert!(response.validate(&request).is_err());
+        response.schema_version = 2;
+        response.validate(&request).unwrap();
     }
 
     #[test]
@@ -820,6 +1001,49 @@ mod tests {
     }
 
     #[test]
+    fn override_blockers_are_kebab_tokens_on_disabled_projects() {
+        let with = |value: serde_json::Value| {
+            let mut cfg = config();
+            cfg.profiles
+                .get_mut("fleet")
+                .unwrap()
+                .project_overrides
+                .insert(
+                    "forge.example/team/demo".into(),
+                    serde_json::from_value(value).unwrap(),
+                );
+            cfg
+        };
+        for blocker in ["provider-mismatch", "pr-required", "a1"] {
+            with(serde_json::json!({"enable": false, "reason": "x", "blocker": blocker}))
+                .validate()
+                .unwrap();
+        }
+        for blocker in ["", "Provider", "-x", "1x", "pr_required", "pr required"] {
+            assert!(
+                with(serde_json::json!({"enable": false, "reason": "x", "blocker": blocker}))
+                    .validate()
+                    .is_err(),
+                "{blocker:?}"
+            );
+        }
+        assert!(
+            with(serde_json::json!({"blocker": "pr-required"}))
+                .validate()
+                .unwrap_err()
+                .to_string()
+                .contains("requires a disabled project")
+        );
+        // An absent blocker serializes exactly as before, keeping policy digests.
+        let plain = with(serde_json::json!({"enable": false, "reason": "x"}));
+        assert!(
+            !serde_json::to_string(&plain.profiles["fleet"])
+                .unwrap()
+                .contains("blocker")
+        );
+    }
+
+    #[test]
     fn selection_is_layout_independent_and_exclusions_win() {
         let selection: Selection =
             serde_json::from_value(serde_json::json!({"coordinates":["forge.example/team/demo"]}))
@@ -865,6 +1089,7 @@ mod tests {
             coordinate: "forge.example/team/demo".into(),
             api_url: "https://forge.example/api".into(),
             credential_file: None,
+            ci_credential_file: None,
             authority: "777".into(),
             revision: Some("a".repeat(40)),
             branch: Some("maintenance/candidate".into()),
@@ -874,6 +1099,9 @@ mod tests {
                 authority: "777".into(),
             }],
             plan: None,
+            landing: None,
+            target: None,
+            change: None,
         };
         let mut response = AdapterResponse {
             schema_version: 1,
@@ -886,6 +1114,7 @@ mod tests {
             requirements: vec![],
             status: "success".into(),
             checks: vec![],
+            change: None,
         };
         assert!(response.validate(&request).is_err());
         response.checks.push(Check {
@@ -904,6 +1133,144 @@ mod tests {
             response.checks[0].status = status.into();
             assert!(response.validate(&request).is_err());
         }
+    }
+
+    #[test]
+    fn landing_policy_is_validated_and_direct_keeps_existing_digests() {
+        let mut cfg = config();
+        assert!(
+            !serde_json::to_value(&cfg.profiles["fleet"])
+                .unwrap()
+                .as_object()
+                .unwrap()
+                .contains_key("landing")
+        );
+        for landing in ["pull-request", "direct"] {
+            cfg.profiles.get_mut("fleet").unwrap().landing = landing.into();
+            cfg.validate().unwrap();
+        }
+        cfg.profiles.get_mut("fleet").unwrap().landing = "merge-queue".into();
+        assert!(cfg.validate().is_err());
+        let mut cfg = config();
+        cfg.profiles
+            .get_mut("fleet")
+            .unwrap()
+            .project_overrides
+            .insert(
+                "forge.example/team/demo".into(),
+                serde_json::from_value(serde_json::json!({"landing":"merge-queue"})).unwrap(),
+            );
+        assert!(cfg.validate().is_err());
+    }
+
+    #[test]
+    fn pull_request_protocol_is_v2_and_binds_candidate_head_and_target() {
+        let qualify = serde_json::json!({
+            "schemaVersion":1,"operation":"qualify","coordinate":"forge.example/team/demo",
+            "apiUrl":"https://forge.example/api","authority":"777","revision":"a".repeat(40),
+            "branch":"maintenance/candidate","workflows":[],"requiredChecks":[]
+        });
+        let legacy: AdapterRequest = serde_json::from_value(qualify.clone()).unwrap();
+        legacy.validate().unwrap();
+        let bytes = serde_json::to_value(&legacy).unwrap();
+        assert!(
+            ["landing", "target", "change"]
+                .iter()
+                .all(|key| bytes.get(key).is_none())
+        );
+        let mut request: AdapterRequest = serde_json::from_value(qualify).unwrap();
+        request.landing = Some("pull-request".into());
+        request.schema_version = request.derived_version();
+        assert!(
+            request.validate().is_err(),
+            "qualification carries no landing"
+        );
+        request.operation = "merge".into();
+        request.target = Some("trunk".into());
+        request.change = Some("7".into());
+        request.schema_version = 1;
+        assert!(request.validate().is_err(), "declared v1");
+        request.schema_version = request.derived_version();
+        request.validate().unwrap();
+        request.change = None;
+        assert!(request.validate().is_err(), "merge names its change");
+        request.change = Some("7".into());
+        let mut response: AdapterResponse = serde_json::from_value(serde_json::json!({
+            "schemaVersion":2,"coordinate":request.coordinate,"repositoryId":"2","defaultBranch":"trunk",
+            "revision":request.revision,"remote":"https://forge.example/team/demo.git","policyDigest":"b".repeat(64),
+            "requirements":[],"status":"success","checks":[],
+            "change":{"id":"7","state":"merged","head":request.revision,"base":"trunk","mergeCommit":"c".repeat(40)}
+        })).unwrap();
+        response.validate(&request).unwrap();
+        response.schema_version = 1;
+        assert!(response.validate(&request).is_err());
+        response.schema_version = 2;
+        for (key, value) in [
+            ("head", serde_json::json!("b".repeat(40))),
+            ("base", serde_json::json!("main")),
+            ("id", serde_json::json!("8")),
+            ("mergeCommit", serde_json::Value::Null),
+            ("state", serde_json::json!("open")),
+        ] {
+            let mut changed = serde_json::to_value(&response).unwrap();
+            changed["change"][key] = value;
+            let changed: AdapterResponse = serde_json::from_value(changed).unwrap();
+            assert!(changed.validate(&request).is_err(), "{key}");
+        }
+        let change = response.change.as_mut().unwrap();
+        change.state = "open".into();
+        change.merge_commit = None;
+        assert!(
+            response.validate(&request).is_err(),
+            "open merge is pending"
+        );
+        response.status = "pending".into();
+        response.validate(&request).unwrap();
+        request.operation = "close".into();
+        assert!(
+            response.validate(&request).is_err(),
+            "close leaves no open change"
+        );
+        request.change = None;
+        response.change = None;
+        assert!(
+            response.validate(&request).is_err(),
+            "an unconfirmed close finds nothing"
+        );
+        response.status = "success".into();
+        response.validate(&request).unwrap();
+        // An empty close still answers for the requested candidate.
+        let revision = std::mem::replace(&mut response.revision, "c".repeat(40));
+        assert!(
+            response.validate(&request).is_err(),
+            "an empty close for another candidate"
+        );
+        response.revision = revision;
+        request.change = Some("7".into());
+        assert!(
+            response.validate(&request).is_err(),
+            "a named change is reported"
+        );
+    }
+
+    #[test]
+    fn pull_request_admission_relaxes_only_the_target_branch() {
+        let mut request: AdapterRequest = serde_json::from_value(serde_json::json!({
+            "schemaVersion":2, "operation":"admit", "coordinate":"forge.example/team/demo",
+            "apiUrl":"https://forge.example/api", "authority":"777", "revision":"a".repeat(40),
+            "branch":"trunk", "workflows":[], "requiredChecks":[], "landing":"pull-request", "target":"trunk",
+            "plan":{"schema":"simit.ci-update-plan.v1","files":[],"obsolete":[]}
+        })).unwrap();
+        request.validate().unwrap();
+        request.branch = Some("maintenance/candidate".into());
+        assert!(request.validate().is_err());
+        request.operation = "inspect".into();
+        request.plan = None;
+        request.revision = None;
+        request.branch = None;
+        assert!(request.validate().is_err(), "inspection names no target");
+        request.target = None;
+        request.validate().unwrap();
     }
 
     #[test]
@@ -929,6 +1296,72 @@ mod tests {
         assert!(response.validate(&request).is_err());
         response.checks.clear();
         assert!(response.validate(&request).is_err());
+    }
+
+    #[test]
+    fn version_one_requests_keep_their_bytes_and_v2_features_must_be_declared() {
+        let json = r#"{"schemaVersion":1,"operation":"admit","coordinate":"forge.example/team/demo","apiUrl":"https://forge.example/api","credentialFile":"/run/credentials/forge","authority":"777","revision":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","branch":"maintenance/candidate","workflows":[".github/workflows/ci.yaml"],"requiredChecks":[{"name":"test","authority":"777"}],"plan":{"schema":"simit.ci-update-plan.v1","files":[{"relative_path":".github/workflows/ci.yaml","content":"on: push\n"}],"obsolete":[]}}"#;
+        let mut request: AdapterRequest = serde_json::from_str(json).unwrap();
+        request.validate().unwrap();
+        assert_eq!(serde_json::to_string(&request).unwrap(), json);
+        // Digest of the same request as serialized by the version-1-only schema.
+        assert_eq!(
+            crate::review::canonical_digest(&request).unwrap(),
+            "cb8b7078ca933c4a9c0116763ab6afa20f06e12e863514d9bb95fd6c6b8de62c"
+        );
+        request.ci_credential_file = Some("/run/credentials/ci".into());
+        assert_eq!(request.derived_version(), 2);
+        assert!(request.validate().is_err());
+        request.schema_version = 2;
+        request.validate().unwrap();
+        let mut response: AdapterResponse = serde_json::from_value(serde_json::json!({
+            "schemaVersion":1,"coordinate":request.coordinate,"repositoryId":"42","defaultBranch":"trunk",
+            "revision":request.revision,"remote":"https://forge.example/team/demo.git","policyDigest":"b".repeat(64),
+            "requirements":[],"status":"success","checks":[{"name":"admission","authority":"777",
+            "revision":request.revision,"run":crate::review::canonical_digest(&request).unwrap(),"attempt":1,"status":"success"}]
+        })).unwrap();
+        assert!(response.validate(&request).is_err());
+        response.schema_version = 2;
+        response.validate(&request).unwrap();
+        request.ci_credential_file = None;
+        assert!(request.validate().is_err());
+    }
+
+    #[test]
+    fn ci_credentials_follow_forge_credential_rules_and_stay_distinct() {
+        // Unset, the field leaves existing policy digests unchanged.
+        assert!(
+            serde_json::to_value(&config().forges["example"])
+                .unwrap()
+                .get("ciCredentialFile")
+                .is_none()
+        );
+        for credential in [
+            "/runtime/adapter",
+            "/runtime//helper.py",
+            "/nix/store/fixture-token",
+            "relative/token",
+            "/run/credentials/forge",
+            "/run//credentials/forge",
+        ] {
+            let mut cfg = config();
+            let forge = cfg.forges.get_mut("example").unwrap();
+            forge.adapter.program = "/runtime/adapter".into();
+            forge
+                .adapter_inputs
+                .insert("/runtime/helper.py".into(), "b".repeat(64));
+            forge.credential_file = Some("/run/credentials/forge".into());
+            forge.ci_credential_file = Some(credential.into());
+            assert!(cfg.validate().is_err(), "{credential}");
+        }
+        let mut cfg = config();
+        let forge = cfg.forges.get_mut("example").unwrap();
+        forge.credential_file = Some("/run/credentials/forge".into());
+        forge.ci_credential_file = Some("/run/credentials/ci".into());
+        cfg.validate().unwrap();
+        // A CI-only credential is valid for public forge repositories.
+        cfg.forges.get_mut("example").unwrap().credential_file = None;
+        cfg.validate().unwrap();
     }
 }
 
@@ -1111,6 +1544,8 @@ pub struct AdapterRequest {
     pub coordinate: String,
     pub api_url: String,
     pub credential_file: Option<PathBuf>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ci_credential_file: Option<PathBuf>,
     pub authority: String,
     pub revision: Option<String>,
     pub branch: Option<String>,
@@ -1120,12 +1555,42 @@ pub struct AdapterRequest {
     /// Exact generated bytes for pre-push backend admission. Omitted otherwise.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub plan: Option<crate::project::CiUpdatePlan>,
+    /// `pull-request` relaxes only approval-review protection of the target.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub landing: Option<String>,
+    /// Branch a pull request merges into.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target: Option<String>,
+    /// Forge identifier of an existing pull request.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub change: Option<String>,
 }
 impl AdapterRequest {
+    /// Version 2 marks any request a version-1 adapter could misread. Without
+    /// v2 features the request keeps its version-1 bytes and admission digest.
+    pub fn derived_version(&self) -> u32 {
+        if self.ci_credential_file.is_some()
+            || self.landing.is_some()
+            || self.target.is_some()
+            || self.change.is_some()
+            || matches!(self.operation.as_str(), "propose" | "merge" | "close")
+            || self.plan.as_ref().is_some_and(|plan| {
+                plan.schema == "simit.ci-update-plan.v2" || !plan.patches.is_empty()
+            })
+        {
+            2
+        } else {
+            1
+        }
+    }
+
     pub fn validate(&self) -> Result<()> {
         ensure!(
-            self.schema_version == 1
-                && matches!(self.operation.as_str(), "inspect" | "admit" | "qualify"),
+            self.schema_version == self.derived_version()
+                && matches!(
+                    self.operation.as_str(),
+                    "inspect" | "admit" | "qualify" | "propose" | "merge" | "close"
+                ),
             "unsupported adapter request"
         );
         coordinate(&self.coordinate)?;
@@ -1133,6 +1598,36 @@ impl AdapterRequest {
             crate::review::contract::sha(rev)?;
         }
         requirements(&self.required_checks)?;
+        ensure!(
+            self.landing
+                .as_deref()
+                .is_none_or(|l| matches!(l, "direct" | "pull-request")),
+            "unsupported landing mode"
+        );
+        let pull_request = self.landing.as_deref() == Some("pull-request");
+        match self.operation.as_str() {
+            "propose" | "merge" | "close" => ensure!(
+                pull_request
+                    && self.revision.is_some()
+                    && self.branch.is_some()
+                    && self.target.is_some()
+                    && (self.operation != "merge" || self.change.is_some()),
+                "pull-request operations need the candidate, its branch, target and change"
+            ),
+            // Inspection observes the target itself; admission relaxes only it.
+            "inspect" => ensure!(
+                self.target.is_none() && self.change.is_none(),
+                "inspection carries no pull request"
+            ),
+            "admit" => ensure!(
+                self.change.is_none() && (self.landing.is_none() || self.target == self.branch),
+                "pull-request admission applies only to its target branch"
+            ),
+            _ => ensure!(
+                self.landing.is_none() && self.target.is_none() && self.change.is_none(),
+                "qualification carries no landing"
+            ),
+        }
         if self.operation == "admit" {
             ensure!(
                 self.revision.is_some()
@@ -1140,7 +1635,7 @@ impl AdapterRequest {
                     && self
                         .plan
                         .as_ref()
-                        .is_some_and(|p| p.schema == "simit.ci-update-plan.v1"),
+                        .is_some_and(crate::project::CiUpdatePlan::schema_matches),
                 "admission needs exact candidate bytes and branch"
             );
         } else {
@@ -1166,6 +1661,18 @@ pub struct AdapterResponse {
     pub requirements: Vec<Requirement>,
     pub status: String,
     pub checks: Vec<Check>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub change: Option<Change>,
+}
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct Change {
+    pub id: String,
+    /// `open`, `merged` or `closed` (without merging).
+    pub state: String,
+    pub head: String,
+    pub base: String,
+    pub merge_commit: Option<String>,
 }
 #[derive(Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -1181,11 +1688,47 @@ pub struct Check {
 impl AdapterResponse {
     pub fn validate(&self, request: &AdapterRequest) -> Result<()> {
         ensure!(
-            self.schema_version == 1
+            self.schema_version == request.schema_version
                 && self.coordinate == request.coordinate
                 && !self.repository_id.is_empty(),
             "adapter identity mismatch"
         );
+        if !matches!(request.operation.as_str(), "propose" | "merge" | "close") {
+            ensure!(self.change.is_none(), "unexpected pull request");
+        } else if matches!(self.status.as_str(), "success" | "pending") {
+            // Closing an untracked candidate may find no pull request at all;
+            // the common response checks below still apply.
+            if let Some(change) = &self.change {
+                crate::review::contract::sha(&change.head)?;
+                if let Some(commit) = &change.merge_commit {
+                    crate::review::contract::sha(commit)?;
+                }
+                ensure!(
+                    !change.id.is_empty()
+                    && request.change.as_ref().is_none_or(|id| id == &change.id)
+                    // Closing retires a stale change whose head or target moved.
+                    && (request.operation == "close"
+                        || (request.target.as_ref() == Some(&change.base)
+                            && request.revision.as_ref() == Some(&change.head)))
+                    && matches!(change.state.as_str(), "open" | "merged" | "closed")
+                    && (change.state == "merged") == change.merge_commit.is_some()
+                    // Only an unmerged open merge is pending; close never leaves it open.
+                    && match request.operation.as_str() {
+                        "merge" => (self.status == "pending") == (change.state == "open"),
+                        "close" => self.status == "success" && change.state != "open",
+                        _ => self.status == "success",
+                    },
+                    "pull request differs from the qualified candidate or its target"
+                );
+            } else {
+                ensure!(
+                    request.operation == "close"
+                        && request.change.is_none()
+                        && self.status == "success",
+                    "pull-request operation returned no change"
+                );
+            }
+        }
         crate::review::contract::sha(&self.revision)?;
         sha256(&self.policy_digest)?;
         requirements(&self.requirements)?;

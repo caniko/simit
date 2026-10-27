@@ -36,10 +36,16 @@
       projectOverrides."git.example.org/team/legacy" = {
         enable = false;
         reason = "Independent CI owner";
+        blocker = "provider-mismatch";
       };
     };
   };
   rendered = mkConfig example;
+  migration = {
+    provider = "actions";
+    platform = "github";
+    runner = "ubuntu-24.04";
+  };
   workspaceWithState = stateDirectory:
     example
     // {
@@ -120,6 +126,13 @@
   };
 in
   assert rendered.schemaVersion == 1;
+  assert rendered.profiles.fleet.landing == "direct";
+  assert rendered.profiles.fleet.projectOverrides."git.example.org/team/legacy".landing == null;
+  assert lib.all (landing: accepts (example // {profiles.fleet = example.profiles.fleet // {inherit landing;};})) ["direct" "pull-request"];
+  assert accepts (example // {profiles.fleet = example.profiles.fleet // {projectOverrides."git.example.org/team/demo".landing = "pull-request";};});
+  assert lib.all (landing:
+    !(accepts (example // {profiles.fleet = example.profiles.fleet // {inherit landing;};}))
+    && !(accepts (example // {profiles.fleet = example.profiles.fleet // {projectOverrides."git.example.org/team/demo" = {inherit landing;};};}))) ["merge-queue" "Pull-Request" ""];
   assert !(accepts (withOtherForge "git.example.org"));
   assert !(accepts (withOtherForge "Git.Example.Org"));
   assert !(accepts (withForge {host = "Git.Example.Org";}));
@@ -140,14 +153,78 @@ in
     });
   assert lib.all (pattern: !(accepts (example // {profiles.fleet = example.profiles.fleet // {select = example.profiles.fleet.select // {includePaths = [pattern];};};})) && !(accepts (example // {profiles.fleet = example.profiles.fleet // {select = example.profiles.fleet.select // {excludePaths = [pattern];};};}))) ["[" "[abc" "]" "a**" "**a" "a/**b" "***"];
   assert lib.all (pattern: accepts (example // {profiles.fleet = example.profiles.fleet // {select = example.profiles.fleet.select // {includePaths = [pattern];};};})) ["**" "retired/**" "repos/*/demo?" "literal"];
+  assert lib.all (scopes: !(accepts (example // {profiles.fleet = example.profiles.fleet // {inherit scopes;};}))) [[] ["ci-extra"] ["release" "readme"] ["ci" "ci"] ["ci" "lock"]];
+  assert accepts (example // {profiles.fleet = example.profiles.fleet // {scopes = ["readme" "flake" "release" "ci-extra" "ci"];};});
+  assert lib.all ({
+    scopes,
+    migrate,
+  }:
+    !(accepts (example // {profiles.fleet = example.profiles.fleet // {inherit scopes migrate;};}))) [
+    {
+      scopes = ["ci"];
+      migrate = migration;
+    }
+    {
+      scopes = ["ci" "ci-extra" "readme"];
+      migrate = migration;
+    }
+    {
+      scopes = ["ci" "ci-extra"];
+      migrate = migration // {provider = "crow";};
+    }
+    {
+      scopes = ["ci" "ci-extra"];
+      migrate = migration // {platform = "forgejo";};
+    }
+    {
+      scopes = ["ci" "ci-extra"];
+      migrate = migration // {platform = "gitlab";};
+    }
+    {
+      scopes = ["ci" "ci-extra"];
+      migrate = migration // {runner = "two words";};
+    }
+  ];
+  assert accepts (example
+    // {
+      profiles.fleet =
+        example.profiles.fleet
+        // {
+          scopes = ["ci" "ci-extra"];
+          migrate = migration;
+        };
+    });
+  assert accepts (example
+    // {
+      profiles.fleet =
+        example.profiles.fleet
+        // {
+          scopes = ["ci" "ci-extra" "release"];
+          migrate = {
+            provider = "crow";
+            platform = "forgejo";
+            runner = "codeberg-small";
+          };
+        };
+    });
   assert !(accepts (example // {profiles.fleet = example.profiles.fleet // {rollout.canaries = ["git.example.org/team/typo"];};}));
   assert accepts (example // {profiles.fleet = example.profiles.fleet // {rollout.canaries = example.profiles.fleet.select.coordinates;};});
   assert lib.all (sourceRevision: !(accepts (withGenerator {inherit sourceRevision;}))) ["trunk" "abc123" (lib.concatStrings (lib.replicate 40 "A"))];
   assert lib.all (path:
     !(accepts (withInventory {file = path;}))
     && !(accepts (withInventory {command.program = path;}))
-    && !(accepts (withForge {credentialFile = path;}))) ["relative.json" "../inventory" "/run/../credentials"];
-  assert lib.all (credentialFile: !(accepts (withForge {inherit credentialFile;}))) ["/nix/store/fixture-token" "/nix//store/fixture-token"];
+    && !(accepts (withForge {credentialFile = path;}))
+    && !(accepts (withForge {ciCredentialFile = path;}))) ["relative.json" "../inventory" "/run/../credentials"];
+  assert lib.all (credentialFile: !(accepts (withForge {inherit credentialFile;})) && !(accepts (withForge {ciCredentialFile = credentialFile;}))) ["/nix/store/fixture-token" "/nix//store/fixture-token"];
+  # The CI credential is distinct from the forge credential, including path aliases.
+  assert lib.all (ciCredentialFile: !(accepts (withForge {inherit ciCredentialFile;}))) ["/run/credentials/not-present-during-evaluation" "/run//credentials/not-present-during-evaluation"];
+  assert (mkConfig (withForge {
+    ciCredentialFile = "/run/credentials/crow";
+    checkAuthority = "https://ci.git.example.org";
+    adapter = example.forges.enterprise.adapter // {arguments = ["projects" "update-forgejo-adapter"];};
+  })).forges.enterprise.ciCredentialFile
+  == "/run/credentials/crow";
+  assert rendered.forges.enterprise.ciCredentialFile == null;
   assert accepts (withInventory {file = "/runtime/not-present-inventory.json";});
   assert lib.all (apiUrl: !(accepts (withForge {inherit apiUrl;}))) ["http://git.example.org" "https://token@git.example.org/api" "https://git.example.org/api?token=x" "https://git.example.org/api#fragment"];
   assert lib.all (apiUrl: !(accepts (withForge {inherit apiUrl;}))) ["https://git.example.org:bogus/api" "https://git.example.org:/api" "https://git.example.org:443:80/api" "https://git.example.org:65536/api" "https://git.example.org:123456/api"];
@@ -168,6 +245,11 @@ in
       inherit credentialFile;
       adapter.program = "/runtime/adapter";
       adapterInputs."/runtime/helper.py" = lib.concatStrings (lib.replicate 64 "f");
+    }))
+    && !(accepts (withForge {
+      ciCredentialFile = credentialFile;
+      adapter.program = "/runtime/adapter";
+      adapterInputs."/runtime/helper.py" = lib.concatStrings (lib.replicate 64 "f");
     }))) ["/runtime/adapter" "/runtime//adapter" "/runtime/helper.py" "/runtime//helper.py"];
   assert accepts (withForge {
     credentialFile = "/run/credentials/not-present";
@@ -186,6 +268,21 @@ in
   assert lib.all (maintenanceRefPrefix: !(accepts (example // {profiles.fleet = example.profiles.fleet // {rollout = {inherit maintenanceRefPrefix;};};}))) ["maintenance" "bad..ref/" "bad.lock/" "bad//ref/" "bad@{ref/" "bad ref/"];
   assert lib.all (targetBranch: !(accepts (example // {profiles.fleet = example.profiles.fleet // {projectOverrides."git.example.org/team/demo" = {inherit targetBranch;};};}))) ["" "-option" "feature..ci" "feature/" "feature." ".hidden/ci" "feature.lock" "feature//ci" "feature@{ci" "feature ci"];
   assert lib.all (targetBranch: accepts (example // {profiles.fleet = example.profiles.fleet // {projectOverrides."git.example.org/team/demo" = {inherit targetBranch;};};})) ["trunk" "custom-layout/ci" "feature./ci"];
+  assert rendered.profiles.fleet.projectOverrides."git.example.org/team/legacy".blocker == "provider-mismatch";
+  assert lib.all (blocker:
+    !(accepts (example
+      // {
+        profiles.fleet =
+          example.profiles.fleet
+          // {
+            projectOverrides."git.example.org/team/demo" = {
+              enable = false;
+              reason = "x";
+              inherit blocker;
+            };
+          };
+      }))) ["" "Provider" "-x" "1x" "pr_required" "pr required"];
+  assert !(accepts (example // {profiles.fleet = example.profiles.fleet // {projectOverrides."git.example.org/team/demo".blocker = "pr-required";};}));
   assert lib.all (state: !(accepts (withOtherState state))) ["/state" "/state/custom-updater" "/state//custom-updater/child/"];
   assert accepts (withOtherState "/state/custom-updater-sibling");
   assert lib.all (hash:

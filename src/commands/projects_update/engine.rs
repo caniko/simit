@@ -213,6 +213,7 @@ pub fn policy_digest(
     profile: &Profile,
     workspace: &Workspace,
     consumer_forge: Option<&str>,
+    coordinate: Option<&str>,
 ) -> Result<String> {
     let generator = config
         .forges
@@ -226,12 +227,38 @@ pub fn policy_digest(
                 .context("unknown consumer forge")
         })
         .transpose()?;
-    canonical_digest(&(profile, workspace, generator, consumer))
+    let Some(coordinate) = coordinate else {
+        return canonical_digest(&(profile, workspace, generator, consumer));
+    };
+    // Other repositories' enrollment and overrides are not this transaction's
+    // policy, so editing them keeps its pending candidate or pull request.
+    let mut scoped = serde_json::to_value(profile)?;
+    let enrolled = serde_json::Value::from(coordinate);
+    for list in ["/select/coordinates", "/rollout/canaries"] {
+        if let Some(values) = scoped
+            .pointer_mut(list)
+            .and_then(serde_json::Value::as_array_mut)
+        {
+            values.retain(|value| value == &enrolled);
+        }
+    }
+    if let Some(overrides) = scoped["projectOverrides"].as_object_mut() {
+        overrides.retain(|key, _| key == coordinate);
+    }
+    canonical_digest(&(scoped, workspace, generator, consumer))
+}
+
+fn is_legacy(version: &u32) -> bool {
+    *version == 0
 }
 
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct Receipt {
+    /// Absent (0) in v1 receipts, which always landed directly. Older binaries
+    /// reject v2 fields as unknown rather than misreading a pull request.
+    #[serde(default, skip_serializing_if = "is_legacy")]
+    pub schema_version: u32,
     pub coordinate: String,
     pub config_digest: String,
     pub repository_id: String,
@@ -243,6 +270,29 @@ pub struct Receipt {
     pub phase: String,
     pub managed: BTreeMap<String, Option<String>>,
     pub diff: String,
+    /// Generator source revision that produced this receipt; absent in
+    /// receipts written before it was recorded.
+    #[serde(default)]
+    pub generator_revision: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub landing: Option<String>,
+    /// Forge identifier of the candidate's pull request.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub change: Option<String>,
+    /// Target commit that merged the candidate, when the forge landed one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub landed: Option<String>,
+    /// Policy scoped to this coordinate; v2 receipts resume against it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub project_policy_digest: Option<String>,
+    /// Committed, admitted and resume-verified project files that the adopted
+    /// baseline does not own.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub patches: BTreeMap<String, Option<String>>,
+    /// The primary qualification set, recorded (v2) only when other scopes
+    /// carry files beyond it. v1 receipts qualify every committed output.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub qualification: Vec<String>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -250,6 +300,17 @@ pub struct Receipt {
 struct Baseline {
     repository_id: String,
     managed: BTreeMap<String, Option<String>>,
+    /// Scopes the baseline was adopted under; earlier baselines were `ci` only.
+    #[serde(default = "primary_scope", skip_serializing_if = "only_primary")]
+    scopes: Vec<String>,
+}
+
+fn primary_scope() -> Vec<String> {
+    vec!["ci".into()]
+}
+
+fn only_primary(scopes: &[String]) -> bool {
+    scopes == ["ci"]
 }
 
 pub fn status(root: &Path) -> Result<Vec<Receipt>> {
@@ -281,18 +342,63 @@ fn request(
     workflows: Vec<String>,
     required_checks: Vec<Requirement>,
 ) -> AdapterRequest {
-    AdapterRequest {
+    let mut request = AdapterRequest {
         schema_version: 1,
         operation: operation.into(),
         coordinate: coordinate.into(),
         api_url: forge.api_url.clone(),
         credential_file: forge.credential_file.clone(),
+        ci_credential_file: forge.ci_credential_file.clone(),
         authority: forge.check_authority.clone(),
         revision: revision.map(str::to_owned),
         branch: branch.map(str::to_owned),
         workflows,
         required_checks,
         plan: None,
+        landing: None,
+        target: None,
+        change: None,
+    };
+    request.schema_version = request.derived_version();
+    request
+}
+
+/// Marks a request as pull-request landing into `target`; this is protocol v2.
+fn pull_request(
+    mut request: AdapterRequest,
+    target: Option<&str>,
+    change: Option<&str>,
+) -> AdapterRequest {
+    request.landing = Some("pull-request".into());
+    request.target = target.map(str::to_owned);
+    request.change = change.map(str::to_owned);
+    request.schema_version = request.derived_version();
+    request
+}
+
+/// Retires a published maintenance ref under a lease on its candidate. This
+/// is cleanup: a ref that is gone or now belongs to another writer stays.
+fn delete_maintenance_ref(checkout: &Path, branch: &str, candidate: &str) {
+    let reference = format!("refs/heads/{branch}");
+    let result = git(checkout, &["ls-remote", "origin", &reference]).and_then(|existing| {
+        if existing.is_empty() {
+            eprintln!("maintenance ref {branch} is already gone");
+            return Ok(());
+        }
+        git(
+            checkout,
+            &[
+                "push",
+                "--quiet",
+                &format!("--force-with-lease={reference}:{candidate}"),
+                "origin",
+                &format!(":{reference}"),
+            ],
+        )
+        .map(drop)
+    });
+    if let Err(error) = result {
+        eprintln!("retained maintenance ref {branch}: {error:#}");
     }
 }
 
@@ -343,13 +449,26 @@ fn adapter(forge: &Forge, request: &AdapterRequest, root: &Path) -> Result<Adapt
             }
         }
     }
-    if let Some(credential) = &request.credential_file {
+    let mut tokens = Vec::new();
+    for (index, credential) in [&request.credential_file, &request.ci_credential_file]
+        .into_iter()
+        .flatten()
+        .enumerate()
+    {
         ensure!(
             !inputs.contains_key(credential),
             "adapter credential overlaps code inputs"
         );
-        let pinned = snapshots.path().join("credential");
-        fs::write(&pinned, credential_bytes(credential)?)?;
+        let bytes = credential_bytes(credential)?;
+        // Path checks miss symlinks, hard links and copies; each token goes to
+        // its own origin only, so the snapshotted secrets must differ.
+        ensure!(
+            !tokens.contains(&bytes.trim_ascii().to_vec()),
+            "forge and CI credentials must hold different tokens"
+        );
+        tokens.push(bytes.trim_ascii().to_vec());
+        let pinned = snapshots.path().join(format!("credential-{index}"));
+        fs::write(&pinned, bytes)?;
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
@@ -538,21 +657,22 @@ fn inspect(
     forge: &Forge,
     project: &Project,
     target: Option<&str>,
+    landing: &str,
     root: &Path,
 ) -> Result<AdapterResponse> {
-    let response = adapter(
+    let mut request = request(
         forge,
-        &request(
-            forge,
-            &project.coordinate,
-            "inspect",
-            None,
-            target,
-            vec![],
-            vec![],
-        ),
-        root,
-    )?;
+        &project.coordinate,
+        "inspect",
+        None,
+        target,
+        vec![],
+        vec![],
+    );
+    if landing == "pull-request" {
+        request = pull_request(request, None, None);
+    }
+    let response = adapter(forge, &request, root)?;
     ensure!(
         response.status == "success",
         "repository inspection incomplete"
@@ -621,13 +741,18 @@ fn git_metadata(checkout: &Path) -> Result<String> {
     canonical_digest(&entries)
 }
 
-fn generate(executable: &Path, checkout: &Path, state_directory: &Path) -> Result<CiUpdatePlan> {
+fn generate(
+    executable: &Path,
+    checkout: &Path,
+    state_directory: &Path,
+    argv: &[String],
+) -> Result<CiUpdatePlan> {
     let metadata = git_metadata(checkout)?;
     let configuration = git(checkout, &["config", "--null", "--list", "--show-origin"])?;
     let nix_state = tempfile::tempdir()?;
     let output = super::checkpoint::protect(state_directory, checkout, || {
         run_tool(
-            super::sandbox::generation(executable, checkout, nix_state.path())?,
+            super::sandbox::generation(executable, checkout, nix_state.path(), argv)?,
             900,
         )
         .context("credential-free generation sandbox failed")
@@ -647,13 +772,14 @@ fn generate(executable: &Path, checkout: &Path, state_directory: &Path) -> Resul
         "read-only generator plan modified candidate sources"
     );
     ensure!(
-        plan.schema == "simit.ci-update-plan.v1",
+        plan.schema_matches(),
         "generator does not support the enrolled generation protocol"
     );
     let mut seen = BTreeSet::new();
     for path in plan
         .files
         .iter()
+        .chain(&plan.patches)
         .map(|f| &f.relative_path)
         .chain(&plan.obsolete)
     {
@@ -663,8 +789,144 @@ fn generate(executable: &Path, checkout: &Path, state_directory: &Path) -> Resul
             "duplicate/overlapping generation ownership"
         );
     }
-    ensure!(!plan.files.is_empty(), "empty generation plan");
     Ok(plan)
+}
+
+/// Generate every enrolled scope into one plan, returning it with the `ci`
+/// qualification paths. Other scopes' files are carried, not qualified.
+fn generate_scopes(
+    executable: &Path,
+    checkout: &Path,
+    state_directory: &Path,
+    profile: &Profile,
+) -> Result<(CiUpdatePlan, Vec<String>)> {
+    let mut plans = BTreeMap::new();
+    for scope in &profile.scopes {
+        let argv: &[&str] = match scope.as_str() {
+            "ci" => &["init", "ci", "--primary-only", "--plan-json"],
+            "ci-extra" => &["init", "ci", "--plan-json"],
+            "release" => &["init", "release", "--plan-json"],
+            "flake" => &["init", "flake", "--plan-json"],
+            "readme" => &["upgrade", "--plan-json"],
+            _ => anyhow::bail!("unsupported generation scope {scope}"),
+        };
+        let mut argv = argv.iter().map(|arg| arg.to_string()).collect::<Vec<_>>();
+        if let Some(migration) = &profile.migrate {
+            let backend = [
+                format!("--ci-provider={}", migration.provider),
+                format!("--platform={}", migration.platform),
+            ];
+            match scope.as_str() {
+                "ci" | "ci-extra" => argv.extend(backend.into_iter().chain([
+                    format!("--runner={}", migration.runner),
+                    "--reset-step-runners".into(),
+                ])),
+                "release" => argv.extend(
+                    backend
+                        .into_iter()
+                        .chain([format!("--runner={}", migration.runner)]),
+                ),
+                _ => {}
+            }
+        }
+        plans.insert(
+            scope.as_str(),
+            generate(executable, checkout, state_directory, &argv)?,
+        );
+    }
+    let mut merged = plans
+        .remove("ci")
+        .context("profiles require the ci scope")?;
+    ensure!(
+        !merged.files.is_empty() && merged.patches.is_empty(),
+        "empty generation plan"
+    );
+    let qualification = workflows(&merged);
+    if let Some(extra) = plans.remove("ci-extra") {
+        // The full plan must contain the primary plan byte for byte, so both
+        // generations agree on what the qualification set means.
+        ensure!(
+            merged.files.iter().all(|file| extra
+                .files
+                .iter()
+                .any(|other| other.relative_path == file.relative_path
+                    && other.content == file.content))
+                && merged
+                    .obsolete
+                    .iter()
+                    .all(|path| extra.obsolete.contains(path)),
+            "ci and ci-extra generation plans disagree"
+        );
+        merged = extra;
+    }
+    let mut readme_patches = Vec::new();
+    let mut seen = merged
+        .files
+        .iter()
+        .chain(&merged.patches)
+        .map(|file| file.relative_path.clone())
+        .chain(merged.obsolete.iter().cloned())
+        .collect::<BTreeSet<_>>();
+    for (scope, plan) in plans {
+        for path in plan
+            .files
+            .iter()
+            .chain(&plan.patches)
+            .map(|file| &file.relative_path)
+            .chain(&plan.obsolete)
+        {
+            ensure!(
+                seen.insert(path.clone()),
+                "generation scope {scope} overlaps another scope at {}",
+                path.display()
+            );
+        }
+        merged.files.extend(plan.files);
+        merged.obsolete.extend(plan.obsolete);
+        if scope == "readme" {
+            readme_patches = plan.patches;
+        } else {
+            merged.patches.extend(plan.patches);
+        }
+    }
+    // README badges derive from the checkout, not the candidate this run
+    // builds. When the run moves badge inputs (removed files, or edits to
+    // existing outputs, CI workflows or the flake), a patch computed from the
+    // old tree would be stale; leave the README for the next run, which
+    // regenerates it from the landed files.
+    let moves_badge_inputs = !merged.obsolete.is_empty()
+        || merged.patches.iter().any(|patch| {
+            // Config patches (e.g. an inferred publish_crates) change badges.
+            fs::read_to_string(checkout.join(&patch.relative_path))
+                .ok()
+                .as_deref()
+                != Some(patch.content.as_str())
+        })
+        || merged.files.iter().any(|file| {
+            let path = checkout.join(&file.relative_path);
+            let badge_input = file.relative_path == Path::new("flake.nix")
+                || [".forgejo/workflows/ci.yaml", ".github/workflows/ci.yaml"]
+                    .iter()
+                    .any(|ci| file.relative_path == Path::new(ci));
+            (path.exists() || badge_input)
+                && fs::read_to_string(&path).ok().as_deref() != Some(file.content.as_str())
+        });
+    for patch in merged.patches.iter().chain(&readme_patches) {
+        ensure!(
+            ![".github/workflows", ".forgejo/workflows", ".crow"]
+                .iter()
+                .any(|directory| patch.relative_path.starts_with(directory)),
+            "patches cannot target workflow directory path {}",
+            patch.relative_path.display()
+        );
+    }
+    if !moves_badge_inputs {
+        merged.patches.extend(readme_patches);
+    }
+    Ok((
+        CiUpdatePlan::new(merged.files, merged.obsolete, merged.patches),
+        qualification,
+    ))
 }
 
 fn hashes(
@@ -787,10 +1049,20 @@ pub fn update(
     );
     private_directory(&root)?;
     let receipt_path = root.join("receipt.json");
-    let config_digest = policy_digest(config, profile, workspace, Some(&project.forge))?;
+    let config_digest = policy_digest(config, profile, workspace, Some(&project.forge), None)?;
+    let project_digest = policy_digest(
+        config,
+        profile,
+        workspace,
+        Some(&project.forge),
+        Some(&project.coordinate),
+    )?;
     let over = profile.project_overrides.get(&project.coordinate);
     let target = over.and_then(|o| o.target_branch.as_deref());
-    let observed = inspect(forge, project, target, &root)?;
+    let landing = over
+        .and_then(|o| o.landing.as_deref())
+        .unwrap_or(&profile.landing);
+    let observed = inspect(forge, project, target, landing, &root)?;
     let mut requirements = observed.requirements.clone();
     for r in profile
         .required_checks
@@ -823,10 +1095,64 @@ pub fn update(
         );
     }
     let checkout = root.join("checkout");
+    let archive = |retained: &Receipt| -> Result<()> {
+        // Archive before replacing the checkout, so interruption cannot leave an
+        // unfinished receipt referring to a new clone. Adopted baselines survive.
+        fs::rename(
+            &receipt_path,
+            root.join(format!("invalidated-{}.json", canonical_digest(retained)?)),
+        )?;
+        File::open(&root)?.sync_all()?;
+        if push {
+            delete_maintenance_ref(&checkout, &retained.branch, &retained.candidate);
+        }
+        Ok(())
+    };
+    // A preview never writes to the forge, so it reports a parked pull request
+    // as it stands rather than closing, proposing or retiring anything.
+    if !push && previous.as_ref().is_some_and(|r| r.phase == "proposed") {
+        return previous.context("missing parked receipt");
+    }
+    // Re-read a parked pull request first. A stale one is closed rather than
+    // merged, since its qualification no longer describes the target.
+    if let Some(retained) = previous.as_mut().filter(|r| r.phase == "proposed") {
+        let stale = observed.revision != retained.source
+            || observed.policy_digest != retained.policy_digest
+            || observed.default_branch != retained.default_branch
+            || retained.project_policy_digest.as_ref() != Some(&project_digest);
+        let reread = pull_request(
+            request(
+                forge,
+                &project.coordinate,
+                if stale { "close" } else { "propose" },
+                Some(&retained.candidate),
+                Some(&retained.branch),
+                vec![],
+                vec![],
+            ),
+            Some(target.unwrap_or(&retained.default_branch)),
+            retained.change.as_deref(),
+        );
+        match adapter(forge, &reread, &root)?.change {
+            // Merged, possibly by a human: adoption verifies what landed.
+            Some(change) if change.state == "merged" => {
+                retained.change = Some(change.id);
+                retained.landed = change.merge_commit;
+                retained.phase = "adopting".into();
+                save(&receipt_path, &*retained)?;
+            }
+            Some(change) if change.state == "open" => retained.change = Some(change.id),
+            _ => {
+                archive(retained)?;
+                previous = None;
+            }
+        }
+    }
     if let Some(retained) = previous.as_ref().filter(|receipt| {
         !matches!(receipt.phase.as_str(), "qualified" | "unchanged")
             && observed.revision != receipt.source
             && observed.revision != receipt.candidate
+            && receipt.landed.as_ref() != Some(&observed.revision)
     }) {
         ensure!(
             matches!(
@@ -860,13 +1186,7 @@ pub fn update(
             .is_empty(),
             "remote advanced beyond the landed candidate; adoption reconciliation is required"
         );
-        // Archive before replacing the checkout, so interruption cannot leave an
-        // unfinished receipt referring to a new clone. Adopted baselines survive.
-        fs::rename(
-            &receipt_path,
-            root.join(format!("invalidated-{}.json", canonical_digest(retained)?)),
-        )?;
-        File::open(&root)?.sync_all()?;
+        archive(retained)?;
         previous = None;
     }
     if let Some(previous) = previous
@@ -874,7 +1194,11 @@ pub fn update(
         .filter(|r| !matches!(r.phase.as_str(), "qualified" | "unchanged"))
     {
         ensure!(
-            previous.config_digest == config_digest,
+            if previous.schema_version >= 2 {
+                previous.project_policy_digest.as_ref() == Some(&project_digest)
+            } else {
+                previous.config_digest == config_digest
+            },
             "an unfinished rollout uses another policy; resume it with its original configuration"
         );
         ensure!(
@@ -884,7 +1208,9 @@ pub fn update(
             "repository identity/default branch/protection changed during rollout"
         );
         ensure!(
-            observed.revision == previous.source || observed.revision == previous.candidate,
+            observed.revision == previous.source
+                || observed.revision == previous.candidate
+                || previous.landed.as_ref() == Some(&observed.revision),
             "remote moved; candidate qualification invalidated"
         );
         ensure!(
@@ -961,9 +1287,19 @@ pub fn update(
     let mut receipt = if let Some(previous) =
         previous.filter(|r| !matches!(r.phase.as_str(), "qualified" | "unchanged"))
     {
-        previous
+        // The matching config digest binds this receipt to the same generator.
+        Receipt {
+            generator_revision: Some(profile.generator.source_revision.clone()),
+            ..previous
+        }
     } else {
-        let plan = generate(&generator, &checkout, &state_directory)?;
+        let (plan, workflow_paths) =
+            generate_scopes(&generator, &checkout, &state_directory, profile)?;
+        let patch_paths = plan
+            .patches
+            .iter()
+            .map(|f| f.relative_path.to_string_lossy().into_owned())
+            .collect::<Vec<_>>();
         let paths = plan
             .files
             .iter()
@@ -975,6 +1311,8 @@ pub fn update(
             )
             .collect::<Vec<_>>();
         let before = hashes(&checkout, paths.clone().into_iter(), None)?;
+        // Patches get the same path and symlink checks as owned outputs.
+        hashes(&checkout, patch_paths.iter().cloned(), None)?;
         let baseline_path = root.join("baseline.json");
         if baseline_path.exists() {
             let baseline: Baseline = crate::review::read_json(&baseline_path)?;
@@ -996,11 +1334,18 @@ pub fn update(
                     .all(|(path, hash)| hash.is_none() || before.contains_key(path)),
                 "generation plan abandons a managed path; retain it or explicitly mark it obsolete"
             );
+            // Widening scopes adopts their existing generated files once, under the
+            // same explicit enrollment as the initial baseline.
+            let widened = profile
+                .scopes
+                .iter()
+                .any(|scope| !baseline.scopes.contains(scope));
             ensure!(
-                before
-                    .keys()
-                    .all(|p| baseline.managed.contains_key(p) || before[p].is_none()),
-                "newly managed path already exists outside the baseline"
+                (profile.enroll_current && widened)
+                    || before
+                        .keys()
+                        .all(|p| baseline.managed.contains_key(p) || before[p].is_none()),
+                "newly managed path already exists outside the baseline; enroll it with enrollCurrent"
             );
         } else {
             ensure!(
@@ -1008,7 +1353,6 @@ pub fn update(
                 "initial managed baseline is not enrolled"
             );
         }
-        let workflow_paths = workflows(&plan);
         ensure!(
             !workflow_paths.is_empty(),
             "candidate has no owned qualification paths"
@@ -1022,16 +1366,28 @@ pub fn update(
             false,
             false,
         )?;
+        crate::project::write_generated_files(&checkout, &plan.patches)?;
         let mut stage = vec!["--literal-pathspecs", "add", "--all", "--force", "--"];
         stage.extend(
             paths
                 .iter()
                 .filter(|p| checkout.join(p).exists() || before[*p].is_some())
+                .chain(&patch_paths)
                 .map(String::as_str),
         );
         git(&checkout, &stage)?;
         let tree = git(&checkout, &["write-tree"])?;
         let managed = hashes(&checkout, paths.into_iter(), Some(&tree))?;
+        let patches = hashes(&checkout, patch_paths.into_iter(), Some(&tree))?;
+        // ponytail: quadratic scan over a handful of paths.
+        let qualification = if managed
+            .iter()
+            .all(|(path, hash)| hash.is_none() || workflow_paths.contains(path))
+        {
+            vec![]
+        } else {
+            workflow_paths.clone()
+        };
         let diff = git(
             &checkout,
             &[
@@ -1043,7 +1399,28 @@ pub fn update(
                 "--",
             ],
         )?;
-        if diff.is_empty() {
+        let receipt = Receipt {
+            schema_version: 2,
+            coordinate: project.coordinate.clone(),
+            config_digest,
+            repository_id: observed.repository_id.clone(),
+            source: observed.revision.clone(),
+            candidate: String::new(),
+            branch: String::new(),
+            default_branch: observed.default_branch.clone(),
+            policy_digest: observed.policy_digest.clone(),
+            phase: "preview".into(),
+            managed,
+            diff,
+            patches,
+            qualification,
+            landing: Some(landing.into()),
+            change: None,
+            landed: None,
+            generator_revision: Some(profile.generator.source_revision.clone()),
+            project_policy_digest: Some(project_digest.clone()),
+        };
+        if receipt.diff.is_empty() {
             if push {
                 let qualified = wait(
                     forge,
@@ -1064,7 +1441,7 @@ pub fn update(
                         && qualified.repository_id == observed.repository_id,
                     "unchanged source qualification is incomplete"
                 );
-                let fresh = inspect(forge, project, target, &root)?;
+                let fresh = inspect(forge, project, target, landing, &root)?;
                 ensure!(
                     fresh.revision == observed.revision
                         && fresh.repository_id == observed.repository_id
@@ -1076,22 +1453,15 @@ pub fn update(
                     &baseline_path,
                     &Baseline {
                         repository_id: observed.repository_id.clone(),
-                        managed: managed.clone(),
+                        managed: receipt.managed.clone(),
+                        scopes: profile.scopes.clone(),
                     },
                 )?;
             }
             let receipt = Receipt {
-                coordinate: project.coordinate.clone(),
-                config_digest,
-                repository_id: observed.repository_id,
-                source: observed.revision.clone(),
-                candidate: observed.revision,
-                branch: String::new(),
-                default_branch: observed.default_branch,
-                policy_digest: observed.policy_digest,
+                candidate: observed.revision.clone(),
                 phase: "unchanged".into(),
-                managed,
-                diff,
+                ..receipt
             };
             if push {
                 save(&receipt_path, &receipt)?;
@@ -1099,19 +1469,7 @@ pub fn update(
             return Ok(receipt);
         }
         if !push {
-            return Ok(Receipt {
-                coordinate: project.coordinate.clone(),
-                config_digest,
-                repository_id: observed.repository_id,
-                source: observed.revision,
-                candidate: String::new(),
-                branch: String::new(),
-                default_branch: observed.default_branch,
-                policy_digest: observed.policy_digest,
-                phase: "preview".into(),
-                managed,
-                diff,
-            });
+            return Ok(receipt);
         }
         let author = git(&checkout, &["var", "GIT_AUTHOR_IDENT"])?;
         let committer = git(&checkout, &["var", "GIT_COMMITTER_IDENT"])?;
@@ -1161,7 +1519,7 @@ pub fn update(
             changed
                 .split('\0')
                 .filter(|p| !p.is_empty())
-                .all(|p| managed.contains_key(p)),
+                .all(|p| receipt.managed.contains_key(p) || receipt.patches.contains_key(p)),
             "commit modified paths outside generator ownership"
         );
         let branch = format!(
@@ -1174,22 +1532,19 @@ pub fn update(
             &["check-ref-format", &format!("refs/heads/{branch}")],
         )?;
         Receipt {
-            coordinate: project.coordinate.clone(),
-            config_digest,
-            repository_id: observed.repository_id.clone(),
-            source: observed.revision.clone(),
             candidate,
             branch,
-            default_branch: observed.default_branch.clone(),
-            policy_digest: observed.policy_digest.clone(),
             phase: "prepared".into(),
-            managed,
-            diff,
+            ..receipt
         }
     };
+    // Patches are verified against the candidate only; the adopted baseline
+    // never owns them.
     ensure!(
         hashes(&checkout, receipt.managed.keys().cloned(), Some("HEAD"))? == receipt.managed
             && hashes(&checkout, receipt.managed.keys().cloned(), None)? == receipt.managed
+            && hashes(&checkout, receipt.patches.keys().cloned(), Some("HEAD"))? == receipt.patches
+            && receipt.patches.values().all(Option::is_some)
             && git(&checkout, &["status", "--porcelain"])?.is_empty(),
         "retained candidate files changed"
     );
@@ -1211,10 +1566,8 @@ pub fn update(
     // Rebuild admission from verified committed blobs on both first publication
     // and resume. Clean filters and prior admission never substitute for the
     // exact bytes this candidate will execute under the current forge policy.
-    let admission_plan = CiUpdatePlan {
-        schema: "simit.ci-update-plan.v1".into(),
-        files: receipt
-            .managed
+    let committed = |paths: &BTreeMap<String, Option<String>>| -> Result<Vec<_>> {
+        paths
             .iter()
             .filter(|(_, hash)| hash.is_some())
             .map(|(path, _)| {
@@ -1226,25 +1579,40 @@ pub fn update(
                     )?,
                 })
             })
-            .collect::<Result<_>>()?,
-        obsolete: receipt
+            .collect()
+    };
+    let admission_plan = CiUpdatePlan::new(
+        committed(&receipt.managed)?,
+        receipt
             .managed
             .iter()
             .filter(|(_, hash)| hash.is_none())
             .map(|(path, _)| path.into())
             .collect(),
-    };
+        committed(&receipt.patches)?,
+    );
+    // Only the primary CI set qualifies; other owned files are carried.
     let workflow_paths: Vec<String> = crate::review::read_json(&root.join("workflows.json"))?;
+    // The saved set is bound to the receipt, so it cannot be silently narrowed.
+    let expected: BTreeSet<&String> = if receipt.qualification.is_empty() {
+        receipt
+            .managed
+            .iter()
+            .filter(|(_, hash)| hash.is_some())
+            .map(|(path, _)| path)
+            .collect()
+    } else {
+        receipt.qualification.iter().collect()
+    };
     ensure!(
-        workflow_paths.iter().collect::<BTreeSet<_>>()
-            == receipt
-                .managed
+        !workflow_paths.is_empty()
+            && workflow_paths.iter().collect::<BTreeSet<_>>() == expected
+            && workflow_paths
                 .iter()
-                .filter(|(_, hash)| hash.is_some())
-                .map(|(path, _)| path)
-                .collect(),
+                .all(|path| receipt.managed.get(path).is_some_and(Option::is_some)),
         "retained workflow ownership differs from the candidate"
     );
+    let target_branch = target.unwrap_or(&observed.default_branch);
     let admit = |branch: &str| -> Result<()> {
         let mut admission = request(
             forge,
@@ -1256,6 +1624,10 @@ pub fn update(
             requirements.clone(),
         );
         admission.plan = Some(admission_plan.clone());
+        if landing == "pull-request" && branch == target_branch {
+            admission = pull_request(admission, Some(branch), None);
+        }
+        admission.schema_version = admission.derived_version();
         let evidence = adapter(forge, &admission, &root)?;
         ensure!(
             evidence.status == "success" && evidence.repository_id == receipt.repository_id,
@@ -1263,14 +1635,11 @@ pub fn update(
         );
         Ok(())
     };
-    for branch in [
-        receipt.branch.as_str(),
-        target.unwrap_or(&observed.default_branch),
-    ] {
+    for branch in [receipt.branch.as_str(), target_branch] {
         admit(branch)?;
     }
     save(&receipt_path, &receipt)?;
-    if observed.revision == receipt.source {
+    if observed.revision == receipt.source && receipt.landed.is_none() {
         let remote_ref = format!("refs/heads/{}", receipt.branch);
         let existing = git(&checkout, &["ls-remote", "origin", &remote_ref])?;
         if existing.is_empty() {
@@ -1312,7 +1681,7 @@ pub fn update(
         if candidate.status != "success" {
             return Ok(receipt);
         }
-        let fresh = inspect(forge, project, target, &root)?;
+        let fresh = inspect(forge, project, target, landing, &root)?;
         ensure!(
             fresh.repository_id == receipt.repository_id
                 && fresh.revision == receipt.source
@@ -1320,39 +1689,97 @@ pub fn update(
                 && fresh.policy_digest == receipt.policy_digest,
             "remote identity, source or policy moved after qualification"
         );
-        admit(target.unwrap_or(&receipt.default_branch))?;
-        receipt.phase = "landing".into();
-        save(&receipt_path, &receipt)?;
-        // The candidate is a direct child of source; the explicit lease is a compare-and-swap.
-        let target_ref = format!("refs/heads/{}", target.unwrap_or(&receipt.default_branch));
-        git(
-            &checkout,
-            &[
-                "push",
-                &format!("--force-with-lease={target_ref}:{}", receipt.source),
-                "origin",
-                &format!("{}:{target_ref}", receipt.candidate),
-            ],
-        )?;
+        admit(target_branch)?;
+        if landing == "pull-request" {
+            receipt.phase = "proposed".into();
+            save(&receipt_path, &receipt)?;
+            let change = |operation: &str, id: Option<&str>| {
+                pull_request(
+                    request(
+                        forge,
+                        &project.coordinate,
+                        operation,
+                        Some(&receipt.candidate),
+                        Some(&receipt.branch),
+                        vec![],
+                        vec![],
+                    ),
+                    Some(target_branch),
+                    id,
+                )
+            };
+            let proposed = adapter(forge, &change("propose", None), &root)?
+                .change
+                .context("missing proposed pull request")?;
+            let merged = if proposed.state == "open" {
+                wait(forge, &change("merge", Some(&proposed.id)), &root, deadline)?
+                    .change
+                    .context("missing merged pull request")?
+            } else {
+                proposed
+            };
+            receipt.change = Some(merged.id.clone());
+            match merged.state.as_str() {
+                // Parked until approvals or forge mergeability arrive.
+                "open" => {
+                    save(&receipt_path, &receipt)?;
+                    return Ok(receipt);
+                }
+                "closed" => {
+                    save(&receipt_path, &receipt)?;
+                    anyhow::bail!("pull request {} closed without merging", merged.id)
+                }
+                _ => receipt.landed = merged.merge_commit,
+            }
+        } else {
+            receipt.phase = "landing".into();
+            save(&receipt_path, &receipt)?;
+            // The candidate is a direct child of source; the explicit lease is a compare-and-swap.
+            let target_ref = format!("refs/heads/{target_branch}");
+            git(
+                &checkout,
+                &[
+                    "push",
+                    &format!("--force-with-lease={target_ref}:{}", receipt.source),
+                    "origin",
+                    &format!("{}:{target_ref}", receipt.candidate),
+                ],
+            )?;
+        }
     }
     receipt.phase = "adopting".into();
     save(&receipt_path, &receipt)?;
-    let fresh = inspect(forge, project, target, &root)?;
+    // A pull request can land a merge, squash or rebase commit instead of the
+    // candidate. It must carry exactly the candidate's tree onto its source.
+    let landed = receipt.landed.clone().unwrap_or(receipt.candidate.clone());
+    let fresh = inspect(forge, project, target, landing, &root)?;
     ensure!(
         fresh.repository_id == receipt.repository_id
-            && fresh.revision == receipt.candidate
+            && fresh.revision == landed
             && fresh.default_branch == receipt.default_branch
             && fresh.policy_digest == receipt.policy_digest,
         "landed source or policy changed before adoption"
     );
+    if landed != receipt.candidate {
+        git(
+            &checkout,
+            &["fetch", "--quiet", "--no-tags", "origin", &landed],
+        )?;
+        let tree = |commit: &str| git(&checkout, &["rev-parse", &format!("{commit}^{{tree}}")]);
+        ensure!(
+            tree(&landed)? == tree(&receipt.candidate)?
+                && git(&checkout, &["rev-parse", &format!("{landed}^1")])? == receipt.source,
+            "landed commit differs from the qualified candidate tree or source"
+        );
+    }
     let adopted = wait(
         forge,
         &request(
             forge,
             &project.coordinate,
             "qualify",
-            Some(&receipt.candidate),
-            Some(target.unwrap_or(&receipt.default_branch)),
+            Some(&landed),
+            Some(target_branch),
             workflow_paths,
             requirements,
         ),
@@ -1364,9 +1791,9 @@ pub fn update(
         "adoption qualification repository changed"
     );
     if adopted.status == "success" {
-        let final_state = inspect(forge, project, target, &root)?;
+        let final_state = inspect(forge, project, target, landing, &root)?;
         ensure!(
-            final_state.revision == receipt.candidate
+            final_state.revision == landed
                 && final_state.repository_id == receipt.repository_id
                 && final_state.policy_digest == receipt.policy_digest
                 && final_state.default_branch == receipt.default_branch,
@@ -1377,10 +1804,12 @@ pub fn update(
             &Baseline {
                 repository_id: receipt.repository_id.clone(),
                 managed: receipt.managed.clone(),
+                scopes: profile.scopes.clone(),
             },
         )?;
         receipt.phase = "qualified".into();
         save(&receipt_path, &receipt)?;
+        delete_maintenance_ref(&checkout, &receipt.branch, &receipt.candidate);
     }
     Ok(receipt)
 }
@@ -1403,6 +1832,27 @@ mod tests {
         assert!(save(&path, &json!({"diff": diff})).is_err());
         let previous: String = crate::review::read_json(&path).unwrap();
         assert_eq!(previous, "previous readable receipt");
+    }
+
+    #[test]
+    fn v1_receipts_and_ci_baselines_keep_their_original_shape() {
+        let receipt: Receipt = serde_json::from_value(json!({
+            "coordinate":"forge.example/team/demo","configDigest":"","repositoryId":"1","source":"",
+            "candidate":"","branch":"","defaultBranch":"trunk","policyDigest":"","phase":"qualified",
+            "managed":{},"diff":""
+        }))
+        .unwrap();
+        let receipt = serde_json::to_value(&receipt).unwrap();
+        assert!(receipt.get("schemaVersion").is_none() && receipt.get("patches").is_none());
+        let baseline: Baseline =
+            serde_json::from_value(json!({"repositoryId":"1","managed":{}})).unwrap();
+        assert_eq!(baseline.scopes, ["ci"]);
+        assert!(
+            serde_json::to_value(&baseline)
+                .unwrap()
+                .get("scopes")
+                .is_none()
+        );
     }
 
     #[test]
@@ -1556,6 +2006,7 @@ if os.fork() == 0:
             &f.config.profiles["fleet"].generator.executable,
             &checkout,
             &f.config.workspaces["projects"].state_directory,
+            &["init", "ci", "--primary-only", "--plan-json"].map(String::from),
         )
         .unwrap();
         plan.files
@@ -2276,6 +2727,7 @@ if os.fork() == 0:
             let helper = f.control.with_file_name("enrolled-helper.py");
             let undeclared = f.control.with_file_name("undeclared-helper.py");
             let credential = f.control.with_file_name("enrolled-credential");
+            let ci_credential = f.control.with_file_name("enrolled-ci-credential");
             let unrelated = f.control.with_file_name("other-forge-credential");
             fs::write(&helper, "marker = 'verified helper'\n").unwrap();
             fs::write(
@@ -2284,6 +2736,7 @@ if os.fork() == 0:
             )
             .unwrap();
             fs::write(&credential, "synthetic-enrolled-token").unwrap();
+            fs::write(&ci_credential, "synthetic-ci-token").unwrap();
             fs::write(&unrelated, "synthetic-unrelated-token").unwrap();
             let original = fs::read_to_string(&entrypoint).unwrap();
             let (shebang, body) = original.split_once('\n').unwrap();
@@ -2306,6 +2759,15 @@ except OSError:
     pass
 else:
     raise AssertionError('credential mount is writable')
+assert request['schemaVersion'] == 2
+ci = pathlib.Path(request['ciCredentialFile'])
+assert ci.read_text() == 'synthetic-ci-token'
+try:
+    ci.write_text('changed')
+except OSError:
+    pass
+else:
+    raise AssertionError('CI credential mount is writable')
 "#,
                 [&undeclared, &unrelated, &f.control, &f.remote, &f.source]
             );
@@ -2321,6 +2783,7 @@ else:
             .unwrap();
             let forge = f.config.forges.get_mut("fixture").unwrap();
             forge.credential_file = Some(credential.clone());
+            forge.ci_credential_file = Some(ci_credential.clone());
             forge.adapter_sha256 = Some(digest(&fs::read(&entrypoint).unwrap()));
             forge
                 .adapter_inputs
@@ -2349,6 +2812,18 @@ else:
                 vec![],
                 vec![],
             );
+            // A CI credential aliasing the forge token is refused before dispatch.
+            let alias = f.control.with_file_name("ci-credential-alias");
+            std::os::unix::fs::symlink(&credential, &alias).unwrap();
+            let mut aliased: AdapterRequest =
+                serde_json::from_value(serde_json::to_value(&request).unwrap()).unwrap();
+            aliased.ci_credential_file = Some(alias);
+            assert!(
+                adapter(forge, &aliased, &root)
+                    .unwrap_err()
+                    .to_string()
+                    .contains("different tokens")
+            );
             assert_eq!(adapter(forge, &request, &root).unwrap().status, "success");
             assert!(
                 fs::read_to_string(&helper)
@@ -2371,6 +2846,10 @@ else:
             assert_eq!(
                 fs::read_to_string(credential).unwrap(),
                 "synthetic-enrolled-token"
+            );
+            assert_eq!(
+                fs::read_to_string(&ci_credential).unwrap(),
+                "synthetic-ci-token"
             );
             assert_eq!(f.remote_head(), source);
             assert!(!f.root().join("receipt.json").exists());
@@ -2876,14 +3355,14 @@ else:
             ".gitlab-ci.yml",
             ".github/workflows/ci.yaml",
         ] {
-            let plan = CiUpdatePlan {
-                schema: "simit.ci-update-plan.v1".into(),
-                files: vec![crate::project::GeneratedFile {
+            let plan = CiUpdatePlan::new(
+                vec![crate::project::GeneratedFile {
                     relative_path: path.into(),
                     content: "backend-specific configuration\n".into(),
                 }],
-                obsolete: vec![],
-            };
+                vec![],
+                vec![],
+            );
             assert_eq!(workflows(&plan), vec![path]);
         }
     }
@@ -2963,6 +3442,290 @@ else:
         })
         .unwrap();
         assert!(!f.config.workspaces["projects"].state_directory.exists());
+    }
+
+    fn scoped_plans(f: &mut Fixture, scopes: &[&str], plans: serde_json::Value) {
+        f.config.profiles.get_mut("fleet").unwrap().scopes =
+            scopes.iter().map(|scope| scope.to_string()).collect();
+        save(&f.source.join("fixture-plans.json"), &plans).unwrap();
+        f.publish(&f.source, "enroll scoped generation plans");
+    }
+
+    fn primary_ci() -> serde_json::Value {
+        json!({"relative_path":".github/workflows/ci.yaml","content":"name: CI\non:\n  push:\njobs:\n  test:\n    steps: []\n"})
+    }
+
+    #[test]
+    fn namespace_readme_patch_waits_for_a_run_that_leaves_badge_inputs_alone() {
+        let mut f = Fixture::new();
+        let readme = json!({"relative_path":"README.md","content":"# demo\n<!-- simit:badges:start -->\ncurrent\n<!-- simit:badges:end -->\n"});
+        // The checkout's CI workflow differs from the plan, so badges derived
+        // from the checkout would be stale for the candidate.
+        scoped_plans(
+            &mut f,
+            &["ci", "readme"],
+            json!({
+                "init ci --primary-only --plan-json": {"schema":"simit.ci-update-plan.v1","files":[primary_ci()],"obsolete":[]},
+                "upgrade --plan-json": {"schema":"simit.ci-update-plan.v2","files":[],"obsolete":[],"patches":[readme]},
+            }),
+        );
+        f.control(json!({"candidate":"pending","expectedWorkflows":[".github/workflows/ci.yaml"]}));
+        assert!(f.update(true).unwrap().patches.is_empty());
+    }
+
+    #[test]
+    fn namespace_scopes_carry_unqualified_files_and_unowned_patches() {
+        let mut f = Fixture::new();
+        let publish = json!({"relative_path":".github/workflows/publish-crate.yaml","content":"name: Publish\non:\n  push:\n    tags: ['*']\n"});
+        let config =
+            json!({"relative_path":"simit.toml","content":"[ci]\nplatform = \"github\"\n"});
+        let readme = json!({"relative_path":"README.md","content":"# demo\n<!-- simit:badges:start -->\ncurrent\n<!-- simit:badges:end -->\n"});
+        // The CI workflow and config are already current, so the README plan stays valid.
+        fs::write(f.source.join("simit.toml"), "[ci]\nplatform = \"github\"\n").unwrap();
+        fs::write(
+            f.source.join(".github/workflows/ci.yaml"),
+            primary_ci()["content"].as_str().unwrap(),
+        )
+        .unwrap();
+        scoped_plans(
+            &mut f,
+            &["ci", "ci-extra", "readme"],
+            json!({
+                "init ci --primary-only --plan-json": {"schema":"simit.ci-update-plan.v1","files":[primary_ci()],"obsolete":[]},
+                "init ci --plan-json": {"schema":"simit.ci-update-plan.v2","files":[primary_ci(), publish],"obsolete":[],"patches":[config]},
+                "upgrade --plan-json": {"schema":"simit.ci-update-plan.v2","files":[],"obsolete":[],"patches":[readme]},
+            }),
+        );
+        f.control(json!({"candidate":"pending","expectedWorkflows":[".github/workflows/ci.yaml"]}));
+        let pending = f.update(true).unwrap();
+        assert_eq!(pending.phase, "candidate");
+        assert_eq!(
+            pending.patches.keys().collect::<Vec<_>>(),
+            ["README.md", "simit.toml"]
+        );
+        // Resume verifies recorded patch identities against the candidate.
+        let receipt = fs::read(f.root().join("receipt.json")).unwrap();
+        let mut tampered = pending;
+        tampered.patches.insert("README.md".into(), None);
+        save(&f.root().join("receipt.json"), &tampered).unwrap();
+        assert!(
+            f.update(true)
+                .unwrap_err()
+                .to_string()
+                .contains("retained candidate files changed")
+        );
+        fs::write(f.root().join("receipt.json"), receipt).unwrap();
+
+        // The saved primary set is bound to the receipt and cannot be narrowed.
+        let saved = fs::read(f.root().join("workflows.json")).unwrap();
+        save(
+            &f.root().join("workflows.json"),
+            &[".github/workflows/publish-crate.yaml"],
+        )
+        .unwrap();
+        assert!(
+            f.update(true)
+                .unwrap_err()
+                .to_string()
+                .contains("retained workflow ownership differs")
+        );
+        fs::write(f.root().join("workflows.json"), saved).unwrap();
+
+        f.control(json!({"expectedWorkflows":[".github/workflows/ci.yaml"]}));
+        let adopted = f.update(true).unwrap();
+        assert_eq!(adopted.phase, "qualified");
+        assert!(adopted.managed[".github/workflows/publish-crate.yaml"].is_some());
+        assert_eq!(adopted.schema_version, 2);
+        let workflows: Vec<String> =
+            crate::review::read_json(&f.root().join("workflows.json")).unwrap();
+        assert_eq!(workflows, [".github/workflows/ci.yaml"]);
+        let baseline: Baseline = crate::review::read_json(&f.root().join("baseline.json")).unwrap();
+        assert_eq!(baseline.managed, adopted.managed);
+        assert!(!baseline.managed.contains_key("README.md"));
+        for path in [
+            ".github/workflows/publish-crate.yaml",
+            "README.md",
+            "simit.toml",
+        ] {
+            git(
+                &f.remote,
+                &["cat-file", "-e", &format!("{}:{path}", adopted.candidate)],
+            )
+            .unwrap();
+        }
+        // Admission carried the committed patches under protocol v2.
+        let admissions = fs::read_dir(f.root())
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .filter(|path| {
+                path.file_name()
+                    .unwrap()
+                    .to_string_lossy()
+                    .starts_with("evidence-")
+            })
+            .map(|path| crate::review::read_json::<serde_json::Value>(&path).unwrap())
+            .filter(|evidence| evidence[0]["operation"] == "admit")
+            .collect::<Vec<_>>();
+        assert!(!admissions.is_empty());
+        for evidence in admissions {
+            assert_eq!(evidence[0]["schemaVersion"], 2);
+            assert_eq!(evidence[0]["plan"]["patches"].as_array().unwrap().len(), 2);
+        }
+
+        // A human README edit after adoption is project-owned and never blocks.
+        let checkout = f.root().join("checkout");
+        fs::write(checkout.join("README.md"), "# demo\nhuman edit\n").unwrap();
+        f.publish(&checkout, "edit README by hand");
+        let repatched = f.update(true).unwrap();
+        assert_eq!(repatched.phase, "qualified");
+        assert_eq!(f.remote_head(), repatched.candidate);
+    }
+
+    #[test]
+    fn namespace_scope_widening_adopts_existing_files_only_once() {
+        let mut f = Fixture::new();
+        fs::write(
+            f.source.join(".github/workflows/release.yml"),
+            "old release\n",
+        )
+        .unwrap();
+        let primary =
+            json!({"schema":"simit.ci-update-plan.v1","files":[primary_ci()],"obsolete":[]});
+        scoped_plans(
+            &mut f,
+            &["ci"],
+            json!({"init ci --primary-only --plan-json": primary}),
+        );
+        assert_eq!(f.update(true).unwrap().phase, "qualified");
+
+        let release = |files: serde_json::Value| {
+            json!({
+                "init ci --primary-only --plan-json": primary,
+                "init release --plan-json": {"schema":"simit.ci-update-plan.v1","files":files,"obsolete":[]},
+            })
+        };
+        let checkout = f.root().join("checkout");
+        let workflow =
+            json!({"relative_path":".github/workflows/release.yml","content":"name: Release\n"});
+        f.config.profiles.get_mut("fleet").unwrap().scopes = vec!["ci".into(), "release".into()];
+        save(
+            &checkout.join("fixture-plans.json"),
+            &release(json!([workflow])),
+        )
+        .unwrap();
+        f.publish(&checkout, "widen to the release scope");
+        let widened = f.update(true).unwrap();
+        assert_eq!(widened.phase, "qualified");
+        let baseline: Baseline = crate::review::read_json(&f.root().join("baseline.json")).unwrap();
+        assert_eq!(baseline.scopes, ["ci", "release"]);
+
+        // Once adopted, enrollCurrent no longer lets the scope claim other files.
+        fs::write(
+            checkout.join(".github/workflows/extra.yaml"),
+            "project-owned\n",
+        )
+        .unwrap();
+        let extra = json!({"relative_path":".github/workflows/extra.yaml","content":"generated\n"});
+        save(
+            &checkout.join("fixture-plans.json"),
+            &release(json!([workflow, extra])),
+        )
+        .unwrap();
+        let source = f.publish(&checkout, "claim another existing file");
+        assert!(
+            f.update(true)
+                .unwrap_err()
+                .to_string()
+                .contains("already exists outside the baseline")
+        );
+        assert_eq!(f.remote_head(), source);
+    }
+
+    #[test]
+    fn namespace_provider_migration_retires_crow_and_qualifies_actions() {
+        let mut f = Fixture::new();
+        fs::remove_file(f.source.join(".github/workflows/ci.yaml")).unwrap();
+        fs::create_dir_all(f.source.join(".crow")).unwrap();
+        fs::write(f.source.join(".crow/build.yaml"), "old crow workflow\n").unwrap();
+        let migrated =
+            "--ci-provider=actions --platform=github --runner=ubuntu-24.04 --reset-step-runners";
+        let config = json!({"relative_path":"simit.toml","content":"[ci]\nprovider = \"actions\"\nplatform = \"github\"\n"});
+        scoped_plans(
+            &mut f,
+            &["ci", "ci-extra"],
+            json!({
+                format!("init ci --primary-only --plan-json {migrated}"): {"schema":"simit.ci-update-plan.v1","files":[primary_ci()],"obsolete":[".crow/build.yaml"]},
+                format!("init ci --plan-json {migrated}"): {"schema":"simit.ci-update-plan.v2","files":[primary_ci()],"obsolete":[".crow/build.yaml"],"patches":[config]},
+            }),
+        );
+        f.config.profiles.get_mut("fleet").unwrap().migrate = Some(
+            serde_json::from_value(
+                json!({"provider":"actions","platform":"github","runner":"ubuntu-24.04"}),
+            )
+            .unwrap(),
+        );
+        f.control(json!({"expectedWorkflows":[".github/workflows/ci.yaml"]}));
+        let adopted = f.update(true).unwrap();
+        assert_eq!(adopted.phase, "qualified");
+        assert_eq!(adopted.managed[".crow/build.yaml"], None);
+        let tree = git(
+            &f.remote,
+            &["ls-tree", "-r", "--name-only", &adopted.candidate],
+        )
+        .unwrap();
+        assert!(tree.contains(".github/workflows/ci.yaml") && !tree.contains(".crow/"));
+        assert!(
+            git(
+                &f.remote,
+                &["show", &format!("{}:simit.toml", adopted.candidate)]
+            )
+            .unwrap()
+            .contains("provider = \"actions\"")
+        );
+    }
+
+    #[test]
+    fn namespace_scope_plans_must_agree_stay_disjoint_and_patch_outside_workflows() {
+        let primary =
+            json!({"schema":"simit.ci-update-plan.v1","files":[primary_ci()],"obsolete":[]});
+        let other = json!({"relative_path":".github/workflows/ci.yaml","content":"different\n"});
+        let extra = json!({"relative_path":".github/workflows/extra.yaml","content":"on: push\n"});
+        for (scopes, command, plan, error) in [
+            (
+                ["ci", "ci-extra"],
+                "init ci --plan-json",
+                json!({"schema":"simit.ci-update-plan.v1","files":[other],"obsolete":[]}),
+                "plans disagree",
+            ),
+            (
+                ["ci", "release"],
+                "init release --plan-json",
+                json!({"schema":"simit.ci-update-plan.v1","files":[],"obsolete":[".github/workflows/ci.yaml"]}),
+                "overlaps another scope",
+            ),
+            (
+                ["ci", "readme"],
+                "upgrade --plan-json",
+                json!({"schema":"simit.ci-update-plan.v2","files":[],"obsolete":[],"patches":[extra]}),
+                "workflow directory",
+            ),
+            (
+                ["ci", "readme"],
+                "upgrade --plan-json",
+                json!({"schema":"simit.ci-update-plan.v1","files":[],"obsolete":[],"patches":[{"relative_path":"README.md","content":"x\n"}]}),
+                "generation protocol",
+            ),
+        ] {
+            let mut f = Fixture::new();
+            let mut plans = json!({"init ci --primary-only --plan-json": primary.clone()});
+            plans[command] = plan;
+            scoped_plans(&mut f, &scopes, plans);
+            let source = f.remote_head();
+            let message = f.update(true).unwrap_err().to_string();
+            assert!(message.contains(error), "{command}: {message}");
+            assert_eq!(f.remote_head(), source);
+            assert!(!f.root().join("receipt.json").exists());
+        }
     }
 
     #[test]
@@ -3211,6 +3974,16 @@ else:
         fn control(&self, value: serde_json::Value) {
             save(&self.control, &value).unwrap();
         }
+        fn land_pull_requests(mut self) -> Self {
+            self.config.profiles.get_mut("fleet").unwrap().landing = "pull-request".into();
+            self
+        }
+        fn pulls(&self) -> serde_json::Value {
+            crate::review::read_json(&self.control.with_file_name("pulls.json")).unwrap()
+        }
+        fn maintenance_refs(&self) -> String {
+            git(&self.remote, &["for-each-ref", "refs/heads/maintenance/"]).unwrap()
+        }
         fn inject_generator(&mut self, code: &str) {
             let generator = &mut self.config.profiles.get_mut("fleet").unwrap().generator;
             let original = fs::read_to_string(&generator.executable).unwrap();
@@ -3235,16 +4008,25 @@ else:
         let pending = f.update(true).unwrap();
         assert_eq!(pending.phase, "candidate");
         assert_eq!(f.remote_head(), source);
+        let generator_revision = Some(f.config.profiles["fleet"].generator.source_revision.clone());
+        assert_eq!(pending.generator_revision, generator_revision);
+        // Receipts written before the generator revision was recorded still load and resume.
+        let receipt_path = f.root().join("receipt.json");
+        let mut legacy: serde_json::Value = crate::review::read_json(&receipt_path).unwrap();
+        legacy.as_object_mut().unwrap().remove("generatorRevision");
+        save(&receipt_path, &legacy).unwrap();
         let status_before = status(&profile_directory(
             &f.config.workspaces["projects"],
             "fleet",
         ))
         .unwrap();
         assert_eq!(status_before[0].candidate, pending.candidate);
+        assert_eq!(status_before[0].generator_revision, None);
         f.control(json!({"adoption":"pending"}));
         let adopting = f.update(true).unwrap();
         assert_eq!(adopting.phase, "adopting");
         assert_eq!(adopting.candidate, pending.candidate);
+        assert_eq!(adopting.generator_revision, generator_revision);
         assert_eq!(f.remote_head(), pending.candidate);
         f.control(json!({}));
         let adopted = f.update(true).unwrap();
@@ -3413,11 +4195,13 @@ else:
             Override {
                 enable: true,
                 reason: None,
+                blocker: None,
                 target_branch: None,
                 required_checks: vec![Requirement {
                     name: "override-check".into(),
                     authority: "777".into(),
                 }],
+                landing: None,
             },
         );
         f.control(json!({"expectedAdmissionChecks":[
@@ -3495,5 +4279,250 @@ else:
             assert_eq!(adopted.phase, "qualified");
             assert_eq!(adopted.candidate, retained.candidate);
         }
+    }
+
+    #[test]
+    fn namespace_pull_requests_land_every_merge_style_through_adoption() {
+        for style in ["merge", "squash", "rebase", "ff"] {
+            let f = Fixture::new().land_pull_requests();
+            let source = f.remote_head();
+            f.control(json!({"mergeStyle": style}));
+            let receipt = f.update(true).unwrap();
+            assert_eq!(receipt.phase, "qualified", "{style}");
+            assert_eq!(receipt.schema_version, 2);
+            assert_eq!(receipt.change.as_deref(), Some("1"));
+            let landed = receipt.landed.clone().unwrap();
+            assert_eq!(f.remote_head(), landed);
+            assert_eq!(landed == receipt.candidate, style == "ff", "{style}");
+            let checkout = f.root().join("checkout");
+            let tree = |commit: &str| git(&checkout, &["rev-parse", &format!("{commit}^{{tree}}")]);
+            assert_eq!(tree(&landed).unwrap(), tree(&receipt.candidate).unwrap());
+            assert_eq!(
+                git(&checkout, &["rev-parse", &format!("{landed}^1")]).unwrap(),
+                source
+            );
+            assert_eq!(f.pulls()[0]["state"], "merged");
+            assert!(f.maintenance_refs().is_empty(), "{style}");
+            assert_eq!(f.update(true).unwrap().phase, "unchanged");
+        }
+    }
+
+    #[test]
+    fn namespace_pull_requests_park_until_mergeable_and_resume_the_same_change() {
+        let f = Fixture::new().land_pull_requests();
+        let source = f.remote_head();
+        f.control(json!({"merge": "pending"}));
+        let parked = f.update(true).unwrap();
+        assert_eq!(parked.phase, "proposed");
+        assert_eq!(parked.change.as_deref(), Some("1"));
+        assert_eq!(f.remote_head(), source);
+        assert_eq!(f.update(true).unwrap().phase, "proposed");
+        assert_eq!(f.pulls().as_array().unwrap().len(), 1);
+        f.control(json!({}));
+        let adopted = f.update(true).unwrap();
+        assert_eq!(adopted.phase, "qualified");
+        assert_eq!(adopted.candidate, parked.candidate);
+        assert_eq!(adopted.change, parked.change);
+        assert_eq!(Some(f.remote_head()), adopted.landed);
+    }
+
+    #[test]
+    fn namespace_stale_or_closed_pull_requests_retire_their_ref_and_regenerate() {
+        for change in ["target", "policy", "closed"] {
+            let mut f = Fixture::new().land_pull_requests();
+            f.control(json!({"merge": "pending"}));
+            let parked = f.update(true).unwrap();
+            assert_eq!(parked.phase, "proposed");
+            f.control(json!({}));
+            match change {
+                "target" => {
+                    fs::write(f.source.join("application.txt"), "moved target\n").unwrap();
+                    f.publish(&f.source, "advance the pull request target");
+                }
+                "policy" => {
+                    f.config
+                        .profiles
+                        .get_mut("fleet")
+                        .unwrap()
+                        .rollout
+                        .batch_size = 2
+                }
+                _ => f.control(json!({"humanClose": true})),
+            }
+            let adopted = f.update(true).unwrap();
+            assert_eq!(adopted.phase, "qualified", "{change}");
+            assert_eq!(adopted.change.as_deref(), Some("2"));
+            let pulls = f.pulls();
+            assert_eq!(pulls[0]["state"], "closed", "{change}");
+            assert_eq!(pulls[1]["state"], "merged", "{change}");
+            assert!(f.maintenance_refs().is_empty(), "{change}");
+            assert!(
+                f.root()
+                    .join(format!(
+                        "invalidated-{}.json",
+                        canonical_digest(&parked).unwrap()
+                    ))
+                    .is_file()
+            );
+        }
+    }
+
+    #[test]
+    fn namespace_human_merged_pull_requests_are_verified_then_adopted() {
+        let f = Fixture::new().land_pull_requests();
+        f.control(json!({"merge": "pending"}));
+        let parked = f.update(true).unwrap();
+        f.control(json!({"merge": "pending", "humanMerge": "squash"}));
+        let adopted = f.update(true).unwrap();
+        assert_eq!(adopted.phase, "qualified");
+        assert_eq!(adopted.candidate, parked.candidate);
+        let landed = adopted.landed.unwrap();
+        assert_ne!(landed, parked.candidate);
+        assert_eq!(f.remote_head(), landed);
+        assert!(f.maintenance_refs().is_empty());
+    }
+
+    #[test]
+    fn namespace_landed_tree_or_parent_mismatch_fails_closed() {
+        for style in ["wrong-tree", "wrong-parent"] {
+            let f = Fixture::new().land_pull_requests();
+            f.control(json!({"mergeStyle": style}));
+            for _ in 0..2 {
+                assert!(
+                    f.update(true)
+                        .unwrap_err()
+                        .to_string()
+                        .contains("differs from the qualified candidate tree"),
+                    "{style}"
+                );
+            }
+            let retained: Receipt =
+                crate::review::read_json(&f.root().join("receipt.json")).unwrap();
+            assert_eq!(retained.phase, "adopting");
+            assert_eq!(retained.landed, Some(f.remote_head()));
+            assert!(!f.root().join("baseline.json").exists());
+        }
+    }
+
+    #[test]
+    fn namespace_parked_pull_requests_do_not_block_later_repositories() {
+        for canary in [false, true] {
+            let mut f = Fixture::new().land_pull_requests();
+            if canary {
+                let coordinate = f.project.coordinate.clone();
+                let profile = f.config.profiles.get_mut("fleet").unwrap();
+                profile.rollout.canaries.push(coordinate);
+            }
+            let mut second = f.project.clone();
+            second.coordinate = "fixture.example/team/next".into();
+            second.relative_path = "other/next".into();
+            f.write_inventory();
+            let inventory_path = f.config.workspaces["projects"]
+                .inventory
+                .file
+                .clone()
+                .unwrap();
+            let mut inventory: Inventory = crate::review::read_json(&inventory_path).unwrap();
+            inventory.projects.push(second.clone());
+            save(&inventory_path, &inventory).unwrap();
+            f.control(json!({"coordinateStatus":{&f.project.coordinate:{"merge":"pending"}}}));
+            let profile_root = profile_directory(&f.config.workspaces["projects"], "fleet");
+            let phase = |coordinate: &str| {
+                status(&profile_root)
+                    .unwrap()
+                    .into_iter()
+                    .find(|receipt| receipt.coordinate == coordinate)
+                    .map(|receipt| receipt.phase)
+            };
+            for _ in 0..2 {
+                assert_eq!(f.cli("fleet", true).is_err(), canary);
+            }
+            assert_eq!(phase(&f.project.coordinate).as_deref(), Some("proposed"));
+            assert_eq!(
+                phase(&second.coordinate).as_deref(),
+                (!canary).then_some("qualified")
+            );
+        }
+    }
+
+    #[test]
+    fn namespace_v1_receipts_resume_as_direct_landing_and_retire_their_ref() {
+        let f = Fixture::new();
+        f.control(json!({"candidate":"pending"}));
+        let pending = f.update(true).unwrap();
+        assert_eq!(pending.phase, "candidate");
+        let path = f.root().join("receipt.json");
+        let mut legacy: serde_json::Value = crate::review::read_json(&path).unwrap();
+        for key in ["schemaVersion", "landing", "projectPolicyDigest"] {
+            legacy.as_object_mut().unwrap().remove(key).unwrap();
+        }
+        save(&path, &legacy).unwrap();
+        assert!(!f.maintenance_refs().is_empty());
+        f.control(json!({}));
+        let adopted = f.update(true).unwrap();
+        assert_eq!(adopted.phase, "qualified");
+        assert_eq!(adopted.schema_version, 0);
+        // Resaving a v1 receipt must not add fields an older binary rejects.
+        let resaved: serde_json::Value = crate::review::read_json(&path).unwrap();
+        assert!(resaved.get("schemaVersion").is_none());
+        assert_eq!(adopted.candidate, pending.candidate);
+        assert_eq!(adopted.landed, None);
+        assert_eq!(f.remote_head(), pending.candidate);
+        assert!(f.maintenance_refs().is_empty());
+    }
+
+    #[test]
+    fn namespace_other_repository_policy_edits_keep_pending_candidates() {
+        for own in [false, true] {
+            let mut f = Fixture::new();
+            f.control(json!({"candidate":"pending"}));
+            let pending = f.update(true).unwrap();
+            let coordinate = if own {
+                f.project.coordinate.clone()
+            } else {
+                "fixture.example/team/other".to_owned()
+            };
+            let profile = f.config.profiles.get_mut("fleet").unwrap();
+            profile.select.coordinates.push(coordinate.clone());
+            profile.project_overrides.insert(
+                coordinate,
+                serde_json::from_value(json!({"targetBranch":"trunk"})).unwrap(),
+            );
+            f.control(json!({}));
+            let resumed = f.update(true);
+            if own {
+                assert!(resumed.unwrap_err().to_string().contains("another policy"));
+            } else {
+                let adopted = resumed.unwrap();
+                assert_eq!(adopted.phase, "qualified");
+                assert_eq!(adopted.candidate, pending.candidate);
+            }
+        }
+    }
+
+    #[test]
+    fn namespace_previews_never_retire_parked_pull_requests_or_refs() {
+        let f = Fixture::new().land_pull_requests();
+        f.control(json!({"merge": "pending"}));
+        assert_eq!(f.update(true).unwrap().phase, "proposed");
+        fs::write(f.source.join("application.txt"), "moved target\n").unwrap();
+        f.publish(&f.source, "advance the parked target");
+        let receipt = fs::read(f.root().join("receipt.json")).unwrap();
+        let refs = f.maintenance_refs();
+        assert!(!refs.is_empty());
+        assert_eq!(f.update(false).unwrap().phase, "proposed");
+        assert_eq!(fs::read(f.root().join("receipt.json")).unwrap(), receipt);
+        assert_eq!(f.maintenance_refs(), refs);
+        assert_eq!(f.pulls()[0]["state"], "open");
+        // A preview that invalidates a direct candidate keeps its published ref.
+        let f = Fixture::new();
+        f.control(json!({"candidate": "pending"}));
+        f.update(true).unwrap();
+        fs::write(f.source.join("application.txt"), "moved target\n").unwrap();
+        f.publish(&f.source, "advance the pending target");
+        let refs = f.maintenance_refs();
+        assert!(!refs.is_empty());
+        assert_eq!(f.update(false).unwrap().phase, "preview");
+        assert_eq!(f.maintenance_refs(), refs);
     }
 }

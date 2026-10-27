@@ -109,6 +109,7 @@ pub struct CiCliOverrides {
     pub runner: Option<String>,
     pub windows_runner: Option<String>,
     pub step_runner: Vec<(String, String)>,
+    pub reset_step_runners: bool,
     pub granular: bool,
     pub workspace: bool,
     pub workspace_strategy: Option<WorkspaceStrategy>,
@@ -405,7 +406,11 @@ impl ResolvedCiInputs {
                 .or(config.windows_runner)
                 .or(inference.windows_runner),
             step_runners: {
-                let mut m = config.step_runners.unwrap_or_default();
+                let mut m = if cli.reset_step_runners {
+                    BTreeMap::new()
+                } else {
+                    config.step_runners.unwrap_or_default()
+                };
                 for (step, runner) in &cli.step_runner {
                     m.insert(step.clone(), runner.clone());
                 }

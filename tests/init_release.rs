@@ -438,6 +438,89 @@ fn switching_release_platform_removes_only_obsolete_generated_workflows() {
 }
 
 #[test]
+fn release_plan_only_maintains_an_existing_generated_workflow() {
+    let project = init_package("release-plan-demo");
+    let root = project.path();
+    let config_path = root.join("simit.toml");
+    let config = read(&config_path).replace("[release.codeberg]", "[release.github]");
+    fs::write(config_path, config).unwrap();
+    let plan = || {
+        let output = simit()
+            .current_dir(root)
+            .args(["init", "release", "--plan-json"])
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        serde_json::from_slice::<serde_json::Value>(&output.stdout).unwrap()
+    };
+    let empty = serde_json::json!({"schema":"simit.ci-update-plan.v1","files":[],"obsolete":[]});
+    assert_eq!(plan(), empty);
+    fs::create_dir_all(root.join(".github/workflows")).unwrap();
+    fs::write(
+        root.join(".github/workflows/release.yml"),
+        "name: hand-written\n",
+    )
+    .unwrap();
+    assert_eq!(plan(), empty);
+
+    fs::remove_file(root.join(".github/workflows/release.yml")).unwrap();
+    fs::write(
+        root.join(".github/workflows/release.yaml"),
+        format!(
+            "{}\nname: previous\n",
+            simit::render::ci::GENERATED_WORKFLOW_MARKER
+        ),
+    )
+    .unwrap();
+    let migrated = plan();
+    assert_eq!(
+        migrated["files"][0]["relative_path"],
+        ".github/workflows/release.yml"
+    );
+    assert_eq!(
+        migrated["obsolete"],
+        serde_json::json!([".github/workflows/release.yaml"])
+    );
+    assert!(!root.join(".github/workflows/release.yml").exists());
+    // A hand-written destination is preserved even though the marked source
+    // workflow is obsolete.
+    fs::write(
+        root.join(".github/workflows/release.yml"),
+        "name: hand-written\n",
+    )
+    .unwrap();
+    assert_eq!(plan(), empty);
+    fs::remove_file(root.join(".github/workflows/release.yml")).unwrap();
+
+    // With two release targets and no [ci].platform, the default backend must
+    // not silently move the existing GitHub release workflow to Forgejo.
+    let mut config = read(&root.join("simit.toml"));
+    config.push_str("\n[release.codeberg]\nrepo = \"example/release-plan-demo\"\n");
+    fs::write(root.join("simit.toml"), config).unwrap();
+    let moved = simit()
+        .current_dir(root)
+        .args(["init", "release", "--plan-json"])
+        .output()
+        .unwrap();
+    assert!(!moved.status.success());
+    assert!(String::from_utf8_lossy(&moved.stderr).contains("--platform"));
+    let explicit = simit()
+        .current_dir(root)
+        .args(["init", "release", "--plan-json", "--platform", "github"])
+        .output()
+        .unwrap();
+    assert!(
+        explicit.status.success(),
+        "{}",
+        String::from_utf8_lossy(&explicit.stderr)
+    );
+}
+
+#[test]
 fn crow_release_pushes_attic_only_for_tags() {
     let project = init_package("crow-attic-demo");
     let config_path = project.path().join("simit.toml");
@@ -742,4 +825,44 @@ fn print_matches_checked_workflow_without_writing_file() {
             .join(".forgejo/workflows/release.yml")
             .exists()
     );
+}
+
+#[test]
+fn runner_override_replaces_the_ci_runner_fallback() {
+    let project = init_package_without_release_runner("release-runner-demo");
+    let config_path = project.path().join("simit.toml");
+    let config = format!(
+        "[ci]\nrunner = \"codeberg-small\"\n\n{}",
+        read(&config_path)
+    );
+    fs::write(config_path, config).unwrap();
+    let print = |extra: &[&str]| {
+        let output = simit()
+            .current_dir(project.path())
+            .args(["init", "release", "--print"])
+            .args(extra)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        String::from_utf8(output.stdout).unwrap()
+    };
+    assert!(print(&[]).contains("codeberg-small"));
+    let migrated = print(&["--runner", "ubuntu-24.04"]);
+    assert!(migrated.contains("ubuntu-24.04") && !migrated.contains("codeberg-small"));
+}
+
+#[test]
+fn forgejo_release_plan_needs_a_project_runner() {
+    let project = init_package_without_release_runner("plan-runner-demo");
+    let output = simit()
+        .current_dir(project.path())
+        .args(["init", "release", "--plan-json"])
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("project policy"));
 }

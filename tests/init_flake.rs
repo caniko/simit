@@ -452,6 +452,64 @@ fn default_scope_writes_only_detected_hook_file() {
 }
 
 #[test]
+fn flake_plan_maintains_only_managed_files_with_locked_inputs() {
+    let temp = init_package();
+    let root = temp.path();
+    let plan = |directory: &Path| {
+        simit()
+            .current_dir(directory)
+            .args(["init", "flake", "--plan-json"])
+            .output()
+            .unwrap()
+    };
+    let parse = |output: std::process::Output| {
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        serde_json::from_slice::<serde_json::Value>(&output.stdout).unwrap()
+    };
+    let empty = serde_json::json!({"schema":"simit.ci-update-plan.v1","files":[],"obsolete":[]});
+    assert_eq!(parse(plan(root)), empty);
+    // A project-owned flake without simit hooks is not adopted either.
+    fs::write(root.join("flake.nix"), "{ outputs = _: { }; }\n").unwrap();
+    assert_eq!(parse(plan(root)), empty);
+    fs::remove_file(root.join("flake.nix")).unwrap();
+    assert!(!root.join("nix").exists());
+
+    let status = simit()
+        .current_dir(root)
+        .args(["init", "flake", "--scope", "full"])
+        .status()
+        .unwrap();
+    assert!(status.success());
+    let managed = parse(plan(root));
+    // A workspace subdirectory plans the same workspace files.
+    assert_eq!(parse(plan(&root.join("src"))), managed);
+    assert!(
+        managed["files"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|file| file["relative_path"] == "flake.nix")
+    );
+
+    // Restoring a dropped input would need a lock update the updater cannot fetch.
+    let flake = read(&root.join("flake.nix"));
+    let without_hooks = flake
+        .lines()
+        .filter(|line| !line.contains("git-hooks.url"))
+        .map(|line| format!("{line}\n"))
+        .collect::<String>();
+    fs::write(root.join("flake.nix"), &without_hooks).unwrap();
+    let output = plan(root);
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("flake.lock"));
+    assert_eq!(read(&root.join("flake.nix")), without_hooks);
+}
+
+#[test]
 fn full_scope_writes_flake_and_formatter_files() {
     let temp = init_package();
 

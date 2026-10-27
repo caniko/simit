@@ -3043,6 +3043,23 @@ fn ignore_paths_are_checked_against_cargo_inferred_ownership() {
 }
 
 #[test]
+fn ignore_paths_reject_formatter_module_overlap() {
+    let temp = fixture();
+    let config = fs::read_to_string(temp.path().join("simit.toml")).unwrap();
+    write(
+        temp.path(),
+        "simit.toml",
+        &config.replace(
+            "schema_version = 1",
+            "schema_version = 1\nformatter_modules = [\"nix/fmt.nix\"]\nignore_paths = [\"nix\"]",
+        ),
+    );
+    let output = plan(temp.path(), &["docs/guide.md"]);
+    assert!(!output.status.success(), "{output:?}");
+    assert!(String::from_utf8_lossy(&output.stderr).contains("overlaps formatter module"));
+}
+
+#[test]
 fn monorepo_ci_defaults_to_release_artifact_caches() {
     let temp = fixture();
     let config = fs::read_to_string(temp.path().join("simit.toml")).unwrap();

@@ -6,7 +6,7 @@ use crate::cli::Platform;
 use crate::config::{
     AptOverrides, AurOverrides, ChocolateyOverrides, CoprOverrides, HomebrewOverrides,
     ProjectConfig, ResolvedApt, ResolvedAur, ResolvedChocolatey, ResolvedCopr, ResolvedHomebrew,
-    ResolvedScoop, ScoopOverrides,
+    ResolvedScoop, ResolvedWinget, ScoopOverrides,
 };
 
 /// Shared helper for `release` + `release verify`: parse the selected
@@ -82,6 +82,7 @@ pub struct ReleasePlatformTargets {
     pub homebrew: Option<ResolvedHomebrew>,
     pub scoop: Option<ResolvedScoop>,
     pub chocolatey: Option<ResolvedChocolatey>,
+    pub winget: Option<ResolvedWinget>,
 }
 
 pub fn resolve_release_platform_targets(
@@ -117,7 +118,14 @@ pub fn resolve_release_platform_targets(
     let chocolatey = cfg
         .chocolatey
         .as_ref()
-        .map(|_| cfg.resolve_chocolatey(ChocolateyOverrides::default(), package))
+        .map(|_| {
+            cfg.resolve_chocolatey_for_platform(ChocolateyOverrides::default(), package, platform)
+        })
+        .transpose()?;
+    let winget = cfg
+        .winget
+        .as_ref()
+        .map(|_| cfg.resolve_winget(package))
         .transpose()?;
     Ok(ReleasePlatformTargets {
         aur,
@@ -126,6 +134,7 @@ pub fn resolve_release_platform_targets(
         homebrew,
         scoop,
         chocolatey,
+        winget,
     })
 }
 
@@ -141,6 +150,26 @@ mod tests {
             "manifest_path": "Cargo.toml",
         }))
         .unwrap()
+    }
+
+    #[test]
+    fn release_targets_follow_the_effective_platform_and_winget_description() {
+        let mut cfg: ProjectConfig = toml_edit::de::from_str(
+            "[chocolatey]\nid = \"demo\"\ndownload_repo = \"o/demo\"\n[winget]\npackage_id = \"O.Demo\"\ndownload_repo = \"o/demo\"\nzip_archive = \"demo-{version}.zip\"\n",
+        )
+        .unwrap();
+        let mut pkg = package("demo", "1.0.0");
+        pkg.description = Some("Demo application".to_owned());
+        pkg.license = Some("MIT".to_owned());
+        pkg.authors = vec!["Can".to_owned()];
+        pkg.homepage = Some("https://example.com".to_owned());
+        let targets = resolve_release_platform_targets(&cfg, &pkg, Platform::Github).unwrap();
+        assert_eq!(targets.chocolatey.unwrap().platform, Platform::Github);
+        cfg.winget.as_mut().unwrap().short_description = Some("ab".to_owned());
+        let err = resolve_release_platform_targets(&cfg, &pkg, Platform::Github)
+            .err()
+            .unwrap();
+        assert!(err.to_string().contains("3-256 characters"), "{err}");
     }
 
     #[test]

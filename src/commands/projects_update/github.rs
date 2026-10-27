@@ -9,23 +9,27 @@ use std::{
     time::Duration,
 };
 
-struct Api {
+pub(super) struct Api {
     client: reqwest::blocking::Client,
     base: url::Url,
     token: Option<String>,
+    accept: &'static str,
 }
 impl Api {
-    fn new(request: &AdapterRequest) -> Result<Self> {
-        let base = url::Url::parse(&format!("{}/", request.api_url.trim_end_matches('/')))?;
+    /// One bearer credential per API root; adapters never share tokens across origins.
+    pub(super) fn with(
+        base: &str,
+        credential: Option<&std::path::Path>,
+        accept: &'static str,
+    ) -> Result<Self> {
+        let base = url::Url::parse(&format!("{}/", base.trim_end_matches('/')))?;
         ensure!(
             base.scheme() == "https" && base.username().is_empty() && base.password().is_none(),
-            "GitHub API requires credential-free HTTPS"
+            "adapter API requires credential-free HTTPS"
         );
-        let token = request
-            .credential_file
-            .as_ref()
+        let token = credential
             .map(|path| {
-                String::from_utf8(credential_bytes(path)?).context("GitHub credential is not UTF-8")
+                String::from_utf8(credential_bytes(path)?).context("API credential is not UTF-8")
             })
             .transpose()?
             .map(|s| s.trim().to_owned());
@@ -37,22 +41,34 @@ impl Api {
             client,
             base,
             token,
+            accept,
         })
     }
-    fn get(&self, path: &str) -> Result<Value> {
+    pub(super) fn get(&self, path: &str) -> Result<Value> {
         self.send(self.client.get(self.base.join(path)?))
+    }
+    fn write(&self, method: &str, path: &str, body: &Value) -> Result<Value> {
+        let method = reqwest::Method::from_bytes(method.as_bytes())?;
+        self.send(
+            self.client
+                .request(method, self.base.join(path)?)
+                .json(body),
+        )
     }
     fn send(&self, request: reqwest::blocking::RequestBuilder) -> Result<Value> {
         let mut request = request
             .header("User-Agent", "simit-updater")
-            .header("Accept", "application/vnd.github+json");
+            .header("Accept", self.accept);
         if let Some(token) = &self.token {
             request = request.bearer_auth(token);
         }
-        let response = request.send().context("GitHub API transport failed")?;
+        let response = request
+            .send()
+            .with_context(|| format!("{} transport failed", self.base))?;
         ensure!(
             response.status().is_success(),
-            "GitHub API returned {}",
+            "{} returned {}",
+            self.base,
             response.status()
         );
         let mut bytes = Vec::new();
@@ -61,11 +77,12 @@ impl Api {
             .read_to_end(&mut bytes)?;
         ensure!(
             bytes.len() as u64 <= crate::review::MAX_JSON_BYTES,
-            "GitHub response too large"
+            "{} response too large",
+            self.base
         );
         Ok(serde_json::from_slice(&bytes)?)
     }
-    fn admit_classic(&self, repository: &str, branch: &str) -> Result<()> {
+    fn admit_classic(&self, repository: &str, branch: &str, pull_request: bool) -> Result<()> {
         let (owner, name) = repository
             .split_once('/')
             .context("missing repository owner")?;
@@ -76,7 +93,7 @@ impl Api {
         } else {
             "graphql"
         })?;
-        admit_classic_rules(branch, |cursor| {
+        admit_classic_rules(branch, pull_request, |cursor| {
             self.send(self.client.post(endpoint.clone()).json(&serde_json::json!({
             "query":"query($owner:String!,$name:String!,$cursor:String){repository(owner:$owner,name:$name){branchProtectionRules(first:100,after:$cursor){totalCount nodes{id pattern restrictsPushes blocksCreations requiresCommitSignatures requiresApprovingReviews} pageInfo{hasNextPage endCursor}}}}",
             "variables":{"owner":owner,"name":name,"cursor":cursor}
@@ -126,30 +143,30 @@ fn collection(key: &str, mut page: impl FnMut(u32) -> Result<Value>) -> Result<V
     anyhow::bail!("GitHub collection exceeds adapter pagination ceiling")
 }
 
-fn text(value: &Value, key: &str) -> Result<String> {
+pub(super) fn text(value: &Value, key: &str) -> Result<String> {
     Ok(value
         .pointer(key)
         .and_then(Value::as_str)
-        .with_context(|| format!("missing GitHub {key}"))?
+        .with_context(|| format!("missing API field {key}"))?
         .to_owned())
 }
-fn number(value: &Value, key: &str) -> Result<u64> {
+pub(super) fn number(value: &Value, key: &str) -> Result<u64> {
     value
         .pointer(key)
         .and_then(Value::as_u64)
-        .with_context(|| format!("missing GitHub {key}"))
+        .with_context(|| format!("missing API field {key}"))
 }
-fn encoded(value: &str) -> String {
+pub(super) fn encoded(value: &str) -> String {
     url::form_urlencoded::byte_serialize(value.as_bytes()).collect()
 }
 
-fn branch_pattern(pattern: &str, branch: &str) -> Result<bool> {
+pub(super) fn branch_pattern(pattern: &str, branch: &str) -> Result<bool> {
     // ponytail: only literal names and * / ** patterns are admitted. Reject
-    // richer GitHub syntax until it has an exact, provider-native evaluator.
+    // richer GitHub/Forgejo/Crow syntax until it has a provider-native evaluator.
     ensure!(
         !pattern.is_empty()
             && !pattern.contains(['!', '?', '+', '[', ']', '{', '}', '(', ')', '\\']),
-        "unsupported GitHub branch filter pattern"
+        "unsupported branch filter pattern"
     );
     Ok(glob::Pattern::new(pattern)?.matches_with(
         branch,
@@ -211,15 +228,18 @@ fn admit_branch(trigger: &serde_yaml::Value, branch: &str) -> Result<()> {
     Ok(())
 }
 
-fn workflow_source(path: &str, file: &Value) -> Result<serde_yaml::Value> {
+/// Exact bytes from a GitHub/Forgejo contents API file object.
+pub(super) fn workflow_bytes(path: &str, file: &Value) -> Result<Vec<u8>> {
     ensure!(
         file["path"] == path && file["type"] == "file" && file["encoding"] == "base64",
         "workflow source inventory is incomplete"
     );
     let content = text(file, "/content")?;
-    let content =
-        base64::engine::general_purpose::STANDARD.decode(content.replace(['\r', '\n'], ""))?;
-    Ok(serde_yaml::from_slice(&content)?)
+    Ok(base64::engine::general_purpose::STANDARD.decode(content.replace(['\r', '\n'], ""))?)
+}
+
+fn workflow_source(path: &str, file: &Value) -> Result<serde_yaml::Value> {
+    Ok(serde_yaml::from_slice(&workflow_bytes(path, file)?)?)
 }
 
 #[derive(Default)]
@@ -523,7 +543,8 @@ fn admit_workflows(request: &AdapterRequest) -> Result<BTreeSet<String>> {
     Ok(paths)
 }
 
-fn admit_workflow_states(paths: &BTreeSet<String>, inventory: &Value) -> Result<()> {
+/// Returns the registered workflow paths.
+fn admit_workflow_states(paths: &BTreeSet<String>, inventory: &Value) -> Result<BTreeSet<String>> {
     let entries = inventory["workflows"]
         .as_array()
         .context("missing workflow inventory")?;
@@ -549,7 +570,200 @@ fn admit_workflow_states(paths: &BTreeSet<String>, inventory: &Value) -> Result<
     }
     // An absent path in a complete inventory can be introduced by this candidate.
     // Qualification still requires its genuine registered original push run.
+    Ok(registered)
+}
+
+/// A qualification workflow the registry has never seen (for example after a
+/// provider migration) can only run when Actions is enabled for all actions,
+/// every job targets a hosted or registered runner, and every secret and
+/// variable it references exists.
+fn admit_new_workflows(
+    request: &AdapterRequest,
+    paths: &BTreeSet<String>,
+    endpoint: &str,
+    get: &impl Fn(&str) -> Result<Value>,
+) -> Result<()> {
+    if paths.is_empty() {
+        return Ok(());
+    }
+    let permissions = get(&format!("{endpoint}/actions/permissions"))?;
+    ensure!(
+        permissions["enabled"] == true && permissions["allowed_actions"] == "all",
+        "new workflows need GitHub Actions enabled with all actions allowed"
+    );
+    let runners = list(&format!("{endpoint}/actions/runners"), "runners", get)?;
+    // GitHub schedules a job on one runner carrying every requested label.
+    let registered = runners["runners"]
+        .as_array()
+        .context("missing runner inventory")?
+        .iter()
+        .map(|runner| {
+            runner["labels"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(|label| label["name"].as_str())
+                .map(str::to_ascii_lowercase)
+                .collect::<BTreeSet<_>>()
+        })
+        .collect::<Vec<_>>();
+    let names = |kind: &str| -> Result<BTreeSet<String>> {
+        let inventory = list(&format!("{endpoint}/actions/{kind}"), kind, get)?;
+        Ok(inventory[kind]
+            .as_array()
+            .with_context(|| format!("missing {kind} inventory"))?
+            .iter()
+            .filter_map(|entry| entry["name"].as_str())
+            .map(str::to_owned)
+            .collect())
+    };
+    let defined = [
+        ("secrets.", names("secrets")?),
+        ("vars.", names("variables")?),
+    ];
+    let plan = request.plan.as_ref().context("missing admission plan")?;
+    let mut missing = BTreeSet::new();
+    for file in &plan.files {
+        let path = file
+            .relative_path
+            .to_str()
+            .context("non-UTF-8 workflow path")?;
+        if !paths.contains(path) {
+            continue;
+        }
+        let workflow: serde_yaml::Value = serde_yaml::from_str(&file.content)?;
+        for job in workflow["jobs"]
+            .as_mapping()
+            .context("missing workflow jobs")?
+            .values()
+        {
+            for labels in runner_labels(job)? {
+                let wanted = labels
+                    .iter()
+                    .map(|label| label.to_ascii_lowercase())
+                    .collect::<BTreeSet<_>>();
+                ensure!(
+                    matches!(labels.as_slice(), [label] if hosted_label(label))
+                        || registered.iter().any(|runner| wanted.is_subset(runner)),
+                    "new workflow {path} runs on {labels:?}, which is neither a hosted label nor the labels of one registered runner"
+                );
+            }
+        }
+        for (prefix, names) in &defined {
+            for name in references(&file.content, prefix)? {
+                if name != "GITHUB_TOKEN" && !names.contains(name) {
+                    missing.insert(format!("{prefix}{name}"));
+                }
+            }
+        }
+    }
+    ensure!(
+        missing.is_empty(),
+        "new workflows reference undefined {}",
+        missing.into_iter().collect::<Vec<_>>().join(", ")
+    );
     Ok(())
+}
+
+/// The literal label sets a job can request, one per static matrix value when
+/// `runs-on` is a `${{ matrix.KEY }}` indirection.
+fn runner_labels(job: &serde_yaml::Value) -> Result<Vec<Vec<String>>> {
+    let runs_on = &job["runs-on"];
+    let values = match runs_on
+        .as_str()
+        .and_then(|value| value.strip_prefix("${{"))
+        .and_then(|value| value.strip_suffix("}}"))
+        .and_then(|value| value.trim().strip_prefix("matrix."))
+    {
+        Some(key) => {
+            let matrix = &job["strategy"]["matrix"];
+            matrix["include"]
+                .as_sequence()
+                .into_iter()
+                .flatten()
+                .map(|row| row[key].clone())
+                .chain(matrix[key].as_sequence().into_iter().flatten().cloned())
+                .collect()
+        }
+        None => vec![runs_on.clone()],
+    };
+    let mut sets = Vec::new();
+    for value in values {
+        let labels = match value {
+            serde_yaml::Value::String(label) => vec![label],
+            serde_yaml::Value::Sequence(items) => items
+                .iter()
+                .map(|item| item.as_str().map(str::to_owned))
+                .collect::<Option<Vec<_>>>()
+                .context("runs-on needs literal labels")?,
+            _ => anyhow::bail!("runs-on needs literal labels"),
+        };
+        ensure!(
+            !labels.is_empty() && labels.iter().all(|label| !label.contains("${{")),
+            "runs-on needs literal labels"
+        );
+        sets.push(labels);
+    }
+    ensure!(!sets.is_empty(), "runs-on needs literal labels");
+    Ok(sets)
+}
+
+/// A GitHub-hosted runner image label such as `ubuntu-24.04`, `macos-latest`,
+/// `ubuntu-24.04-arm` or `windows-11-arm`.
+// ponytail: shape check of the published naming scheme; larger hosted runners
+// with custom names must be registered labels until an API lists them.
+fn hosted_label(label: &str) -> bool {
+    let mut parts = label.split('-');
+    let (Some(os), Some(version)) = (parts.next(), parts.next()) else {
+        return false;
+    };
+    let suffix = parts.next();
+    matches!(os, "ubuntu" | "macos" | "windows")
+        && (version == "latest"
+            || (!version.is_empty()
+                && version
+                    .bytes()
+                    .all(|byte| byte.is_ascii_digit() || byte == b'.')))
+        && suffix.is_none_or(|suffix| matches!(suffix, "arm" | "intel" | "large" | "xlarge"))
+        && parts.next().is_none()
+}
+
+/// Names referenced as `PREFIX.NAME` or `PREFIX['NAME']`, such as
+/// `secrets.ATTIC_TOKEN`. A bracket key that is not a static string fails closed.
+fn references<'a>(content: &'a str, prefix: &str) -> Result<BTreeSet<&'a str>> {
+    let word = |ch: char| ch.is_ascii_alphanumeric() || ch == '_';
+    let base = prefix.trim_end_matches('.');
+    let mut names = BTreeSet::new();
+    for (start, found) in content
+        .match_indices(base)
+        .filter(|(start, _)| {
+            content[..*start]
+                .chars()
+                .next_back()
+                .is_none_or(|ch| !word(ch) && ch != '.')
+        })
+        .map(|(start, found)| (start, found.len()))
+    {
+        let rest = &content[start + found..];
+        if let Some(rest) = rest.strip_prefix('.') {
+            let name = &rest[..rest.find(|ch| !word(ch)).unwrap_or(rest.len())];
+            if !name.is_empty() {
+                names.insert(name);
+            }
+        } else if let Some(rest) = rest.strip_prefix('[') {
+            let key = rest
+                .trim_start()
+                .strip_prefix('\'')
+                .and_then(|rest| rest.split_once('\''))
+                .filter(|(_, tail)| tail.trim_start().starts_with(']'))
+                .map(|(key, _)| key);
+            let Some(key) = key.filter(|key| !key.is_empty()) else {
+                anyhow::bail!("workflow uses a dynamic {base}[...] key, which cannot be checked");
+            };
+            names.insert(key);
+        }
+    }
+    Ok(names)
 }
 
 fn admit_signatures(signatures: &Value) -> Result<()> {
@@ -633,8 +847,10 @@ fn protection_requirements(protection: &Value, authority: u64) -> Result<Vec<Req
     Ok(requirements)
 }
 
+/// A pull-request target tolerates only the approving-review requirement.
 fn admit_classic_rules(
     branch: &str,
+    pull_request: bool,
     mut page: impl FnMut(Option<&str>) -> Result<Value>,
 ) -> Result<()> {
     let mut cursor = None;
@@ -677,7 +893,7 @@ fn admit_classic_rules(
             let reviews = rule["requiresApprovingReviews"]
                 .as_bool()
                 .context("missing classic pull-request protection")?;
-            if pushes || creations || signatures || reviews {
+            if pushes || creations || signatures || (reviews && !pull_request) {
                 // ponytail: reject any matching restricted rule, irrespective
                 // of bypasses/priority, until an adapter binds the Git actor.
                 ensure!(
@@ -709,20 +925,31 @@ fn admit_classic_rules(
 
 pub fn execute(request: &AdapterRequest) -> Result<AdapterResponse> {
     request.validate()?;
-    let api = Api::new(request)?;
+    let api = Api::with(
+        &request.api_url,
+        request.credential_file.as_deref(),
+        "application/vnd.github+json",
+    )?;
     execute_with(
         request,
         |path| api.get(path),
-        |repository, branch| api.admit_classic(repository, branch),
+        |repository, branch, pull_request| api.admit_classic(repository, branch, pull_request),
+        |method, path, body| api.write(method, path, body),
     )
 }
 
 fn execute_with(
     request: &AdapterRequest,
     get: impl Fn(&str) -> Result<Value>,
-    classic: impl Fn(&str, &str) -> Result<()>,
+    classic: impl Fn(&str, &str, bool) -> Result<()>,
+    send: impl Fn(&str, &str, &Value) -> Result<Value>,
 ) -> Result<AdapterResponse> {
     request.validate()?;
+    ensure!(
+        request.ci_credential_file.is_none(),
+        "GitHub Actions checks use the forge credential; a separate CI credential is unsupported"
+    );
+    let pull_request = request.landing.as_deref() == Some("pull-request");
     let authority: u64 = request
         .authority
         .parse()
@@ -756,21 +983,22 @@ fn execute_with(
         // name without requiring a branch object or substituting the default.
         admit_rules(&endpoint, branch, |path| list(path, "", &get))?;
         if request.operation == "admit" {
-            classic(repository, branch)?;
+            // Validation binds pull-request admission to the target branch.
+            classic(repository, branch, pull_request)?;
         }
     }
-    let info = if request.operation == "admit" {
-        Value::Null
-    } else {
+    let info = if matches!(request.operation.as_str(), "inspect" | "qualify") {
         get(&format!("{endpoint}/branches/{}", encoded(branch)))?
+    } else {
+        Value::Null
     };
-    let revision = if matches!(request.operation.as_str(), "qualify" | "admit") {
+    let revision = if request.operation == "inspect" {
+        text(&info, "/commit/sha")?
+    } else {
         request
             .revision
             .clone()
             .context("qualification needs exact revision")?
-    } else {
-        text(&info, "/commit/sha")?
     };
     let mut requirements = Vec::new();
     let policy = if request.operation == "inspect" {
@@ -786,7 +1014,7 @@ fn execute_with(
             Value::Null
         };
         ensure!(
-            protection["required_pull_request_reviews"].is_null(),
+            protection["required_pull_request_reviews"].is_null() || pull_request,
             "repository requires pull requests; direct updater landing is unsupported"
         );
         requirements = protection_requirements(&protection, authority)?;
@@ -804,7 +1032,7 @@ fn execute_with(
         Value::Null
     };
     let mut response = AdapterResponse {
-        schema_version: 1,
+        schema_version: request.schema_version,
         coordinate: request.coordinate.clone(),
         repository_id: id.to_string(),
         default_branch: default_branch.clone(),
@@ -814,16 +1042,26 @@ fn execute_with(
         requirements,
         status: "success".into(),
         checks: vec![],
+        change: None,
     };
     if request.operation == "inspect" {
         return Ok(response);
     }
+    if matches!(request.operation.as_str(), "propose" | "merge" | "close") {
+        let (status, change) = pull(request, &endpoint, &repo, &get, &send)?;
+        response.status = status.into();
+        response.change = change;
+        response.validate(request)?;
+        return Ok(response);
+    }
     if request.operation == "admit" {
         let paths = admit_workflows(request)?;
-        admit_workflow_states(
+        let registered = admit_workflow_states(
             &paths,
             &list(&format!("{endpoint}/actions/workflows"), "workflows", &get)?,
         )?;
+        let introduced = paths.difference(&registered).cloned().collect();
+        admit_new_workflows(request, &introduced, &endpoint, &get)?;
         response.checks.push(Check {
             name: "admission".into(),
             authority: request.authority.clone(),
@@ -974,6 +1212,182 @@ fn execute_with(
     Ok(response)
 }
 
+/// Proposes, merges or closes the maintenance branch's pull request. Merges
+/// are guarded on the exact qualified head; the updater never approves.
+fn pull(
+    request: &AdapterRequest,
+    endpoint: &str,
+    repo: &Value,
+    get: &impl Fn(&str) -> Result<Value>,
+    send: &impl Fn(&str, &str, &Value) -> Result<Value>,
+) -> Result<(&'static str, Option<Change>)> {
+    let (Some(branch), Some(target), Some(revision)) = (
+        request.branch.as_deref(),
+        request.target.as_deref(),
+        request.revision.as_deref(),
+    ) else {
+        anyhow::bail!("pull-request operations need the candidate, its branch and target")
+    };
+    let full_name = text(repo, "/full_name")?;
+    let owner = full_name.split('/').next().unwrap_or_default();
+    let mut pull = if let Some(number) = &request.change {
+        get(&format!("{endpoint}/pulls/{}", encoded(number)))?
+    } else {
+        // Closing finds the branch's request whatever it targets, since
+        // policy may have retargeted the repository since it was proposed.
+        let base = if request.operation == "close" {
+            String::new()
+        } else {
+            format!("&base={}", encoded(target))
+        };
+        let found = list(
+            &format!(
+                "{endpoint}/pulls?state=all&head={}{base}",
+                encoded(&format!("{owner}:{branch}"))
+            ),
+            "",
+            get,
+        )?;
+        // Unmerged closed requests are history; a regenerated candidate may
+        // reuse their branch name and needs a new request.
+        let found = found
+            .as_array()
+            .context("missing pull requests")?
+            .iter()
+            .filter(|pull| pull["state"] != "closed" || !pull["merged_at"].is_null())
+            .collect::<Vec<_>>();
+        ensure!(
+            found.len() <= 1,
+            "ambiguous pull requests for the maintenance branch"
+        );
+        match (found.first(), request.operation.as_str()) {
+            (Some(pull), _) => (*pull).clone(),
+            (None, "close") => return Ok(("success", None)),
+            (None, _) => send(
+                "POST",
+                &format!("{endpoint}/pulls"),
+                &serde_json::json!({
+                    "title": format!("ci: adopt qualified simit candidate {}", &revision[..12]),
+                    "head": branch, "base": target,
+                    "body": "Opened by `simit projects update`. It merges this exact head after qualification.",
+                }),
+            )?,
+        }
+    };
+    let id = &repo["id"];
+    // Closing retires our maintenance branch's change even if policy retargeted.
+    ensure!(
+        pull["head"]["ref"] == branch
+            && pull["head"]["repo"]["id"] == *id
+            && (request.operation == "close" || pull["base"]["ref"] == target)
+            && pull["base"]["repo"]["id"] == *id,
+        "pull request differs from the maintenance branch and target"
+    );
+    let number = number(&pull, "/number")?;
+    let mut state = if !pull["merged_at"].is_null() {
+        "merged"
+    } else {
+        match pull["state"].as_str() {
+            Some("open") => "open",
+            Some("closed") => "closed",
+            _ => anyhow::bail!("unknown pull request state"),
+        }
+    };
+    let mut merge_commit = (state == "merged")
+        .then(|| text(&pull, "/merge_commit_sha"))
+        .transpose()?;
+    match (request.operation.as_str(), state) {
+        ("merge", "open") => {
+            ensure!(
+                pull["head"]["sha"] == revision,
+                "pull request head differs from the qualified candidate"
+            );
+            // The merge `sha` pins only the head. Merge onto the candidate's
+            // own source, so the landed commit can be adopted; a moved target
+            // stays pending until the engine closes and regenerates it.
+            // ponytail: GitHub has no base guard, so a push between this read
+            // and the merge still lands; adoption then fails closed.
+            let parents = get(&format!("{endpoint}/commits/{revision}"))?["parents"].clone();
+            let parents = parents.as_array().context("missing candidate parents")?;
+            ensure!(parents.len() == 1, "candidate must have one parent");
+            let base = get(&format!("{endpoint}/branches/{}", encoded(target)))?;
+            let moved = base["commit"]["sha"] != parents[0]["sha"];
+            match text(&pull, "/mergeable_state")?.as_str() {
+                _ if moved => {}
+                "clean" | "unstable" | "has_hooks" => {
+                    // Linear history forbids merge commits on the target.
+                    // Reading protection needs admin access; a token without
+                    // it assumes no rule rather than failing every merge.
+                    let linear = base["protected"] == true
+                        && get(&format!(
+                            "{endpoint}/branches/{}/protection",
+                            encoded(target)
+                        ))
+                        .is_ok_and(|p| {
+                            p.pointer("/required_linear_history/enabled")
+                                == Some(&Value::Bool(true))
+                        });
+                    let method = [
+                        ("merge", "allow_merge_commit"),
+                        ("squash", "allow_squash_merge"),
+                        ("rebase", "allow_rebase_merge"),
+                    ]
+                    .into_iter()
+                    .find(|(method, allowed)| {
+                        repo[allowed] == true && !(linear && *method == "merge")
+                    })
+                    .context("repository allows no pull request merge method")?
+                    .0;
+                    let merged = send(
+                        "PUT",
+                        &format!("{endpoint}/pulls/{number}/merge"),
+                        &serde_json::json!({"sha": revision, "merge_method": method}),
+                    )?;
+                    ensure!(
+                        merged["merged"] == true,
+                        "GitHub did not merge the pull request"
+                    );
+                    state = "merged";
+                    merge_commit = Some(text(&merged, "/sha")?);
+                }
+                // Approvals, required checks, staleness and GitHub's own
+                // mergeability computation can all resolve without the updater.
+                "blocked" | "behind" | "unknown" | "draft" => {}
+                "dirty" => anyhow::bail!("pull request conflicts with its target"),
+                other => anyhow::bail!("unsupported pull request mergeable state {other}"),
+            }
+        }
+        ("close", "open") => {
+            pull = send(
+                "PATCH",
+                &format!("{endpoint}/pulls/{number}"),
+                &serde_json::json!({"state": "closed"}),
+            )?;
+            ensure!(
+                pull["state"] == "closed",
+                "GitHub did not close the pull request"
+            );
+            state = "closed";
+        }
+        _ => {}
+    }
+    let status = if request.operation == "merge" && state == "open" {
+        "pending"
+    } else {
+        "success"
+    };
+    Ok((
+        status,
+        Some(Change {
+            id: number.to_string(),
+            state: state.into(),
+            head: text(&pull, "/head/sha")?,
+            base: text(&pull, "/base/ref")?,
+            merge_commit,
+        }),
+    ))
+}
+
 fn record_checks(
     response: &mut AdapterResponse,
     jobs: &[Value],
@@ -1102,6 +1516,10 @@ mod tests {
     use super::*;
     use serde_json::json;
 
+    fn refuse(method: &str, path: &str, _: &Value) -> Result<Value> {
+        anyhow::bail!("unexpected replay write {method} {path}")
+    }
+
     #[test]
     fn production_adapter_replays_inspection_admission_and_original_qualification() {
         use std::{cell::RefCell, collections::BTreeMap};
@@ -1170,16 +1588,16 @@ mod tests {
                 .with_context(|| format!("unexpected replay endpoint {path}"))
         };
         let classic_calls = RefCell::new(Vec::new());
-        let classic = |repository: &str, branch: &str| {
+        let classic = |repository: &str, branch: &str, pull_request: bool| {
             assert_eq!(repository, "team/demo");
             classic_calls.borrow_mut().push(branch.to_owned());
-            admit_classic_rules(branch, |_| {
+            admit_classic_rules(branch, pull_request, |_| {
                 Ok(json!({"data":{"repository":{"branchProtectionRules":{
                     "totalCount":0,"nodes":[],"pageInfo":{"hasNextPage":false,"endCursor":null}
                 }}}}))
             })
         };
-        let inspected = execute_with(&request, get, classic).unwrap();
+        let inspected = execute_with(&request, get, classic, refuse).unwrap();
         inspected.validate(&request).unwrap();
         assert_eq!(inspected.requirements.len(), 1);
         assert!(
@@ -1192,7 +1610,7 @@ mod tests {
             .borrow_mut()
             .get_mut("repos/team/demo/branches/trunk/protection/required_signatures")
             .unwrap()["enabled"] = json!(true);
-        assert!(execute_with(&request, get, classic).is_err());
+        assert!(execute_with(&request, get, classic, refuse).is_err());
         responses
             .borrow_mut()
             .get_mut("repos/team/demo/branches/trunk/protection/required_signatures")
@@ -1201,17 +1619,17 @@ mod tests {
         request.revision = Some(revision.clone());
         request.workflows = vec![path.into()];
         request.required_checks = inspected.requirements;
-        request.plan = Some(crate::project::CiUpdatePlan {
-            schema: "simit.ci-update-plan.v1".into(),
-            files: vec![crate::project::GeneratedFile {
+        request.plan = Some(crate::project::CiUpdatePlan::new(
+            vec![crate::project::GeneratedFile {
                 relative_path: path.into(),
                 content: workflow.into(),
             }],
-            obsolete: vec![],
-        });
+            vec![],
+            vec![],
+        ));
         for branch in ["maintenance/candidate", "trunk"] {
             request.branch = Some(branch.into());
-            let admitted = execute_with(&request, get, classic).unwrap();
+            let admitted = execute_with(&request, get, classic, refuse).unwrap();
             admitted.validate(&request).unwrap();
             assert_eq!(
                 admitted.checks[0].run,
@@ -1225,14 +1643,14 @@ mod tests {
         let inventory_key = "repos/team/demo/actions/workflows?per_page=100&page=1";
         responses.borrow_mut().get_mut(inventory_key).unwrap()["workflows"][0]["state"] =
             json!("disabled_manually");
-        assert!(execute_with(&request, get, classic).is_err());
+        assert!(execute_with(&request, get, classic, refuse).is_err());
         responses.borrow_mut().get_mut(inventory_key).unwrap()["workflows"][0]["state"] =
             json!("active");
         request.operation = "qualify".into();
         request.plan = None;
         for (branch, run_id) in [("maintenance/candidate", 43), ("trunk", 42)] {
             request.branch = Some(branch.into());
-            let qualified = execute_with(&request, get, classic).unwrap();
+            let qualified = execute_with(&request, get, classic, refuse).unwrap();
             qualified.validate(&request).unwrap();
             assert_eq!(qualified.status, "success");
             assert_eq!(qualified.checks[0].revision, revision);
@@ -1243,7 +1661,7 @@ mod tests {
             );
             responses.borrow_mut().get_mut(&key).unwrap()["workflow_runs"][0]["conclusion"] =
                 json!("cancelled");
-            assert!(execute_with(&request, get, classic).is_err());
+            assert!(execute_with(&request, get, classic, refuse).is_err());
             responses.borrow_mut().get_mut(&key).unwrap()["workflow_runs"][0]["conclusion"] =
                 json!("success");
         }
@@ -1252,11 +1670,385 @@ mod tests {
         request.branch = None;
         request.workflows.clear();
         assert_eq!(
-            execute_with(&request, get, classic).unwrap().status,
+            execute_with(&request, get, classic, refuse).unwrap().status,
             "success"
         );
         responses.borrow_mut().remove(inventory_key);
-        assert!(execute_with(&request, get, classic).is_err());
+        assert!(execute_with(&request, get, classic, refuse).is_err());
+    }
+
+    #[test]
+    fn production_adapter_replays_pull_request_proposal_merge_and_close() {
+        use std::cell::RefCell;
+        let revision = "a".repeat(40);
+        let list = "repos/team/demo/pulls?state=all&head=team%3Amaintenance%2Fcandidate&base=trunk&per_page=100&page=1";
+        let open = json!({
+            "number":7,"state":"open","merged_at":null,"merge_commit_sha":"f".repeat(40),"mergeable_state":"blocked",
+            "head":{"ref":"maintenance/candidate","sha":revision,"repo":{"id":2}},"base":{"ref":"trunk","repo":{"id":2}}
+        });
+        let listed = RefCell::new(json!([]));
+        let pull = RefCell::new(open.clone());
+        let writes = RefCell::new(Vec::new());
+        let source = "5".repeat(40);
+        let target = RefCell::new(source.clone());
+        let linear = RefCell::new(Some(true));
+        let merge_method = RefCell::new("squash");
+        let get = |path: &str| -> Result<Value> {
+            Ok(match path {
+                "repos/team/demo" => json!({
+                    "id":2,"full_name":"team/demo","archived":false,"disabled":false,"default_branch":"trunk",
+                    "clone_url":"https://forge.example/team/demo.git",
+                    "allow_merge_commit":true,"allow_squash_merge":true,"allow_rebase_merge":true
+                }),
+                "repos/team/demo/pulls/7" => pull.borrow().clone(),
+                "repos/team/demo/branches/trunk" => {
+                    json!({"protected":true,"commit":{"sha":*target.borrow()}})
+                }
+                "repos/team/demo/branches/trunk/protection" => {
+                    let enabled = (*linear.borrow()).context("protection needs admin access")?;
+                    json!({"required_linear_history":{"enabled":enabled}})
+                }
+                _ if path == format!("repos/team/demo/commits/{revision}") => {
+                    json!({"parents":[{"sha":source}]})
+                }
+                _ if path == list => listed.borrow().clone(),
+                // Closing looks the branch up across targets.
+                "repos/team/demo/pulls?state=all&head=team%3Amaintenance%2Fcandidate&per_page=100&page=1" => {
+                    listed.borrow().clone()
+                }
+                _ => anyhow::bail!("unexpected replay endpoint {path}"),
+            })
+        };
+        let send = |method: &str, path: &str, body: &Value| -> Result<Value> {
+            writes.borrow_mut().push(format!("{method} {path}"));
+            Ok(match (method, path) {
+                ("POST", "repos/team/demo/pulls") => {
+                    assert_eq!(
+                        (&body["head"], &body["base"]),
+                        (&json!("maintenance/candidate"), &json!("trunk"))
+                    );
+                    pull.borrow().clone()
+                }
+                ("PUT", "repos/team/demo/pulls/7/merge") => {
+                    assert_eq!(
+                        body,
+                        &json!({"sha":revision,"merge_method":*merge_method.borrow()})
+                    );
+                    json!({"merged":true,"sha":"c".repeat(40)})
+                }
+                ("PATCH", "repos/team/demo/pulls/7") => {
+                    assert_eq!(body, &json!({"state":"closed"}));
+                    let mut closed = pull.borrow().clone();
+                    closed["state"] = json!("closed");
+                    closed
+                }
+                _ => anyhow::bail!("unexpected replay write {method} {path}"),
+            })
+        };
+        let classic = |_: &str, _: &str, _: bool| -> Result<()> {
+            anyhow::bail!("pull requests skip admission")
+        };
+        let mut request: AdapterRequest = serde_json::from_value(json!({
+            "schemaVersion":2,"operation":"propose","coordinate":"forge.example/team/demo",
+            "apiUrl":"https://forge.example/api","authority":"777","revision":revision,
+            "branch":"maintenance/candidate","workflows":[],"requiredChecks":[],
+            "landing":"pull-request","target":"trunk"
+        }))
+        .unwrap();
+        let replay = |request: &AdapterRequest| {
+            let response = execute_with(request, get, classic, send)?;
+            Ok::<_, anyhow::Error>((response.status, response.change))
+        };
+        let (status, change) = replay(&request).unwrap();
+        assert_eq!(
+            (status.as_str(), change.unwrap().state.as_str()),
+            ("success", "open")
+        );
+        assert_eq!(writes.take(), ["POST repos/team/demo/pulls"]);
+        // Proposal is idempotent; an unmerged closed request is only history.
+        let mut closed = open.clone();
+        closed["number"] = json!(6);
+        closed["state"] = json!("closed");
+        *listed.borrow_mut() = json!([closed, open]);
+        assert_eq!(replay(&request).unwrap().1.unwrap().id, "7");
+        assert!(writes.borrow().is_empty());
+        request.operation = "merge".into();
+        request.change = Some("7".into());
+        let (status, change) = replay(&request).unwrap();
+        assert_eq!(
+            (status.as_str(), change.unwrap().merge_commit),
+            ("pending", None)
+        );
+        assert!(writes.borrow().is_empty());
+        for (key, value) in [
+            ("mergeable_state", json!("dirty")),
+            (
+                "head",
+                json!({"ref":"maintenance/candidate","sha":"b".repeat(40),"repo":{"id":2}}),
+            ),
+            (
+                "head",
+                json!({"ref":"maintenance/candidate","sha":revision,"repo":{"id":3}}),
+            ),
+            ("base", json!({"ref":"main","repo":{"id":2}})),
+        ] {
+            let mut changed = open.clone();
+            changed["mergeable_state"] = json!("clean");
+            changed[key] = value;
+            *pull.borrow_mut() = changed;
+            assert!(replay(&request).is_err(), "{key}");
+            assert!(writes.borrow().is_empty());
+        }
+        *pull.borrow_mut() = {
+            let mut clean = open.clone();
+            clean["mergeable_state"] = json!("clean");
+            clean
+        };
+        // A target that moved past the candidate's source is never merged.
+        *target.borrow_mut() = "6".repeat(40);
+        assert_eq!(replay(&request).unwrap().0, "pending");
+        assert!(writes.borrow().is_empty());
+        *target.borrow_mut() = source.clone();
+        // Linear history skips the allowed merge commit for squash.
+        let (status, change) = replay(&request).unwrap();
+        let change = change.unwrap();
+        assert_eq!(
+            (status.as_str(), change.state.as_str()),
+            ("success", "merged")
+        );
+        assert_eq!(change.merge_commit, Some("c".repeat(40)));
+        assert_eq!(writes.take(), ["PUT repos/team/demo/pulls/7/merge"]);
+        *linear.borrow_mut() = Some(false);
+        *merge_method.borrow_mut() = "merge";
+        replay(&request).unwrap();
+        assert_eq!(writes.take(), ["PUT repos/team/demo/pulls/7/merge"]);
+        // Unreadable protection must not block a merge.
+        *linear.borrow_mut() = None;
+        replay(&request).unwrap();
+        assert_eq!(writes.take(), ["PUT repos/team/demo/pulls/7/merge"]);
+        request.operation = "close".into();
+        assert_eq!(replay(&request).unwrap().1.unwrap().state, "closed");
+        assert_eq!(writes.take(), ["PATCH repos/team/demo/pulls/7"]);
+        // A request merged by a human is reported, never closed.
+        pull.borrow_mut()["merged_at"] = json!("2026-10-26T00:00:00Z");
+        let change = replay(&request).unwrap().1.unwrap();
+        assert_eq!(
+            (change.state.as_str(), change.merge_commit),
+            ("merged", Some("f".repeat(40)))
+        );
+        assert!(writes.borrow().is_empty());
+        request.change = None;
+        pull.borrow_mut()["merged_at"] = Value::Null;
+        let mut retargeted = open.clone();
+        retargeted["base"]["ref"] = json!("main");
+        *listed.borrow_mut() = json!([closed, retargeted]);
+        assert_eq!(replay(&request).unwrap().1.unwrap().state, "closed");
+        assert_eq!(writes.take(), ["PATCH repos/team/demo/pulls/7"]);
+        *listed.borrow_mut() = json!([closed]);
+        let (status, change) = replay(&request).unwrap();
+        assert_eq!(status, "success");
+        assert!(change.is_none());
+    }
+
+    #[test]
+    fn pull_request_inspection_relaxes_only_approving_review_protection() {
+        let revision = "a".repeat(40);
+        let protection = |reviews: Value| json!({"required_pull_request_reviews":reviews,"required_status_checks":null,"restrictions":null});
+        let replay = |request: &AdapterRequest, protected: &Value| {
+            execute_with(
+                request,
+                |path| {
+                    Ok(match path {
+                        "repos/team/demo" => {
+                            json!({"id":2,"full_name":"team/demo","archived":false,"disabled":false,"default_branch":"trunk","clone_url":"https://forge.example/team/demo.git"})
+                        }
+                        "repos/team/demo/rules/branches/trunk?per_page=100&page=1" => json!([]),
+                        "repos/team/demo/branches/trunk" => {
+                            json!({"protected":true,"commit":{"sha":revision}})
+                        }
+                        "repos/team/demo/branches/trunk/protection" => protected.clone(),
+                        "repos/team/demo/branches/trunk/protection/required_signatures" => {
+                            json!({"enabled":false})
+                        }
+                        _ => anyhow::bail!("unexpected endpoint {path}"),
+                    })
+                },
+                |_, _, _| Ok(()),
+                refuse,
+            )
+        };
+        let mut request: AdapterRequest = serde_json::from_value(json!({
+            "schemaVersion":1,"operation":"inspect","coordinate":"forge.example/team/demo",
+            "apiUrl":"https://forge.example/api","authority":"777","revision":null,"branch":null,
+            "workflows":[],"requiredChecks":[]
+        }))
+        .unwrap();
+        let reviewed = protection(json!({"required_approving_review_count":1}));
+        assert!(
+            replay(&request, &reviewed)
+                .unwrap_err()
+                .to_string()
+                .contains("requires pull requests")
+        );
+        request.landing = Some("pull-request".into());
+        request.schema_version = 2;
+        let inspected = replay(&request, &reviewed).unwrap();
+        assert_eq!(inspected.schema_version, 2);
+        assert_ne!(
+            inspected.policy_digest,
+            replay(&request, &protection(Value::Null))
+                .unwrap()
+                .policy_digest
+        );
+        let mut restricted = reviewed.clone();
+        restricted["restrictions"] = json!({"users":[]});
+        assert!(replay(&request, &restricted).is_err());
+        let rule = |reviews: bool, pushes: bool| {
+            json!({"data":{"repository":{"branchProtectionRules":{"totalCount":1,"nodes":[{
+                "id":"rule","pattern":"trunk","restrictsPushes":pushes,"blocksCreations":false,
+                "requiresCommitSignatures":false,"requiresApprovingReviews":reviews
+            }],"pageInfo":{"hasNextPage":false,"endCursor":null}}}}})
+        };
+        admit_classic_rules("trunk", true, |_| Ok(rule(true, false))).unwrap();
+        assert!(admit_classic_rules("trunk", false, |_| Ok(rule(true, false))).is_err());
+        assert!(admit_classic_rules("trunk", true, |_| Ok(rule(true, true))).is_err());
+    }
+
+    #[test]
+    fn new_workflow_admission_requires_actions_runners_secrets_and_variables() {
+        use std::{cell::RefCell, collections::BTreeMap};
+        let path = ".github/workflows/ci.yaml";
+        let workflow = "on: push\njobs:\n  test:\n    runs-on: ubuntu-24.04\n    steps:\n      - run: echo ${{ secrets.ATTIC_TOKEN }} ${{ secrets.GITHUB_TOKEN }} ${{ vars.SIMIT_CI_ENGINE_REVISION }}\n  build:\n    strategy:\n      matrix:\n        include:\n          - runner: atlas-nix\n    runs-on: ${{ matrix.runner }}\n    steps:\n      - run: exit 0\n  combined:\n    runs-on: [self-hosted, atlas-nix]\n    steps:\n      - run: exit 0\n";
+        let request: AdapterRequest = serde_json::from_value(json!({
+            "schemaVersion":1,"operation":"admit","coordinate":"forge.example/team/demo",
+            "apiUrl":"https://forge.example/api","authority":"777","revision":"a".repeat(40),
+            "branch":"maintenance/candidate","workflows":[path],"requiredChecks":[],
+            "plan":{"schema":"simit.ci-update-plan.v1","files":[{"relative_path":path,"content":workflow}],"obsolete":[]}
+        }))
+        .unwrap();
+        let [permissions, runners, secrets, variables] = [
+            "actions/permissions",
+            "actions/runners?per_page=100&page=1",
+            "actions/secrets?per_page=100&page=1",
+            "actions/variables?per_page=100&page=1",
+        ]
+        .map(|key| format!("repos/team/demo/{key}"));
+        let responses = RefCell::new(BTreeMap::from([
+            (
+                permissions.clone(),
+                json!({"enabled":true,"allowed_actions":"all"}),
+            ),
+            (
+                runners.clone(),
+                json!({"total_count":1,"runners":[{"labels":[{"name":"self-hosted"},{"name":"Atlas-Nix"}]}]}),
+            ),
+            (
+                secrets.clone(),
+                json!({"total_count":1,"secrets":[{"name":"ATTIC_TOKEN"}]}),
+            ),
+            (
+                variables.clone(),
+                json!({"total_count":1,"variables":[{"name":"SIMIT_CI_ENGINE_REVISION"}]}),
+            ),
+        ]));
+        let get = |key: &str| -> Result<Value> {
+            responses
+                .borrow()
+                .get(key)
+                .cloned()
+                .with_context(|| format!("unexpected replay endpoint {key}"))
+        };
+        let introduced = BTreeSet::from([path.to_owned()]);
+        admit_new_workflows(&request, &introduced, "repos/team/demo", &get).unwrap();
+        // Registered paths never consult Actions policy.
+        admit_new_workflows(&request, &BTreeSet::new(), "repos/team/demo", &|_| {
+            anyhow::bail!("registered workflows need no policy request")
+        })
+        .unwrap();
+        for (key, pointer, value, error) in [
+            (
+                &permissions,
+                "/allowed_actions",
+                json!("selected"),
+                "all actions allowed",
+            ),
+            (
+                &permissions,
+                "/enabled",
+                json!(false),
+                "all actions allowed",
+            ),
+            (
+                &runners,
+                "/runners/0/labels/1/name",
+                json!("other"),
+                "atlas-nix",
+            ),
+            (
+                &secrets,
+                "/secrets/0/name",
+                json!("OTHER"),
+                "secrets.ATTIC_TOKEN",
+            ),
+            (
+                &variables,
+                "/variables/0/name",
+                json!("OTHER"),
+                "vars.SIMIT_CI_ENGINE_REVISION",
+            ),
+        ] {
+            let original = responses.borrow()[key].clone();
+            *responses
+                .borrow_mut()
+                .get_mut(key)
+                .unwrap()
+                .pointer_mut(pointer)
+                .unwrap() = value;
+            let message = admit_new_workflows(&request, &introduced, "repos/team/demo", &get)
+                .unwrap_err()
+                .to_string();
+            assert!(message.contains(error), "{pointer}: {message}");
+            responses.borrow_mut().insert(key.clone(), original);
+        }
+        assert_eq!(
+            references(
+                "${{ secrets.A }} inputs.secrets.B ${{secrets.C_1}} ${{ secrets['D-2'] }} ${{ vars['X'] }}",
+                "secrets."
+            )
+            .unwrap(),
+            BTreeSet::from(["A", "C_1", "D-2"])
+        );
+        assert!(references("${{ secrets[matrix.name] }}", "secrets.").is_err());
+        assert!(references("${{ vars[format('{0}', 'X')] }}", "vars.").is_err());
+        // One runner must carry every label a job requests.
+        responses.borrow_mut().insert(
+            runners.clone(),
+            json!({"total_count":2,"runners":[{"labels":[{"name":"self-hosted"}]},{"labels":[{"name":"atlas-nix"}]}]}),
+        );
+        assert!(
+            admit_new_workflows(&request, &introduced, "repos/team/demo", &get)
+                .unwrap_err()
+                .to_string()
+                .contains("self-hosted")
+        );
+        for hosted in [
+            "ubuntu-24.04",
+            "ubuntu-latest",
+            "ubuntu-24.04-arm",
+            "macos-15",
+            "windows-11-arm",
+        ] {
+            assert!(hosted_label(hosted), "{hosted}");
+        }
+        for other in [
+            "ubuntu-not-a-real-runner",
+            "ubuntu",
+            "self-hosted",
+            "windows-2022-gpu",
+            "macos-",
+        ] {
+            assert!(!hosted_label(other), "{other}");
+        }
     }
 
     #[test]
@@ -1455,7 +2247,8 @@ mod tests {
                             _ => anyhow::bail!("unexpected endpoint {endpoint}"),
                         })
                     },
-                    |_, _| Ok(()),
+                    |_, _, _| Ok(()),
+                    refuse,
                 )
             };
             assert_eq!(replay(&request, &jobs).unwrap().status, "success");
@@ -1753,7 +2546,7 @@ mod tests {
             let mut protected = rule("maintenance/*", false, false);
             protected[field] = json!(true);
             assert!(
-                admit_classic_rules("maintenance/uncreated", |_| Ok(page(
+                admit_classic_rules("maintenance/uncreated", false, |_| Ok(page(
                     json!([protected]),
                     false,
                     Value::Null,
@@ -1764,7 +2557,7 @@ mod tests {
             let mut missing = rule("maintenance/*", false, false);
             missing.as_object_mut().unwrap().remove(field);
             assert!(
-                admit_classic_rules("maintenance/uncreated", |_| Ok(page(
+                admit_classic_rules("maintenance/uncreated", false, |_| Ok(page(
                     json!([missing]),
                     false,
                     Value::Null,
@@ -1780,7 +2573,7 @@ mod tests {
                 "maintenance/0123456789abcdef",
             ] {
                 assert!(
-                    admit_classic_rules("maintenance/0123456789abcdef", |_| Ok(page(
+                    admit_classic_rules("maintenance/0123456789abcdef", false, |_| Ok(page(
                         json!([rule(pattern, pushes, creations)]),
                         false,
                         Value::Null,
@@ -1792,7 +2585,7 @@ mod tests {
                 );
             }
         }
-        admit_classic_rules("maintenance/uncreated", |_| {
+        admit_classic_rules("maintenance/uncreated", false, |_| {
             Ok(page(
                 json!([rule("trunk", true, true)]),
                 false,
@@ -1801,7 +2594,7 @@ mod tests {
             ))
         })
         .unwrap();
-        admit_classic_rules("maintenance/uncreated", |_| {
+        admit_classic_rules("maintenance/uncreated", false, |_| {
             Ok(page(
                 json!([rule("maintenance/*", false, false)]),
                 false,
@@ -1810,7 +2603,7 @@ mod tests {
             ))
         })
         .unwrap();
-        admit_classic_rules("maintenance/uncreated", |_| {
+        admit_classic_rules("maintenance/uncreated", false, |_| {
             Ok(page(json!([]), false, Value::Null, 0))
         })
         .unwrap();
@@ -1822,17 +2615,19 @@ mod tests {
             })
             .collect::<Vec<_>>();
         assert!(
-            admit_classic_rules("maintenance/uncreated", |cursor| Ok(if cursor.is_none() {
-                page(json!(first), true, json!("next"), 101)
-            } else {
-                assert_eq!(cursor, Some("next"));
-                let mut last = rule("maintenance/*", true, true);
-                last["id"] = json!("last");
-                page(json!([last]), false, Value::Null, 101)
-            }))
+            admit_classic_rules("maintenance/uncreated", false, |cursor| Ok(
+                if cursor.is_none() {
+                    page(json!(first), true, json!("next"), 101)
+                } else {
+                    assert_eq!(cursor, Some("next"));
+                    let mut last = rule("maintenance/*", true, true);
+                    last["id"] = json!("last");
+                    page(json!([last]), false, Value::Null, 101)
+                }
+            ))
             .is_err()
         );
-        admit_classic_rules("maintenance/uncreated", |cursor| {
+        admit_classic_rules("maintenance/uncreated", false, |cursor| {
             Ok(if cursor.is_none() {
                 page(json!(first), true, json!("next"), 101)
             } else {
@@ -1867,10 +2662,13 @@ mod tests {
                 1,
             ),
         ] {
-            assert!(admit_classic_rules("maintenance/uncreated", |_| Ok(invalid.clone())).is_err());
+            assert!(
+                admit_classic_rules("maintenance/uncreated", false, |_| Ok(invalid.clone()))
+                    .is_err()
+            );
         }
         assert!(
-            admit_classic_rules("maintenance/uncreated", |_| anyhow::bail!(
+            admit_classic_rules("maintenance/uncreated", false, |_| anyhow::bail!(
                 "classic inventory unavailable"
             ))
             .is_err()

@@ -30,6 +30,8 @@
     };
   };
   requirements = types.listOf requirement;
+  credential = types.nullOr (types.addCheck absolute (path: !(normalized path == "/nix/store" || lib.hasPrefix "/nix/store/" (normalized path))));
+  landing = types.enum ["direct" "pull-request"];
 in {
   schemaVersion = option (types.enum [1]) 1;
   workspaces = option (types.attrsOf (types.submodule {
@@ -59,7 +61,9 @@ in {
         in
           port == null || lib.toIntBase10 (builtins.head port) <= 65535);
       };
-      credentialFile = option (types.nullOr (types.addCheck absolute (path: !(normalized path == "/nix/store" || lib.hasPrefix "/nix/store/" (normalized path))))) null;
+      credentialFile = option credential null;
+      # Second API credential for a separate check authority (Crow beside Forgejo).
+      ciCredentialFile = option credential null;
       adapter = mkOption {type = command;};
       adapterSha256 = option (types.nullOr sha256) null;
       adapterInputs = option (types.attrsOf sha256) {};
@@ -96,9 +100,23 @@ in {
           };
         };
       }) {};
-      scopes = option (types.listOf (types.enum ["ci"])) ["ci"];
+      scopes = option (types.listOf (types.enum ["ci" "ci-extra" "release" "flake" "readme"])) ["ci"];
       enrollCurrent = option types.bool false;
+      migrate =
+        option (types.nullOr (types.submodule {
+          options = {
+            provider = mkOption {type = types.enum ["actions" "crow"];};
+            platform = mkOption {type = types.enum ["github" "forgejo"];};
+            runner = mkOption {type = types.strMatching "[A-Za-z0-9._-]+";};
+          };
+        }))
+        null;
       requiredChecks = option requirements [];
+      landing = mkOption {
+        type = landing;
+        default = "direct";
+        description = "direct pushes the target branch; pull-request has the updater open and merge a pull request, parking until the forge reports it mergeable.";
+      };
       rollout = option (types.submodule {
         options = {
           canaries = option (types.listOf coordinate) [];
@@ -112,8 +130,10 @@ in {
         options = {
           enable = option types.bool true;
           reason = option (types.nullOr types.str) null;
+          blocker = option (types.nullOr (types.strMatching "[a-z][a-z0-9-]*")) null;
           targetBranch = option (types.nullOr types.str) null;
           requiredChecks = option requirements [];
+          landing = option (types.nullOr landing) null;
         };
       })) {};
     };

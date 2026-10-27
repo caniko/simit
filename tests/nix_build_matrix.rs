@@ -2277,6 +2277,26 @@ fn nix_only_persists_explicit_false_overrides_for_language_options() {
 }
 
 #[test]
+fn nix_only_plan_resets_persisted_step_runners() {
+    let temp =
+        project("step_runners = { nix-check = \"codeberg-small\" }\n[ci.nix_build]\nonly = true");
+    let persisted = |extra: &[&str]| {
+        let output = generate(&temp, &[&["--plan-json"], extra].concat());
+        assert!(output.status.success(), "{output:?}");
+        let plan: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+        plan["patches"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .find(|patch| patch["relative_path"] == "simit.toml")
+            .map(|patch| patch["content"].as_str().unwrap().to_owned())
+    };
+    assert!(persisted(&[]).is_none_or(|config| config.contains("codeberg-small")));
+    let reset = persisted(&["--reset-step-runners"]).unwrap();
+    assert!(!reset.contains("step_runners"), "{reset}");
+}
+
+#[test]
 fn rust_workspace_nix_only_rejects_requested_gates_from_member_directories() {
     for option in ["with_artifacts", "with_audit", "with_msrv"] {
         for from_config in [false, true] {

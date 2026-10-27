@@ -335,3 +335,47 @@ fn bump_push_skips_a_byte_identical_chocolatey_version_by_default() {
     assert!(stdout.contains("already-current: Chocolatey demo-app 0.1.0"));
     assert!(!stdout.contains("secret-token"));
 }
+
+#[test]
+fn install_url_follows_the_release_host() {
+    for (section, expected) in [
+        (
+            "[release.github]\nrepo = \"example/demo-app\"\n",
+            "https://github.com/example/demo-app/releases/download/0.1.0/",
+        ),
+        (
+            "[release.codeberg]\nrepo = \"example/demo-app\"\n",
+            "https://codeberg.org/example/demo-app/releases/download/0.1.0/",
+        ),
+    ] {
+        let temp = init_package("0.9.0");
+        let config = temp.path().join("simit.toml");
+        fs::write(&config, format!("{}\n{section}", read(&config))).unwrap();
+        let output_dir = temp.path().join("pkg");
+        let output = simit()
+            .current_dir(temp.path())
+            .args([
+                "dist",
+                "chocolatey",
+                "render",
+                "--version",
+                "0.1.0",
+                "--output-dir",
+            ])
+            .arg(&output_dir)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let install = read(&output_dir.join("tools/chocolateyInstall.ps1"));
+        assert!(
+            install.contains(&format!(
+                "$url64 = '{expected}demo-app-0.1.0-x86_64-windows.zip'"
+            )),
+            "{install}"
+        );
+    }
+}

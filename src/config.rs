@@ -264,6 +264,36 @@ pub struct WingetConfig {
     /// CI secret holding the GitHub PAT.
     #[serde(default = "default_winget_token_secret")]
     pub token_secret: String,
+    /// First-submission manifest `Publisher`; defaults to the `package_id`
+    /// segment before the first `.`.
+    #[serde(default)]
+    pub publisher: Option<String>,
+    /// First-submission manifest `PackageName`; defaults to the `package_id`
+    /// remainder after the first `.`.
+    #[serde(default)]
+    pub package_name: Option<String>,
+    /// SPDX or free-text `License`; defaults to Cargo `license`.
+    #[serde(default)]
+    pub license: Option<String>,
+    #[serde(default)]
+    pub license_url: Option<String>,
+    /// `ShortDescription`; defaults to Cargo `description`.
+    #[serde(default)]
+    pub short_description: Option<String>,
+    /// `PackageUrl`; defaults to Cargo `homepage`.
+    #[serde(default)]
+    pub homepage: Option<String>,
+    /// Path of the executable inside the zip; defaults to `<cargo name>.exe`.
+    #[serde(default)]
+    pub binary: Option<String>,
+    /// Portable command alias; defaults to the Cargo package name.
+    #[serde(default)]
+    pub command: Option<String>,
+}
+
+/// winget-pkgs `ShortDescription` schema bounds.
+fn winget_short_description_fits(description: &str) -> bool {
+    (3..=256).contains(&description.chars().count())
 }
 
 fn default_winget_token_secret() -> String {
@@ -2421,6 +2451,8 @@ pub struct HomebrewOverrides<'a> {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ResolvedChocolatey {
     pub tag_prefix: crate::release_identity::TagPrefix,
+    /// Release host the archives are downloaded from.
+    pub platform: Platform,
     pub name: String,
     pub id: String,
     pub title: String,
@@ -2443,6 +2475,24 @@ pub struct ResolvedChocolatey {
     pub api_key_env: String,
     pub api_key_secret: String,
     pub api_key_from_runner: bool,
+}
+
+/// `[winget]` with Cargo-metadata fallbacks applied, for the first-submission
+/// (`wingetcreate submit`) manifests.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResolvedWinget {
+    pub package_id: String,
+    pub download_repo: String,
+    pub zip_archive: String,
+    pub token_secret: String,
+    pub publisher: String,
+    pub package_name: String,
+    pub license: Option<String>,
+    pub license_url: Option<String>,
+    pub short_description: Option<String>,
+    pub homepage: Option<String>,
+    pub binary: String,
+    pub command: String,
 }
 
 #[derive(Debug, Clone, Copy, Default)]
@@ -3063,9 +3113,24 @@ impl ProjectConfig {
     }
 
     pub fn write_ci(workspace_root: &Path, ci: &CiConfig) -> Result<bool> {
+        let Some(file) = Self::render_ci(workspace_root, ci)? else {
+            return Ok(false);
+        };
+        let path = workspace_root.join(&file.relative_path);
+        std::fs::write(&path, file.content)
+            .with_context(|| format!("writing {}", path.display()))?;
+        Ok(true)
+    }
+
+    /// The config file with `ci` persisted, or `None` when it is unchanged.
+    /// A flake `simitConfig` source cannot be persisted and is an error.
+    pub fn render_ci(
+        workspace_root: &Path,
+        ci: &CiConfig,
+    ) -> Result<Option<crate::project::GeneratedFile>> {
         let sources = Self::load_sources(workspace_root)?;
         if sources.is_empty() && *ci == CiConfig::default() {
-            return Ok(false);
+            return Ok(None);
         }
         let (filename, scope) = match sources.as_slice() {
             [] => ("simit.toml", None),
@@ -3096,7 +3161,7 @@ impl ProjectConfig {
 
         let unchanged = sources.len() == 1 && sources[0].config.ci == *ci;
         if unchanged && !ci.publish_crates {
-            return Ok(false);
+            return Ok(None);
         }
 
         let path = workspace_root.join(filename);
@@ -3126,7 +3191,7 @@ impl ProjectConfig {
                 .and_then(Item::as_table_like_mut)
                 .context("[ci] must be a table")?;
             if table.contains_key("publish_strategy") {
-                return Ok(false);
+                return Ok(None);
             }
             // Freeze the legacy policy without reformatting unrelated settings.
             table.insert("publish_strategy", value(ci.publish_strategy.as_str()));
@@ -3144,10 +3209,12 @@ impl ProjectConfig {
 
         let updated = document.to_string();
         if updated == current_text {
-            return Ok(false);
+            return Ok(None);
         }
-        std::fs::write(&path, updated).with_context(|| format!("writing {}", path.display()))?;
-        Ok(true)
+        Ok(Some(crate::project::GeneratedFile {
+            relative_path: filename.into(),
+            content: updated,
+        }))
     }
 
     pub fn can_persist_ci(workspace_root: &Path) -> Result<bool> {
@@ -3175,6 +3242,14 @@ impl ProjectConfig {
             .into_iter()
             .next()
             .and_then(|source| source.ci))
+    }
+
+    /// Labels of the non-empty static config sources; never evaluates a flake.
+    pub(crate) fn static_source_labels(workspace_root: &Path) -> Result<Vec<String>> {
+        Ok(Self::load_static_sources(workspace_root)?
+            .into_iter()
+            .map(|source| source.label)
+            .collect())
     }
 
     fn load_static_sources(workspace_root: &Path) -> Result<Vec<ProjectConfigSource>> {
@@ -3368,11 +3443,91 @@ impl ProjectConfig {
         })
     }
 
+    /// Resolve winget settings for one Cargo package. `license` and
+    /// `short_description` stay optional so update-only projects keep rendering;
+    /// the first-submission step reports them when they are missing.
+    pub fn resolve_winget(&self, package: &crate::cargo::Package) -> Result<ResolvedWinget> {
+        let cfg = self
+            .winget
+            .as_ref()
+            .context("simit project config: [winget] is not configured")?;
+        let (id_publisher, id_name) = cfg
+            .package_id
+            .split_once('.')
+            .unwrap_or((&cfg.package_id, &cfg.package_id));
+        let resolved = ResolvedWinget {
+            package_id: cfg.package_id.clone(),
+            download_repo: cfg.download_repo.clone(),
+            zip_archive: cfg.zip_archive.clone(),
+            token_secret: cfg.token_secret.clone(),
+            publisher: cfg
+                .publisher
+                .clone()
+                .unwrap_or_else(|| id_publisher.to_owned()),
+            package_name: cfg
+                .package_name
+                .clone()
+                .unwrap_or_else(|| id_name.to_owned()),
+            license: cfg.license.clone().or_else(|| package.license.clone()),
+            license_url: cfg.license_url.clone(),
+            short_description: cfg.short_description.clone().or_else(|| {
+                // A Cargo description winget would reject counts as unset, so
+                // update-only projects keep rendering and the first submission
+                // reports it.
+                package
+                    .description
+                    .clone()
+                    .filter(|d| winget_short_description_fits(d))
+            }),
+            homepage: cfg.homepage.clone().or_else(|| package.homepage.clone()),
+            binary: cfg
+                .binary
+                .clone()
+                .unwrap_or_else(|| format!("{}.exe", package.name)),
+            command: cfg.command.clone().unwrap_or_else(|| package.name.clone()),
+        };
+        // The values are written into single-line YAML scalars by the release step.
+        for (field, value) in [
+            ("publisher", Some(&resolved.publisher)),
+            ("package_name", Some(&resolved.package_name)),
+            ("license", resolved.license.as_ref()),
+            ("license_url", resolved.license_url.as_ref()),
+            ("short_description", resolved.short_description.as_ref()),
+            ("homepage", resolved.homepage.as_ref()),
+            ("binary", Some(&resolved.binary)),
+            ("command", Some(&resolved.command)),
+        ] {
+            if value.is_some_and(|value| value.contains(['\n', '\r'])) {
+                bail!("simit project config: [winget].{field} must be a single line");
+            }
+        }
+        if cfg
+            .short_description
+            .as_deref()
+            .is_some_and(|d| !winget_short_description_fits(d))
+        {
+            bail!("simit project config: [winget].short_description must be 3-256 characters");
+        }
+        Ok(resolved)
+    }
+
     /// Resolve Chocolatey settings for one Cargo package.
     pub fn resolve_chocolatey(
         &self,
         overrides: ChocolateyOverrides<'_>,
         package: &crate::cargo::Package,
+    ) -> Result<ResolvedChocolatey> {
+        let platform = crate::ci_resolution::release_backend(self, None, None)?.platform();
+        self.resolve_chocolatey_for_platform(overrides, package, platform)
+    }
+
+    /// Like [`Self::resolve_chocolatey`], downloading archives from `platform`
+    /// (the effective release platform, including a CLI override).
+    pub fn resolve_chocolatey_for_platform(
+        &self,
+        overrides: ChocolateyOverrides<'_>,
+        package: &crate::cargo::Package,
+        platform: Platform,
     ) -> Result<ResolvedChocolatey> {
         self.validate_chocolatey()?;
 
@@ -3475,6 +3630,7 @@ impl ProjectConfig {
 
         Ok(ResolvedChocolatey {
             tag_prefix: self.release.tag_prefix,
+            platform,
             name,
             id,
             title,
@@ -4995,10 +5151,23 @@ fn load_cargo_metadata_config(workspace_root: &Path) -> Result<Vec<ProjectConfig
     Ok(sources)
 }
 
+static NO_FLAKE_EVAL: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Refuse to evaluate flake `simitConfig` sources for the rest of this
+/// process. Child simit processes opt out with `SIMIT_NO_FLAKE_EVAL=1`.
+pub(crate) fn disable_flake_eval() {
+    NO_FLAKE_EVAL.store(true, std::sync::atomic::Ordering::Relaxed);
+}
+
 fn load_flake_config(workspace_root: &Path) -> Result<Option<ProjectConfigSource>> {
     let path = workspace_root.join("flake.nix");
     if !path.exists() || !flake_declares_simit_config(&path)? {
         return Ok(None);
+    }
+    if NO_FLAKE_EVAL.load(std::sync::atomic::Ordering::Relaxed)
+        || std::env::var_os("SIMIT_NO_FLAKE_EVAL").is_some_and(|value| value == "1")
+    {
+        bail!("flake outputs.simitConfig was not evaluated (flake evaluation is disabled)");
     }
 
     let command_text = "nix --extra-experimental-features 'nix-command flakes' eval --json --no-update-lock-file --no-write-lock-file --option accept-flake-config false --option allow-import-from-derivation false .#simitConfig";

@@ -6,6 +6,7 @@ use std::path::PathBuf;
 
 mod checkpoint;
 mod engine;
+mod forgejo;
 mod github;
 mod sandbox;
 pub mod schema;
@@ -37,7 +38,7 @@ pub struct Args {
     pub json: bool,
 }
 
-/// Native GitHub Actions implementation of the versioned adapter protocol.
+/// Native implementation of the versioned adapter protocol.
 #[derive(Debug, ClapArgs)]
 pub struct AdapterArgs {
     #[arg(long)]
@@ -45,9 +46,20 @@ pub struct AdapterArgs {
 }
 
 pub fn adapter(args: AdapterArgs) -> Result<()> {
+    respond(args, github::execute)
+}
+
+pub fn forgejo_adapter(args: AdapterArgs) -> Result<()> {
+    respond(args, forgejo::execute)
+}
+
+fn respond(
+    args: AdapterArgs,
+    execute: fn(&AdapterRequest) -> Result<AdapterResponse>,
+) -> Result<()> {
     let request: AdapterRequest = crate::review::read_json(&args.request)?;
     request.validate()?;
-    let response = github::execute(&request)?;
+    let response = execute(&request)?;
     println!("{}", serde_json::to_string(&response)?);
     Ok(())
 }
@@ -73,7 +85,7 @@ pub fn run(args: Args) -> Result<()> {
     let state_directory = config.state_directory(workspace)?;
     let lock = engine::lock(&state_directory)?;
     checkpoint::ensure_idle(&state_directory)?;
-    let selection_policy = engine::policy_digest(&config, profile, workspace, None)?;
+    let selection_policy = engine::policy_digest(&config, profile, workspace, None, None)?;
     let selection_key =
         crate::review::canonical_digest(&(&args.profile, &selection_policy, &args.repo))?;
     let frozen_path = engine::selection_path(&state_directory, &selection_key);
@@ -145,6 +157,7 @@ pub fn run(args: Args) -> Result<()> {
                     Ok(serde_json::json!({
                         "coordinate": coordinate, "status": status,
                         "reason": disabled.and_then(|override_| override_.reason.as_deref()),
+                        "blocker": disabled.and_then(|override_| override_.blocker.as_deref()),
                         "observations": observations,
                     }))
                 })
@@ -229,8 +242,11 @@ pub fn run(args: Args) -> Result<()> {
             args.wait_seconds,
         ) {
             Ok(report) => {
+                // A pull request awaiting approval parks; only a canary blocks on it.
                 let complete =
-                    matches!(report.phase.as_str(), "unchanged" | "preview" | "qualified");
+                    matches!(report.phase.as_str(), "unchanged" | "preview" | "qualified")
+                        || (report.phase == "proposed"
+                            && !profile.rollout.canaries.contains(&project.coordinate));
                 reports.push(serde_json::to_value(report)?);
                 if !complete {
                     failed = true;
@@ -262,18 +278,17 @@ pub fn run(args: Args) -> Result<()> {
                     && matches!(r["phase"].as_str(), Some("qualified" | "unchanged"))
             })
         });
-        if !profile.rollout.stop_on_failure {
-            let attempted = reports
-                .iter()
-                .filter_map(|r| r["coordinate"].as_str())
-                .collect::<std::collections::BTreeSet<_>>();
-            // Keep incomplete canaries at the front as barriers; retry ordinary
-            // failures only after repositories this rollout has not attempted.
-            frozen.projects.sort_by_key(|p| {
-                !profile.rollout.canaries.contains(&p.coordinate)
-                    && attempted.contains(p.coordinate.as_str())
-            });
-        }
+        let retried = reports
+            .iter()
+            .filter(|r| !profile.rollout.stop_on_failure || r["phase"] == "proposed")
+            .filter_map(|r| r["coordinate"].as_str())
+            .collect::<std::collections::BTreeSet<_>>();
+        // Keep incomplete canaries at the front as barriers; retry ordinary
+        // failures and parked pull requests after unattempted repositories.
+        frozen.projects.sort_by_key(|p| {
+            !profile.rollout.canaries.contains(&p.coordinate)
+                && retried.contains(p.coordinate.as_str())
+        });
         frozen.completed = frozen.projects.is_empty();
         engine::save(&frozen_path, &frozen)?;
     }

@@ -176,6 +176,8 @@ pub struct UpgradeCommand {
         help = "Only apply Codeberg Pages workflow upgrades, skipping README badge upgrades"
     )]
     pub pages_only: bool,
+    #[arg(long, conflicts_with_all = ["paths", "all", "dry_run", "check", "diff", "pages_only"], help = "Print the current workspace's README badge update as a versioned plan patch; empty without badge markers")]
+    pub plan_json: bool,
 }
 
 #[derive(Debug, Args)]
@@ -588,7 +590,7 @@ pub enum BumpKind {
 
 #[derive(Debug, Args)]
 pub struct InitCiCommand {
-    #[arg(long, requires = "primary_only", conflicts_with_all = ["check", "diff"], help = "Print the versioned primary-CI ownership plan without writing files")]
+    #[arg(long, conflicts_with_all = ["check", "diff", "review_only", "pages_only", "prebuild_only"], help = "Print the versioned generated-file ownership plan without writing files; with --primary-only, only primary CI")]
     pub plan_json: bool,
     #[arg(
         long,
@@ -670,6 +672,11 @@ pub struct InitCiCommand {
         help = "Override runner for a specific step key (repeatable, e.g. --step-runner nix-check=atlas-nix-trusted)"
     )]
     pub step_runner: Vec<String>,
+    #[arg(
+        long,
+        help = "Drop persisted [ci].step_runners (and Nix-only [ci].nix_system_runners) before applying --step-runner/--runner, as when moving to another runner fleet"
+    )]
+    pub reset_step_runners: bool,
     #[arg(
         long,
         help = "Generate granular split of CI steps across Codeberg runner tiers (fmt→tiny, clippy/deny/audit→small, test/doc/package→medium); forgejo-only"
@@ -1871,6 +1878,12 @@ pub struct InitReleaseCommand {
     pub ci_provider: Option<CiProvider>,
     #[arg(
         long,
+        value_name = "LABEL",
+        help = "Runner used where the release would fall back to [ci].runner, as after a provider migration"
+    )]
+    pub runner: Option<String>,
+    #[arg(
+        long,
         help = "Verify the platform release workflow matches generated output"
     )]
     pub check: bool,
@@ -1878,6 +1891,8 @@ pub struct InitReleaseCommand {
     pub diff: bool,
     #[arg(long, help = "Print the rendered workflow without writing files")]
     pub print: bool,
+    #[arg(long, conflicts_with_all = ["check", "diff", "print"], help = "Print the versioned release-workflow ownership plan without writing files; empty without an existing release workflow")]
+    pub plan_json: bool,
 }
 
 #[derive(Debug, Args)]
@@ -2159,6 +2174,8 @@ pub struct InitFlakeCommand {
         help = "Print generated flake and hook files without writing them"
     )]
     pub print: bool,
+    #[arg(long, conflicts_with_all = ["check", "diff", "print", "cross"], help = "Print the versioned flake/hook ownership plan without writing files; empty unless simit already manages them")]
+    pub plan_json: bool,
     #[arg(long, help = "Show a unified diff when --check finds stale files")]
     pub diff: bool,
     #[arg(
@@ -2301,12 +2318,18 @@ pub enum ProjectsAction {
     Scan(ProjectsScanArgs),
     #[command(about = "Audit live project CI without reading or writing the registry")]
     Audit(ProjectsAuditArgs),
+    #[command(
+        about = "Print simit usage facts for the fleetix supply graph without writing anything"
+    )]
+    Facts(ProjectsFactsArgs),
     #[command(about = "Regenerate selected generated CI and release workflows")]
     Regenerate(ProjectsRegenerateArgs),
     #[command(about = "Qualify and deploy generated primary CI updates without pull requests")]
     Update(crate::commands::projects_update::Args),
     #[command(about = "Run the GitHub Actions updater adapter protocol")]
     UpdateGithubAdapter(crate::commands::projects_update::AdapterArgs),
+    #[command(about = "Run the Forgejo + Crow CI updater adapter protocol")]
+    UpdateForgejoAdapter(crate::commands::projects_update::AdapterArgs),
     #[command(about = "Discover Rust workspaces under a filesystem subtree")]
     Discover(ProjectsDiscoverArgs),
     #[command(about = "Forget one registered project")]
@@ -2390,6 +2413,20 @@ pub struct ProjectsAuditArgs {
     pub paths: Vec<Utf8PathBuf>,
     #[arg(long, help = "Print a stable machine-readable JSON report")]
     pub json: bool,
+}
+
+#[derive(Debug, Args)]
+pub struct ProjectsFactsArgs {
+    #[arg(
+        value_name = "PATH",
+        help = "Repository checkout; defaults to the current directory; may be repeated"
+    )]
+    pub paths: Vec<Utf8PathBuf>,
+    #[arg(
+        long,
+        help = "Evaluate flake outputs.simitConfig with nix instead of reporting it unresolved"
+    )]
+    pub eval_flake: bool,
 }
 
 #[derive(Debug, Args)]

@@ -79,6 +79,13 @@ policy for standalone installations.
       projectOverrides."github.com/example/custom-ci" = {
         enable = false;
         reason = "Independent project-owned CI";
+        # Optional kebab-case code for tooling; only on disabled overrides.
+        blocker = "custom-ci";
+      };
+      # Protected targets that require pull requests: the updater opens and
+      # merges one instead of pushing. Profiles take the same `landing` option.
+      projectOverrides."github.com/example/reviewed" = {
+        landing = "pull-request";
       };
     };
   };
@@ -96,12 +103,18 @@ alone does not bind their dynamic loaders or shared libraries.
 Runtime roots and credential paths are strings. Nix evaluation does not inspect
 worktrees, query forges or read credential contents. Git transport authentication
 is supplied by the execution user's existing Git configuration; `credentialFile`
-authenticates API reads only. The execution user's Git identity, signing and
+authenticates API reads only, except under pull-request landing, where it also
+opens, merges and closes pull requests. A fine-grained GitHub token then needs
+`Pull requests: write` and `Contents: write` on the enrolled repositories. The execution user's Git identity, signing and
 hooks are honored when creating candidate commits.
 The sandbox has no personal Simit configuration. Projects must declare their CI
 platform and any private runner labels through project policy; GitHub can use
 its built-in hosted-runner defaults. An undeclared platform retains Simit's
-Forgejo default and cannot borrow runner configuration from the operator's home.
+Forgejo default and cannot borrow runner configuration from the operator's home,
+so a Forgejo release plan fails unless `[release.artifacts].runner` or `[ci].runner` is set.
+The `readme` scope leaves the README alone in a run that changes CI workflows, the
+flake, other existing outputs or removes files; the next run regenerates the badges
+from the landed tree.
 
 The module creates `simit-updater-<profile>.service` and, when scheduled, its
 timer. State is private and writable; workspace source and user configuration
@@ -212,6 +225,9 @@ selection filters. Execution still requires every canary to be eligible and
 included in CLI narrowing. Duplicate eligible canonical identities, unlisted
 canaries and invalid CLI selection remain errors. `--plan` cannot be combined with execution/status modes
 or a batch limit; it reports the full selection before batching.
+Disabled enrollment entries carry the override's `reason` and, when declared,
+its `blocker`: a kebab-case code (`[a-z][a-z0-9-]*`) that fleet tooling can
+group by. Rust and Nix reject a `blocker` on an enabled override.
 
 Use `--config PATH` outside NixOS. `--repo HOST/OWNER/REPO` narrows selection;
 configured canaries must remain included. `--limit N` further bounds the profile's
@@ -229,9 +245,10 @@ For each repository:
 
 1. Resolve forge identity, remote default branch, target revision and protection.
 2. Qualify the pinned generator source and verify its enrolled executable.
-3. Obtain `init ci --primary-only --plan-json` in an isolated Linux sandbox. The versioned
-   ownership plan supplies writes and deletions; it uses the project's existing
-   resolved configuration without creating a new configuration file. Generation
+3. Obtain one versioned plan per enrolled scope (see [Scopes](#scopes)) in an
+   isolated Linux sandbox. Each ownership plan supplies writes and deletions; it
+   uses the project's existing resolved configuration without creating a new
+   configuration file. Generation
    must preserve persistent updater state, Git configuration, hooks and refs as
    well as source files. State outside the current checkout is checkpointed and
    verified before trusting the plan, including when generation fails. Detected
@@ -244,7 +261,10 @@ For each repository:
    require exact-candidate original push qualification.
 6. Reinspect source and policy, then conditionally advance the target branch to
    the same candidate using an explicit Git lease after repeating target admission.
-7. Verify exact-source default/target-branch adoption and record a new baseline.
+   With `landing = "pull-request"` the updater instead proposes and merges a pull
+   request (see below).
+7. Verify exact-source default/target-branch adoption, record a new baseline and
+   delete the maintenance ref under a lease on the candidate.
 
 Managed identities include the canonical Git mode and blob from the staged/committed
 tree, so clean/smudge filters and newline conversion do not invalidate the next
@@ -288,18 +308,27 @@ movement, changed default branches, protection changes and managed-file edits
 invalidate earlier candidate acceptance. Failed, skipped, cancelled, neutral or
 rerun required cases cannot qualify. Receipts and adapter responses remain in
 `stateDirectory`; `--status` reads them without discovery or forge queries.
+Each receipt records the `generatorRevision` that produced it; receipts written
+before that field existed report `null` until their next transaction.
 
 Repository clones, receipts and baselines are isolated under a profile-specific
 directory in `stateDirectory`. `--status` reports only the requested profile.
 Receipt policy hashes include the active profile, its workspace, and its generator
-and consumer forge records. Frozen selection keys use the profile, workspace and
+and consumer forge records. Receipts written by this version (`schemaVersion: 2`)
+also record `projectPolicyDigest`, the same hash with other coordinates'
+enrollment, canary membership and overrides removed; unfinished v2 receipts
+resume against it, so editing another repository's policy keeps this one's
+candidate or pull request. Receipts without `schemaVersion` are v1, resume
+against `configDigest` and land directly. Older executors reject v2 receipts. Frozen selection keys use the profile, workspace and
 generator forge policy. Changes to unrelated configuration entries therefore
 preserve the frozen selection and resumable candidates; changes to a transaction's
 referenced policy still invalidate its pending receipt. Frozen projects revalidate
 against the currently enrolled consumer forge host before any adapter request.
 
-Before landing, source movement archives the invalidated receipt and prepares a
-fresh candidate from the newly observed source, preserving the adopted baseline.
+Before landing, source movement archives the invalidated receipt, deletes its
+maintenance ref and prepares a fresh candidate from the newly observed source,
+preserving the adopted baseline. Ref deletion is cleanup: a ref that is already
+gone, or that another writer moved, is logged and kept rather than failing.
 A candidate already awaiting adoption, or one found in the new source's ancestry,
 requires explicit adoption reconciliation instead of silently restarting.
 
@@ -322,8 +351,8 @@ At runtime the updater resolves existing path components, checks every state tre
 against the resolved workspace roots, and rejects overlaps before creating files.
 
 Forge adapters execute in Linux namespaces with an empty filesystem view populated
-by the read-only Nix store, enrolled code snapshots, the exact request, the one
-configured credential, DNS plumbing and immutable CA certificates. They retain
+by the read-only Nix store, enrolled code snapshots, the exact request, the
+configured credentials, DNS plumbing and immutable CA certificates. They retain
 network access to their forge. Home and temporary storage are private, host state
 and daemon sockets are absent, and descendants cannot outlive the adapter.
 
@@ -357,9 +386,9 @@ user-site imports; Python scripts should use an isolated (`-I`) store interprete
 Inventory launchers start with a cleared environment and an explicit runtime
 allowlist. Adapters use only store-backed `PATH`/CA paths and private home/temp
 settings. Forge/package-registry credentials and unlisted variables are excluded;
-adapters receive their configured `credentialFile` through request JSON and a
-read-only file mount. The updater's separate Git transport commands retain
-operator Git identity, signing and transport configuration.
+adapters receive their configured `credentialFile` and `ciCredentialFile`
+through request JSON and read-only file mounts. The updater's separate Git
+transport commands retain operator Git identity, signing and transport configuration.
 Repository-routing variables such as `GIT_DIR`, `GIT_WORK_TREE`, `GIT_INDEX_FILE`,
 object directories and ref namespaces are removed from every updater Git command
 so an inherited environment cannot redirect operations outside the disposable clone.
@@ -397,8 +426,8 @@ acceptance, and the workflow and all jobs must still succeed.
 This source check applies to generator and consumer qualification, and to
 pre-push admission of committed candidate bytes.
 Required checks from other applications, unbound contexts, active rulesets,
-locked or push-restricted target branches and PR-required protections are rejected
-during admission. The API credential is not evidence of the separate Git
+locked or push-restricted target branches and, for direct landing, PR-required
+protections are rejected during admission. The API credential is not evidence of the separate Git
 transport actor's membership in a push allowlist.
 Signature-required protection is queried through its separate REST endpoint and
 included in the observed policy digest. V1 rejects it before publication; proving
@@ -421,6 +450,14 @@ The workflow registry is completely paginated before admission and qualification
 Existing selected workflows must be active; disabled, incomplete or duplicate
 observations fail. A path absent from a complete registry may be introduced by
 the candidate, but still needs a genuine original push run to qualify.
+Before admitting such a new qualification workflow, the adapter requires
+Actions to be enabled with all actions allowed (`actions/permissions`). Every
+job must run on a hosted image label (such as `ubuntu-24.04`, `macos-latest` or
+`windows-11-arm`) or on labels that one runner registered to the repository
+carries together, resolving `${{ matrix.KEY }}` through
+static matrix values. Every referenced `secrets.NAME` (other than
+`GITHUB_TOKEN`) and `vars.NAME` must exist in the repository; admission lists
+the missing names. Registered workflows skip these checks.
 Concurrency is admitted only when absent or in the supported path/ref-scoped
 forms below, with an absent or literal boolean `cancel-in-progress`:
 
@@ -440,7 +477,7 @@ It does not migrate protection contexts, CI engine variables, or PR-only custody
 transitions require a later protocol with explicit ordered migration support.
 Other forge/CI backends can enroll an absolute adapter command implementing the
 same versioned inspect/qualify contract and its source-binding requirements.
-The request's `workflows` list carries all owned generated paths. Each adapter
+The request's `workflows` list carries the `ci` scope's generated paths. Each adapter
 selects its own workflow formats and trigger semantics. The GitHub adapter reads
 owned Actions YAML at the exact requested revision to identify push triggers.
 Before publishing a candidate receipt or maintenance ref, the adapter must support
@@ -450,6 +487,10 @@ the enrolled authority, bound to that revision and to the SHA-256 of the complet
 request's recursively key-sorted compact UTF-8 JSON in `run`, with `attempt = 1`
 and `status = "success"`. This prevents older adapters from silently treating
 admission as qualification. The plan field is omitted from other operations.
+Requests declare `schemaVersion = 1` unless they use a version-2 feature
+(currently `ciCredentialFile`); version-1 requests keep their exact bytes and
+admission digest. Adapters reject a declared version that differs from the
+request's features, and responses echo the request's version.
 
 The GitHub adapter checks branch trigger filters against both qualification
 branches, including ordered exclusions and tag-only triggers. Literal branch
@@ -459,6 +500,202 @@ requires an adapter that can evaluate GitHub's exact-change trigger semantics.
 Initial admission failures leave no published candidate receipt or maintenance
 ref and can be retried after correcting policy or templates. A failed resume
 admission preserves the prior receipt and cannot push or advance either ref.
+
+### Forgejo + Crow adapter
+
+`simit projects update-forgejo-adapter` qualifies Crow workflows of repositories
+hosted on Forgejo. `apiUrl` is the Forgejo API root and `checkAuthority` is the
+canonical Crow origin (no path or trailing slash); the adapter calls Crow at
+`<checkAuthority>/api/v1`. `credentialFile` holds the Forgejo token and
+`ciCredentialFile` the Crow token. Each token is sent only to its own origin;
+both follow the credential path, store and code-overlap rules and must be
+distinct files. At dispatch the snapshotted tokens must also differ, so links or
+copies of one secret are refused.
+
+```nix
+forges.codefloe = {
+  host = "codefloe.com";
+  apiUrl = "https://codefloe.com/api/v1";
+  credentialFile = "/run/credentials/simit/forgejo-token";
+  ciCredentialFile = "/run/credentials/simit/crow-token";
+  checkAuthority = "https://ci.codefloe.com";
+  adapter = {
+    program = "${simit}/bin/simit";
+    arguments = ["projects" "update-forgejo-adapter"];
+  };
+};
+```
+
+Requirements name Crow workflows under the Crow origin, for example
+`{name = "build"; authority = "https://ci.codefloe.com";}`. A workflow's name is
+its literal top-level `name:`, otherwise its file name without extension, as
+Crow reports it and as Forgejo shows it in `ci/crow/push/<name>` status contexts.
+
+Inspection requires an unarchived, non-mirror repository whose active Crow record
+names the Forgejo repository ID as `forge_remote_id` and its clone URL (remote IDs
+repeat across forge connections), shares its default branch, uses the default
+`.crow/` configuration path and has no push approval gate (`require_approval` of `none`,
+`forks` or `pull_requests`). The token must be able to push the target branch.
+Every protection rule matching the target or maintenance branch is checked:
+approvals, signed commits, protected file patterns, and disabled or allowlisted
+pushes are rejected for direct landing. Required status contexts must be literal
+`ci/crow/push/<name>`; globs, pull-request contexts and other CI systems fail.
+
+Admission statically evaluates owned `.crow/*.yaml` and `.yml` files. Jsonnet and
+keys outside the generated vocabulary are rejected: workflows may use `name`,
+`labels`, `platform`, `when`, `skip_clone`, `variables`, `workspace` and `steps`;
+steps may use `name`, `image`, `commands`, `environment`, `directory`,
+`entrypoint`, `failure: fail`, `temp_volumes` and `when`. Matrices, services,
+dependencies, `runs_on`, approval gates, caches, `detach` and `failure: ignore`
+therefore fail before publication. Conditions may use only `event` and `branch`
+(literal names, `*`/`**` globs, or exactly `${CI_REPO_DEFAULT_BRANCH}`). A push
+to the branch must run at least one owned workflow, and each required check must
+name one. Workflows that run only on the default branch are carried unqualified
+by the maintenance branch and qualified after adoption.
+
+Qualification finds the single original push pipeline (`parent = 0`) for the
+exact revision and branch among pipelines created from one hour before the
+revision's committer date, scanning at most 20 pages of 50. Restarts never
+qualify; duplicate originals fail. Crow's stored configuration for each owned
+workflow must equal the forge's bytes at the revision and must not be generated.
+The workflow and every step must be original attempts that succeeded, and the
+steps must be exactly the implicit `clone` step (unless `skip_clone`) plus the
+source steps whose conditions match the push, because Crow drops the rest when it
+compiles the workflow. Each workflow becomes a check with run
+`<crow repository id>/<pipeline number>`. A workflow Crow refused for an
+exhausted CI quota (`CI quota denied ...`) fails with a distinct quota message;
+rerun the update after the quota resets. Generator qualification stays with
+GitHub Actions; requests without workflows answer `unsupported`.
+
+## Pull-request landing
+
+`landing` is `direct` (the default) or `pull-request`, set per profile and
+overridden per coordinate. Pull-request landing uses adapter protocol v2: the
+request carries `landing`, the `target` branch and, once known, the forge's
+`change` identifier, and adds three operations. Responses echo the request's
+`schemaVersion` and report `change` as `{id, state, head, base, mergeCommit}`,
+where `state` is `open`, `merged` or `closed`. Requests without these features
+stay version 1 with unchanged bytes and admission digests.
+
+- `propose` returns the open or merged pull request whose head is the
+  maintenance branch at the exact candidate, creating one when none exists.
+  Unmerged closed requests are history and are not reused.
+- `merge` merges only when the head is still the candidate. It reports
+  `pending` while the forge needs approvals, checks, an update or its own
+  mergeability computation, and fails on conflicts.
+- `close` closes the request, or reports it as merged when a human already
+  merged it.
+
+Inspection and target-branch admission relax only approving-review protection:
+GitHub's `required_pull_request_reviews` and the classic
+`requiresApprovingReviews` rule. Push restrictions, signatures, rulesets (and so
+ruleset merge queues), locks and maintenance-branch protection stay rejected. GitHub
+uses the first merge method the repository allows: merge commit, then squash,
+then rebase. The updater never approves its own request; repositories needing
+approvals wait for a human.
+
+After the candidate qualifies and the target is admitted again, the receipt
+enters `proposed` and the updater proposes and merges. If the request cannot
+merge yet, the run reports `proposed` and the repository is parked: it does
+not fail the run or stop a batch, stays in the frozen rollout and moves behind
+unattempted repositories. A canary in `proposed` remains a barrier.
+
+A merged request records `landed` (its merge commit) and enters `adopting`.
+Adoption requires the target to be exactly `landed`, `landed` to have the
+candidate's tree, and its first parent to be the candidate's source; then
+`landed` is qualified on the target. A merge, squash, rebase or fast-forward
+all satisfy this; anything else fails closed and keeps the receipt for
+reconciliation.
+
+Each run first re-reads a parked request:
+
+- merged, including by a human: adopt as above;
+- closed without merging: archive the receipt, delete the maintenance ref and
+  regenerate;
+- open but stale, because the target moved, the repository policy or default
+  branch changed, or `projectPolicyDigest` changed: close it, archive, delete
+  the ref and regenerate.
+
+GitHub merges only while the target is still the candidate's source; a moved
+target leaves the merge pending until the next run closes and regenerates it.
+When the target requires linear history, merge commits are skipped in favour of
+the next allowed method; reading that rule needs `Administration: read`, and
+without it the updater assumes no such rule. Previews (`--dry-run`) report a parked request as
+`proposed` and never close, propose or merge, or delete a ref.
+
+Deselecting or disabling a parked repository revokes the updater's authority
+over it, so the updater no longer touches its open request or maintenance ref;
+close those by hand, or re-enable the repository so a run resumes or retires them.
+
+Other forges add these operations in their own adapters.
+
+## Scopes
+
+`scopes` lists the generated-file consumptions a profile maintains. It must
+contain `ci`, and each scope may appear once. Every scope only updates an
+existing consumption; none introduces a new one.
+
+| Scope      | Generator call                       | Result                                                                                                                                                                                                                                             |
+| ---------- | ------------------------------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `ci`       | `init ci --primary-only --plan-json` | Primary CI. Its files are the only qualification set.                                                                                                                                                                                              |
+| `ci-extra` | `init ci --plan-json`                | Also publishers, Pages, extension publishers, release-plz, review, custody and `scripts/ci-local.sh`. The persisted `[ci]` table and a newly created `deny.toml` are patches.                                                                      |
+| `release`  | `init release --plan-json`           | The release workflow, only when a generated one exists. It moves to another backend only when `[ci].platform` or a migration selects one.                                                                                                          |
+| `flake`    | `init flake --plan-json`             | Flake and hook files, only when simit already manages them. A `flake.nix` change whose input names differ from `flake.lock`'s root inputs is rejected, as is a changed declaration of an existing input, since generation cannot fetch a new lock. |
+| `readme`   | `upgrade --plan-json`                | A `README.md` badge-block patch, only when the badge markers exist.                                                                                                                                                                                |
+
+The `ci` plan must equal its part of the `ci-extra` plan byte for byte, including
+obsolete paths. Paths in different scopes must not overlap, and patches cannot
+target `.github/workflows`, `.forgejo/workflows` or `.crow`. `workflows.json` and
+qualification requests carry only the `ci` files. Files from the other scopes are
+committed and admitted with the candidate, but land without their own
+qualification; their first run happens after landing. The full `init ci` plan
+never resolves the local release trust root; a plan with publishing workflows
+instead requires the committed trust root they fetch. It fails for a flake
+`simitConfig` source because that `[ci]` table cannot be persisted.
+
+A patch is a whole-file edit of a project-owned file. The plan lists it under
+`patches`, which makes the plan schema `simit.ci-update-plan.v2`; a plan without
+patches stays `simit.ci-update-plan.v1`. Patches are committed, recorded in the
+receipt's `patches` with their Git mode and blob, verified when a candidate is
+resumed, and included in admission requests. Admission requests whose plan has
+patches use adapter protocol version 2, and receipts with patches are version 2.
+The adopted baseline never owns a patch, so later README or `simit.toml` edits do
+not block updates.
+
+Widening `scopes` for a repository with an adopted baseline usually starts
+managing files that already exist. Like the initial baseline, adopting them
+requires `enrollCurrent`. Baselines record the scopes they were adopted under,
+so this applies only to the run that adds a scope; later runs again stop when a
+plan claims an existing file outside the baseline.
+
+## Provider migration
+
+`migrate = { provider; platform; runner; }` regenerates a profile's CI for
+another backend: `actions` on `github`, or `crow` on `forgejo`. Forgejo Actions
+is not a migration target, because the Forgejo adapter qualifies only Crow
+pipelines.
+The `init ci` scopes receive `--ci-provider`, `--platform`, `--runner` and
+`--reset-step-runners`, which drops persisted `[ci].step_runners` labels of the
+old runner fleet and Nix-only `[ci].nix_system_runners`; `init release` receives the provider, platform and runner,
+which replaces the `[ci].runner` fallback of its release jobs. The
+rewritten `[ci]` table is a `ci-extra` patch, so a migrating profile must enroll
+`ci-extra`. It cannot enroll `readme`, because badges are computed from the
+pre-migration workflows. The ordinary obsolete sweep retires the old
+generator-owned workflows, such as `.crow/*`. A repository without an adopted
+baseline needs `enrollCurrent` for its first migrated run.
+
+```nix
+profiles.migrate-provider = {
+  scopes = ["ci" "ci-extra"];
+  migrate = {
+    provider = "actions";
+    platform = "github";
+    runner = "ubuntu-24.04";
+  };
+  enrollCurrent = true;
+  # workspace, generator, select and requiredChecks as for any profile
+};
+```
 
 ## Dependencies and verification
 

@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- `[winget]` can make the first submission of a package: when it is not in
+  `microsoft/winget-pkgs` yet, the release step writes the ManifestVersion
+  1.10.0 version, installer (zip with a nested portable executable and
+  uppercase SHA-256) and default-locale manifests and runs
+  `wingetcreate submit`; existing packages keep `wingetcreate update`. New
+  optional `publisher`, `package_name`, `license`, `license_url`,
+  `short_description`, `homepage`, `binary` and `command` fields default from
+  the package id and Cargo metadata. Under `activated-remote` a failed first
+  submission warns until the channel is active.
+- Fixed: Chocolatey package install URLs always pointed at codeberg.org. They
+  now follow the release host (`[release.github]` gives github.com, Codeberg
+  and Forgejo configs keep codeberg.org).
 - Fix `simit init ci` with `[ci].nix_system_runners`: it no longer persists a
   `runner` that its own validation then rejects, and a `[ci.nix_system_runners]`
   table is rewritten as `nix_system_runners = { ... }` instead of
@@ -25,6 +37,108 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `scripts/ci-local.sh` runs after the derived CI steps and Nix builds, for
   suites no hosted CI runs. It requires `local_gate = true`, and names must be
   unique single lines.
+- `simit projects update`: disabled `projectOverrides` accept an optional
+  kebab-case `blocker` code, emitted next to `reason` in
+  `simit.updater-selection-plan.v1` enrollment entries. Receipts record the
+  `generatorRevision` that produced them, shown by `--status`; older receipts
+  still load and gain it on their next transaction.
+- Add `simit projects update-forgejo-adapter`, an updater adapter for Forgejo
+  repositories qualified by Crow CI. It binds the Crow repository to the
+  Forgejo repository ID, admits only the generated Crow workflow vocabulary,
+  and qualifies the original push pipeline of the exact revision after
+  checking Crow's stored configuration against the forge bytes and every
+  workflow and step outcome. It supports direct landing; the generator stays
+  qualified on GitHub Actions.
+- Add updater `forges.<name>.ciCredentialFile`, a second credential for a
+  separate CI service. It follows the `credentialFile` rules, must be a
+  distinct file, and is pinned read-only into the adapter namespace beside the
+  forge credential.
+- Updater adapter requests now derive `schemaVersion`: 2 when a version-2
+  feature such as `ciCredentialFile` is present, otherwise 1 with unchanged
+  bytes and admission digests. Adapters reject a mismatched declaration and
+  responses echo the request version.
+- `simit projects update` can land through pull requests: set
+  `landing = "pull-request"` on a profile or project override. After the
+  candidate qualifies, the updater opens a pull request for the maintenance
+  branch and merges its exact head, only while the target is still the
+  candidate's source, with the first merge method the repository and target
+  protection allow. A request that needs approval or is not yet mergeable parks the
+  repository in `proposed` without failing the run or stopping later
+  repositories; a parked canary still blocks. On later runs a merged request
+  (including one merged by a human) is adopted only if the landed commit has
+  the candidate's tree and its source as first parent. A closed request, or an
+  open one that went stale because the target or policy changed, is closed and
+  regenerated. Only approving-review protection is relaxed; push restrictions,
+  signatures and rulesets still reject.
+- Updater adapter protocol v2 adds the `propose`, `merge` and `close`
+  operations, the request fields `landing`, `target` and `change`, and the
+  response field `change`. Requests that use none of them stay version 1 and
+  byte-identical, and responses must echo the request's version. The built-in
+  GitHub adapter implements v2.
+- Updater receipts are now version 2 and record `landing`, `change`, `landed`
+  and `projectPolicyDigest`. Unfinished v2 receipts resume against
+  `projectPolicyDigest`, which leaves out other repositories' enrollment and
+  overrides, so editing another repository's policy keeps pending candidates.
+  v1 receipts still resume as direct landing; older executors reject v2
+  receipts.
+- The updater deletes its maintenance ref, under a lease on the candidate,
+  after adoption and when it invalidates a candidate. A ref that is already
+  gone or that another writer moved is logged and kept.
+- `simit projects update` profiles can declare
+  `migrate = { provider, platform, runner }` to regenerate CI for another
+  backend (Actions on GitHub or Forgejo, Crow on Forgejo). The `[ci]` rewrite
+  lands as a `ci-extra` patch, so migration requires `ci-extra` and excludes
+  `readme`; the obsolete sweep retires the old generated workflows.
+- The GitHub updater adapter admits a qualification workflow that is new to
+  the repository's workflow registry only when Actions is enabled with all
+  actions allowed, every job runs on a hosted image label or on labels one
+  registered runner carries, and every referenced secret and variable exists.
+  Admission names the missing ones.
+- Add `simit init release --runner`, which replaces the `[ci].runner` fallback
+  for release jobs, as provider migrations pass.
+- Add `simit init ci --reset-step-runners`, which drops persisted
+  `[ci].step_runners` before applying `--step-runner`, for moving a project to
+  another runner fleet.
+- `simit projects update` profiles can enroll the update-only scopes
+  `ci-extra`, `release`, `flake` and `readme` beside the required `ci`. Only
+  the `ci` files qualify a candidate; the other files are committed, admitted
+  and landed with it. Scopes must not overlap, and the `ci` plan must match its
+  part of the `ci-extra` plan byte for byte. Widening scopes on an adopted
+  repository requires `enrollCurrent` to adopt the files that already exist.
+- Generator update plans can carry `patches`, whole-file edits of
+  project-owned files that the updater commits but never baseline-owns: the
+  persisted `[ci]` table, a newly created `deny.toml` and the README badge
+  block. Plans with patches use schema `simit.ci-update-plan.v2`, admission
+  requests with them use adapter protocol version 2, and receipts record them
+  under `patches` with `schemaVersion = 2`.
+- `simit init ci --plan-json` no longer requires `--primary-only`; without it the
+  plan covers every owned CI file. Plans never resolve the local release trust
+  root, and a flake `simitConfig` source fails because its `[ci]` table cannot
+  be persisted. `simit init release`, `simit init flake` and `simit upgrade` gain
+  `--plan-json`, which is empty unless the release workflow, the managed
+  flake/hook files or the README badge markers already exist. The flake plan
+  rejects a `flake.nix` input change that `flake.lock` does not already lock.
+- `simit init release` on GitHub falls back to hosted runners without a simit
+  user config, as `simit init ci` already did.
+
+- `simit projects facts` reports simit's own flake references and `cargo install`
+  commands in simit-generated files as `runtime.generated-ref`, covered by
+  regenerating that file, instead of manual `runtime.flake-ref` /
+  `runtime.cargo-install` pins. Config commands copied into generated files
+  stay manual pins.
+- Add `simit projects facts [PATH...] [--eval-flake]`: a read-only
+  `fleetix.supply-facts.v1` document (vocabulary `simit.usage-facts.v1`) of
+  every simit usage in the given checkouts (config sources, generated CI,
+  release, flake, hooks, README badges and distribution files, flake inputs,
+  runtime references, pins and Cargo dependencies), with repository blockers
+  and the capability matrix of upgrade paths. Updater rows are `implemented`
+  exactly when the new `SUPPORTED_SCOPES`, `UPDATER_ADAPTERS` and
+  `SUPPORTED_LANDINGS` constants say so. Flake `simitConfig` is evaluated only
+  with `--eval-flake`; `SIMIT_NO_FLAKE_EVAL=1` disables that evaluation in any
+  simit process. Every workflow file also becomes a `workflow:` node with its
+  static triggers, runner labels and step names. See
+  `docs/src/projects-facts.md`.
+  simit process. See `docs/src/projects-facts.md`.
 - Add `[release.pypi]`: the release workflow uploads the prebuilt
   `release/*.whl` (e.g. from a Nix `release-bundle`) to PyPI with
   `uv publish --check-url` after the hosted release, using PyPI trusted

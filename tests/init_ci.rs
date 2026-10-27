@@ -75,6 +75,194 @@ fn primary_plan_is_versioned_read_only_and_preserves_other_owners() {
 }
 
 #[test]
+fn full_plan_patches_changed_project_policy_without_resolving_trust() {
+    let temp = init_package(false);
+    let root = temp.path();
+    // An unexportable signing key makes any trust-root resolution fail.
+    fs::write(
+        root.join("simit.toml"),
+        "[ci]\nplatform = 'github'\nprovider = 'actions'\nruntime = 'cargo'\nwith_deny = true\nwith_artifacts = true\n[release.signing]\nkey = '0000000000000000000000000000000000000000'\n",
+    )
+    .unwrap();
+    let run = |args: &[&str]| {
+        simit()
+            .current_dir(root)
+            .env_remove("SIMIT_MAINTAINERS_GPG")
+            .env("GNUPGHOME", root.join("no-keys"))
+            .args(args)
+            .output()
+            .unwrap()
+    };
+    assert!(!run(&["init", "ci"]).status.success());
+    // Publishing workflows fetch the committed trust root, so a plan needs one.
+    let missing = run(&["init", "ci", "--plan-json"]);
+    assert!(!missing.status.success());
+    assert!(String::from_utf8_lossy(&missing.stderr).contains("committed release trust root"));
+    fs::create_dir(root.join("keys")).unwrap();
+    fs::copy(
+        common::maintainer_key_path(),
+        root.join("keys/maintainers.gpg"),
+    )
+    .unwrap();
+    // An untracked trust root is not what the publishing workflows fetch.
+    let git = |args: &[&str]| {
+        let output = std::process::Command::new("git")
+            .current_dir(root)
+            .env("GIT_AUTHOR_NAME", "fixture")
+            .env("GIT_AUTHOR_EMAIL", "fixture@example.invalid")
+            .env("GIT_COMMITTER_NAME", "fixture")
+            .env("GIT_COMMITTER_EMAIL", "fixture@example.invalid")
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "{args:?}: {output:?}");
+        String::from_utf8(output.stdout).unwrap().trim().to_owned()
+    };
+    git(&["init", "--quiet"]);
+    let untracked = run(&["init", "ci", "--plan-json"]);
+    assert!(!untracked.status.success());
+    assert!(String::from_utf8_lossy(&untracked.stderr).contains("committed release trust root"));
+    git(&["add", "keys/maintainers.gpg"]);
+    let tree = git(&["write-tree"]);
+    let commit = git(&["commit-tree", "-m", "trust root", &tree]);
+    git(&["update-ref", "HEAD", &commit]);
+    let before = fs::read(root.join("simit.toml")).unwrap();
+    let plan = || {
+        let output = run(&["init", "ci", "--plan-json"]);
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        serde_json::from_slice::<serde_json::Value>(&output.stdout).unwrap()
+    };
+    let paths = |plan: &serde_json::Value, key: &str| {
+        plan[key]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .map(|file| file["relative_path"].as_str().unwrap().to_owned())
+            .collect::<Vec<_>>()
+    };
+    let first = plan();
+    assert_eq!(first["schema"], "simit.ci-update-plan.v2");
+    let files = paths(&first, "files");
+    assert!(files.contains(&".github/workflows/publish-crate.yaml".to_owned()));
+    assert!(!files.iter().any(|path| path.starts_with("keys/")));
+    assert_eq!(paths(&first, "patches"), ["deny.toml", "simit.toml"]);
+    assert_eq!(fs::read(root.join("simit.toml")).unwrap(), before);
+    assert!(!root.join("deny.toml").exists() && !root.join(".github").exists());
+
+    for file in first["files"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .chain(first["patches"].as_array().unwrap())
+    {
+        let path = root.join(file["relative_path"].as_str().unwrap());
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(path, file["content"].as_str().unwrap()).unwrap();
+    }
+    let second = plan();
+    assert_eq!(second["schema"], "simit.ci-update-plan.v1");
+    assert!(second.get("patches").is_none());
+    assert_eq!(second["files"], first["files"]);
+}
+
+#[test]
+fn provider_migration_plan_resets_persisted_step_runners() {
+    let temp = init_package(false);
+    let root = temp.path();
+    fs::write(
+        root.join("simit.toml"),
+        "[ci]\nplatform = 'forgejo'\nprovider = 'actions'\nruntime = 'cargo'\nrunner = 'codeberg-small'\nstep_runners = { cargo-fmt = 'codeberg-tiny' }\n",
+    )
+    .unwrap();
+    let persisted = |reset: bool| {
+        let mut args = vec![
+            "init",
+            "ci",
+            "--plan-json",
+            "--ci-provider=actions",
+            "--platform=github",
+            "--runner=ubuntu-24.04",
+        ];
+        if reset {
+            args.push("--reset-step-runners");
+        }
+        let output = simit().current_dir(root).args(args).output().unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let plan: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+        plan["patches"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|patch| patch["relative_path"] == "simit.toml")
+            .unwrap()["content"]
+            .as_str()
+            .unwrap()
+            .to_owned()
+    };
+    assert!(persisted(false).contains("codeberg-tiny"));
+    let reset = persisted(true);
+    assert!(!reset.contains("step_runners") && reset.contains("platform = \"github\""));
+}
+
+#[test]
+fn full_plan_rejects_flake_config_it_cannot_persist() {
+    let temp = init_package(false);
+    let root = temp.path();
+    fs::write(
+        root.join("flake.nix"),
+        "{ outputs = _: { simitConfig = {}; }; }\n",
+    )
+    .unwrap();
+    // A fake evaluator keeps the test independent of a Nix installation.
+    let bin = root.join("bin");
+    fs::create_dir(&bin).unwrap();
+    fs::write(
+        bin.join("nix"),
+        "#!/bin/sh\nprintf '%s\\n' '{\"ci\":{\"platform\":\"github\",\"provider\":\"actions\",\"runtime\":\"cargo\"}}'\n",
+    )
+    .unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(bin.join("nix"), fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    let path = std::env::join_paths(
+        std::iter::once(bin).chain(std::env::split_paths(&std::env::var_os("PATH").unwrap())),
+    )
+    .unwrap();
+    let plan = |args: &[&str]| {
+        simit()
+            .current_dir(root)
+            .env("PATH", &path)
+            .args(args)
+            .output()
+            .unwrap()
+    };
+    let primary = plan(&["init", "ci", "--primary-only", "--plan-json"]);
+    assert!(
+        primary.status.success(),
+        "{}",
+        String::from_utf8_lossy(&primary.stderr)
+    );
+    let full = plan(&["init", "ci", "--plan-json"]);
+    assert!(!full.status.success());
+    assert!(
+        String::from_utf8_lossy(&full.stderr).contains("flake outputs.simitConfig"),
+        "{}",
+        String::from_utf8_lossy(&full.stderr)
+    );
+    assert!(!root.join("simit.toml").exists());
+}
+
+#[test]
 fn nix_format_jobs_are_uncached_across_providers_and_job_layouts() {
     for (platform, provider, path, step_runners) in [
         ("github", "actions", ".github/workflows/ci.yaml", ""),
@@ -199,6 +387,61 @@ fn private_github_runner_generation_preserves_the_compatible_checkout_baseline()
             .unwrap()
             .success()
     );
+}
+
+#[test]
+fn provider_migration_resets_nix_system_runners_and_accepts_runner() {
+    let temp = init_flake_only();
+    fs::write(
+        temp.path().join("simit.toml"),
+        "[ci]\nplatform = \"github\"\nprovider = \"actions\"\nruntime = \"nix\"\nnix_builds = [\".#default\"]\n[ci.nix_system_runners]\nx86_64-linux = \"private-x86\"\n",
+    )
+    .unwrap();
+    let plan = |extra: &[&str]| {
+        simit()
+            .current_dir(temp.path())
+            .args(["init", "ci", "--plan-json", "--runner=ubuntu-24.04"])
+            .args(extra)
+            .output()
+            .unwrap()
+    };
+    assert!(!plan(&[]).status.success());
+    let output = plan(&["--reset-step-runners"]);
+    assert!(output.status.success(), "{output:?}");
+    let plan: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    let config = plan["patches"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|patch| patch["relative_path"] == "simit.toml")
+        .unwrap()["content"]
+        .as_str()
+        .unwrap();
+    assert!(!config.contains("nix_system_runners") && config.contains("ubuntu-24.04"));
+}
+
+#[test]
+fn language_ci_migration_resets_nix_system_runners() {
+    let temp = init_package(true);
+    fs::write(
+        temp.path().join("simit.toml"),
+        "[ci]\nplatform = \"github\"\nruntime = \"nix\"\nnix_builds = [\".#default\"]\n[ci.nix_system_runners]\nx86_64-linux = \"private-x86\"\n",
+    )
+    .unwrap();
+    let output = simit()
+        .current_dir(temp.path())
+        .args([
+            "init",
+            "ci",
+            "--runner=ubuntu-24.04",
+            "--reset-step-runners",
+        ])
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{output:?}");
+    let persisted = read(&temp.path().join("simit.toml"));
+    assert!(!persisted.contains("nix_system_runners"), "{persisted}");
+    assert!(persisted.contains("ubuntu-24.04"), "{persisted}");
 }
 
 #[test]
@@ -2020,6 +2263,35 @@ fn crow_python_ci_keeps_the_crow_prebuild() {
     );
     assert_crow_push_only_maintained_branches(&temp.path().join(".crow/ci.yaml"));
     assert!(temp.path().join(".crow/prebuild.yaml").is_file());
+}
+
+#[test]
+fn crow_python_ci_rejects_crow_check_command() {
+    let temp = init_python_project();
+    let config = fs::read_to_string(temp.path().join("simit.toml")).unwrap_or_default();
+    fs::write(
+        temp.path().join("simit.toml"),
+        format!("{config}\n[ci.crow]\ncheck_command = \"make check\"\n"),
+    )
+    .unwrap();
+    let output = simit()
+        .current_dir(temp.path())
+        .args([
+            "init",
+            "ci",
+            "--platform",
+            "forgejo",
+            "--ci-provider",
+            "crow",
+            "--runtime",
+            "nix",
+            "--runner",
+            "atlas-nix-trusted",
+        ])
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("Python uv Crow CI path"));
 }
 
 #[test]
