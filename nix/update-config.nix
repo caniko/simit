@@ -66,6 +66,11 @@
     && lib.hasPrefix "${cfg.forges.${profile.generator.forge}.host}/" profile.generator.sourceCoordinate
     && lib.elem "ci" profile.scopes
     && builtins.length (lib.unique profile.scopes) == builtins.length profile.scopes
+    && (profile.migrate
+      == null
+      || ((profile.migrate.provider != "crow" || profile.migrate.platform == "forgejo")
+        && lib.elem "ci-extra" profile.scopes
+        && !(lib.elem "readme" profile.scopes)))
     && profile.select.coordinates != []
     && lib.all (canary: lib.elem canary profile.select.coordinates) profile.rollout.canaries
     && profile.generator.requiredChecks != []

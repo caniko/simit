@@ -819,6 +819,34 @@ fn print_matches_checked_workflow_without_writing_file() {
 }
 
 #[test]
+fn runner_override_replaces_the_ci_runner_fallback() {
+    let project = init_package_without_release_runner("release-runner-demo");
+    let config_path = project.path().join("simit.toml");
+    let config = format!(
+        "[ci]\nrunner = \"codeberg-small\"\n\n{}",
+        read(&config_path)
+    );
+    fs::write(config_path, config).unwrap();
+    let print = |extra: &[&str]| {
+        let output = simit()
+            .current_dir(project.path())
+            .args(["init", "release", "--print"])
+            .args(extra)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        String::from_utf8(output.stdout).unwrap()
+    };
+    assert!(print(&[]).contains("codeberg-small"));
+    let migrated = print(&["--runner", "ubuntu-24.04"]);
+    assert!(migrated.contains("ubuntu-24.04") && !migrated.contains("codeberg-small"));
+}
+
+#[test]
 fn forgejo_release_plan_needs_a_project_runner() {
     let project = init_package_without_release_runner("plan-runner-demo");
     let output = simit()

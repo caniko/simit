@@ -674,6 +674,11 @@ pub struct InitCiCommand {
     pub step_runner: Vec<String>,
     #[arg(
         long,
+        help = "Drop persisted [ci].step_runners (and Nix-only [ci].nix_system_runners) before applying --step-runner/--runner, as when moving to another runner fleet"
+    )]
+    pub reset_step_runners: bool,
+    #[arg(
+        long,
         help = "Generate granular split of CI steps across Codeberg runner tiers (fmt→tiny, clippy/deny/audit→small, test/doc/package→medium); forgejo-only"
     )]
     pub granular: bool,
@@ -1871,6 +1876,12 @@ pub struct InitReleaseCommand {
         help = "CI provider; defaults to Actions for GitHub, otherwise [ci].provider or Actions"
     )]
     pub ci_provider: Option<CiProvider>,
+    #[arg(
+        long,
+        value_name = "LABEL",
+        help = "Runner used where the release would fall back to [ci].runner, as after a provider migration"
+    )]
+    pub runner: Option<String>,
     #[arg(
         long,
         help = "Verify the platform release workflow matches generated output"

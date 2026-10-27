@@ -745,6 +745,7 @@ fn validate_prebuild_only_options(command: &InitCiCommand, crow_prebuild: bool) 
         || command.runner.is_some()
         || command.windows_runner.is_some()
         || !command.step_runner.is_empty()
+        || command.reset_step_runners
         || command.granular
         || command.maintainer_key.is_some()
         || command.maintainers_gpg.is_some()
@@ -1073,6 +1074,10 @@ fn run_nix_only_at(command: InitCiCommand, workspace_root: &Path) -> Result<()> 
         *configured = cli.unwrap_or(*configured);
     }
     cfg.ci.nix_flake_check = command.nix_flake_check.or(cfg.ci.nix_flake_check);
+    // Moving to another runner fleet also drops the old fleet's per-system labels.
+    if command.reset_step_runners {
+        cfg.ci.nix_system_runners.clear();
+    }
     cfg.ci.validate_nix_only_language_options()?;
     if cfg.ci.publish_crates
         && !configured_publish_crates
@@ -1225,6 +1230,9 @@ fn run_nix_only_at(command: InitCiCommand, workspace_root: &Path) -> Result<()> 
         persisted_ci.platform = Some(platform);
         persisted_ci.runtime = Some(Runtime::Nix);
         persisted_ci.runner = system_runners.is_empty().then(|| runner.clone());
+        if command.reset_step_runners {
+            persisted_ci.step_runners.clear();
+        }
         if command.with_codeberg_pages {
             persisted_ci.pages = Some(codeberg_pages_config(&pages)?);
         }
@@ -1804,6 +1812,7 @@ fn ci_cli_overrides(command: &InitCiCommand) -> CiCliOverrides {
         runner: command.runner.clone(),
         windows_runner: command.windows_runner.clone(),
         step_runner,
+        reset_step_runners: command.reset_step_runners,
         granular: command.granular,
         workspace: command.workspace,
         workspace_strategy: command.workspace_strategy,
@@ -2092,6 +2101,7 @@ pub(crate) fn project_regeneration_command(workspace_root: &Path) -> Result<Opti
         om_ci_augment: None,
         omnix_ref: None,
         step_runner: Vec::new(),
+        reset_step_runners: false,
         with_artifacts: None,
         with_homebrew,
         with_chocolatey,

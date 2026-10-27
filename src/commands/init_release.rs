@@ -16,7 +16,11 @@ pub fn run(command: InitReleaseCommand) -> Result<()> {
 
     let metadata = cargo::metadata_for_current_dir()?;
     let workspace_root = metadata.workspace_root.as_std_path();
-    let cfg = ProjectConfig::load(workspace_root)?;
+    let mut cfg = ProjectConfig::load(workspace_root)?;
+    if let Some(runner) = &command.runner {
+        crate::user_config::validate_runner_label(runner)?;
+        cfg.ci.runner = Some(runner.clone());
+    }
     let package = cargo::representative_package(
         &metadata,
         command

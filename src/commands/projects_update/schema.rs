@@ -86,6 +86,17 @@ pub struct Profile {
     /// a pull request. Omitted when direct, so existing policy digests hold.
     #[serde(default = "direct", skip_serializing_if = "is_direct")]
     pub landing: String,
+    /// Regenerate CI for another provider/platform, retiring the old workflows.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub migrate: Option<Migration>,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct Migration {
+    pub provider: String,
+    pub platform: String,
+    pub runner: String,
 }
 fn direct() -> String {
     "direct".into()
@@ -439,6 +450,23 @@ impl Config {
                     && scopes.contains(&"ci".to_owned()),
                 "profile scopes must be unique, supported and include ci (ci-extra extends it)"
             );
+            if let Some(migration) = &profile.migrate {
+                ensure!(
+                    matches!(
+                        (migration.provider.as_str(), migration.platform.as_str()),
+                        ("actions", "github" | "forgejo") | ("crow", "forgejo")
+                    ),
+                    "migration provider/platform must be actions on github or forgejo, or crow on forgejo"
+                );
+                crate::user_config::validate_runner_label(&migration.runner)?;
+                // The rewritten [ci] table is a ci-extra patch; badges would
+                // describe the pre-migration workflows.
+                ensure!(
+                    scopes.contains(&"ci-extra".to_owned())
+                        && !scopes.contains(&"readme".to_owned()),
+                    "migration requires the ci-extra scope and excludes readme"
+                );
+            }
             ensure!(
                 !profile.select.coordinates.is_empty(),
                 "profiles require operator-owned coordinate enrollment"
@@ -723,6 +751,43 @@ mod tests {
             .map(|scope| scope.to_string())
             .collect();
         cfg.validate().unwrap();
+    }
+
+    #[test]
+    fn migrations_need_a_supported_backend_ci_extra_and_no_readme() {
+        let migrated = |scopes: &[&str], migrate: serde_json::Value| {
+            let mut cfg = config();
+            let profile = cfg.profiles.get_mut("fleet").unwrap();
+            profile.scopes = scopes.iter().map(|scope| scope.to_string()).collect();
+            profile.migrate = Some(serde_json::from_value(migrate).unwrap());
+            cfg.validate()
+        };
+        let actions =
+            serde_json::json!({"provider":"actions","platform":"github","runner":"ubuntu-24.04"});
+        migrated(&["ci", "ci-extra"], actions.clone()).unwrap();
+        migrated(
+            &["ci", "ci-extra", "release", "flake"],
+            serde_json::json!({"provider":"crow","platform":"forgejo","runner":"codeberg-small"}),
+        )
+        .unwrap();
+        for (scopes, migrate) in [
+            (&["ci"][..], actions.clone()),
+            (&["ci", "ci-extra", "readme"], actions.clone()),
+            (
+                &["ci", "ci-extra"],
+                serde_json::json!({"provider":"crow","platform":"github","runner":"ubuntu-24.04"}),
+            ),
+            (
+                &["ci", "ci-extra"],
+                serde_json::json!({"provider":"actions","platform":"gitlab","runner":"ubuntu-24.04"}),
+            ),
+            (
+                &["ci", "ci-extra"],
+                serde_json::json!({"provider":"actions","platform":"github","runner":"two words"}),
+            ),
+        ] {
+            assert!(migrated(scopes, migrate.clone()).is_err(), "{migrate}");
+        }
     }
 
     #[test]

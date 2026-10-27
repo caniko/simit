@@ -806,7 +806,25 @@ fn generate_scopes(
             "readme" => &["upgrade", "--plan-json"],
             _ => anyhow::bail!("unsupported generation scope {scope}"),
         };
-        let argv = argv.iter().map(|arg| arg.to_string()).collect::<Vec<_>>();
+        let mut argv = argv.iter().map(|arg| arg.to_string()).collect::<Vec<_>>();
+        if let Some(migration) = &profile.migrate {
+            let backend = [
+                format!("--ci-provider={}", migration.provider),
+                format!("--platform={}", migration.platform),
+            ];
+            match scope.as_str() {
+                "ci" | "ci-extra" => argv.extend(backend.into_iter().chain([
+                    format!("--runner={}", migration.runner),
+                    "--reset-step-runners".into(),
+                ])),
+                "release" => argv.extend(
+                    backend
+                        .into_iter()
+                        .chain([format!("--runner={}", migration.runner)]),
+                ),
+                _ => {}
+            }
+        }
         plans.insert(
             scope.as_str(),
             generate(executable, checkout, state_directory, &argv)?,
@@ -3572,6 +3590,49 @@ else:
                 .contains("already exists outside the baseline")
         );
         assert_eq!(f.remote_head(), source);
+    }
+
+    #[test]
+    fn namespace_provider_migration_retires_crow_and_qualifies_actions() {
+        let mut f = Fixture::new();
+        fs::remove_file(f.source.join(".github/workflows/ci.yaml")).unwrap();
+        fs::create_dir_all(f.source.join(".crow")).unwrap();
+        fs::write(f.source.join(".crow/build.yaml"), "old crow workflow\n").unwrap();
+        let migrated =
+            "--ci-provider=actions --platform=github --runner=ubuntu-24.04 --reset-step-runners";
+        let config = json!({"relative_path":"simit.toml","content":"[ci]\nprovider = \"actions\"\nplatform = \"github\"\n"});
+        scoped_plans(
+            &mut f,
+            &["ci", "ci-extra"],
+            json!({
+                format!("init ci --primary-only --plan-json {migrated}"): {"schema":"simit.ci-update-plan.v1","files":[primary_ci()],"obsolete":[".crow/build.yaml"]},
+                format!("init ci --plan-json {migrated}"): {"schema":"simit.ci-update-plan.v2","files":[primary_ci()],"obsolete":[".crow/build.yaml"],"patches":[config]},
+            }),
+        );
+        f.config.profiles.get_mut("fleet").unwrap().migrate = Some(
+            serde_json::from_value(
+                json!({"provider":"actions","platform":"github","runner":"ubuntu-24.04"}),
+            )
+            .unwrap(),
+        );
+        f.control(json!({"expectedWorkflows":[".github/workflows/ci.yaml"]}));
+        let adopted = f.update(true).unwrap();
+        assert_eq!(adopted.phase, "qualified");
+        assert_eq!(adopted.managed[".crow/build.yaml"], None);
+        let tree = git(
+            &f.remote,
+            &["ls-tree", "-r", "--name-only", &adopted.candidate],
+        )
+        .unwrap();
+        assert!(tree.contains(".github/workflows/ci.yaml") && !tree.contains(".crow/"));
+        assert!(
+            git(
+                &f.remote,
+                &["show", &format!("{}:simit.toml", adopted.candidate)]
+            )
+            .unwrap()
+            .contains("provider = \"actions\"")
+        );
     }
 
     #[test]
