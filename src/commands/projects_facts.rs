@@ -264,7 +264,15 @@ impl Facts {
             }
         }
         let flake = root.join("flake.nix");
-        if flake.is_file() && flake_declares_simit_config(&flake).unwrap_or(false) {
+        let declares = if flake.is_file() {
+            flake_declares_simit_config(&flake).unwrap_or_else(|error| {
+                self.error(&repo, "config-error", format!("{error:#}"));
+                false
+            })
+        } else {
+            false
+        };
+        if declares {
             sources.push("config.flake");
             blockers.push(blocker(
                 "config-not-persistable",
@@ -779,14 +787,15 @@ impl Facts {
         for (path, content, script, generated) in files {
             let path = path.display().to_string();
             let mut found: BTreeMap<&'static str, Refs> = BTreeMap::new();
-            for line in content.lines().map(str::trim) {
-                if line.starts_with('#') || line.starts_with("//") {
+            for (first, line) in logical_lines(&content) {
+                let line = line.as_str();
+                if first.starts_with('#') || first.starts_with("//") {
                     continue;
                 }
                 // Simit pins its own invocations in generated files to the generator
                 // revision, so they move with their file. Generated files also copy
                 // config commands (required gates, setup) verbatim; those stay human.
-                let command = line
+                let command = first
                     .trim_start_matches("- ")
                     .trim_start_matches("run:")
                     .trim();
@@ -796,7 +805,7 @@ impl Facts {
                     ("runtime.flake-ref", "runtime.cargo-install")
                 };
                 let words = line
-                    .split(|c: char| c.is_whitespace() || ";|&()`\"'$".contains(c))
+                    .split(|c: char| c.is_whitespace() || ";|&()`\"'".contains(c))
                     .filter(|word| !word.is_empty())
                     // `--rev=<sha>` is `--rev <sha>`.
                     .flat_map(|word| match word.split_once('=') {
@@ -833,9 +842,15 @@ impl Facts {
                 let install = line.contains("cargo install")
                     && match git {
                         Some(url) => is_simit_repo_url(url),
-                        None => words
-                            .iter()
-                            .any(|word| *word == "simit" || word.starts_with("simit@")),
+                        // A path or alternative registry installs other code.
+                        None => {
+                            !words
+                                .iter()
+                                .any(|word| matches!(*word, "--path" | "--registry" | "--index"))
+                                && words
+                                    .iter()
+                                    .any(|word| *word == "simit" || word.starts_with("simit@"))
+                        }
                     };
                 if install {
                     let refs = found.entry(cargo_install).or_default();
@@ -843,6 +858,16 @@ impl Facts {
                         .iter()
                         .position(|word| matches!(*word, "--rev" | "--version" | "--tag"))
                     {
+                        // `--rev "$REV"`: the value arrives at run time.
+                        Some(index)
+                            if words
+                                .get(index + 1)
+                                .is_some_and(|value| value.starts_with('$')) =>
+                        {
+                            let variable =
+                                words[index + 1].trim_matches(|c| matches!(c, '$' | '{' | '}'));
+                            refs.variables.insert(variable.to_owned());
+                        }
                         Some(index)
                             if words.get(index + 1).is_some_and(|value| is_revision(value)) =>
                         {
@@ -926,7 +951,13 @@ impl Facts {
                 }
             }
         });
-        for (kind, input, revision) in lock.as_ref().map(flake_inputs).unwrap_or_default() {
+        let inputs = lock.as_ref().map_or_else(Vec::new, |lock| {
+            flake_inputs(lock).unwrap_or_else(|message| {
+                self.error(&repo, "lock-unreadable", format!("flake.lock: {message}"));
+                Vec::new()
+            })
+        });
+        for (kind, input, revision) in inputs {
             let mut attrs = Attrs::from([("path", json!("flake.lock")), ("input", json!(input))]);
             if let Some(revision) = &revision {
                 attrs.insert("revisions", json!([revision]));
@@ -983,6 +1014,24 @@ impl Facts {
     }
 }
 
+/// Trimmed lines paired with their shell logical line: a trailing `\` joins
+/// the next line, so a wrapped command is classified as one. Comments never join.
+fn logical_lines(content: &str) -> Vec<(&str, String)> {
+    let mut lines = content.lines().map(str::trim);
+    let mut out = Vec::new();
+    while let Some(first) = lines.next() {
+        let mut joined = first.to_owned();
+        if !first.starts_with('#') && !first.starts_with("//") {
+            while let Some(head) = joined.strip_suffix('\\') {
+                let Some(next) = lines.next() else { break };
+                joined = format!("{} {next}", head.trim_end());
+            }
+        }
+        out.push((first, joined));
+    }
+    out
+}
+
 /// Every string value of a config document, one per line.
 fn collect_strings(value: &Value, out: &mut String) {
     match value {
@@ -1009,14 +1058,12 @@ fn is_canonical_simit_source(source: &str) -> bool {
     source.strip_prefix("git+").is_some_and(is_simit_repo_url)
 }
 
-/// Whether a Git URL names exactly the canonical repository, ignoring the
-/// query, fragment, trailing slash and `.git`; mirrors and forks do not match.
+/// Whether a Git URL (https, ssh or scp-style) names exactly the canonical
+/// repository, ignoring credentials, query, fragment, trailing slash, `.git`
+/// and case; mirrors and forks do not match.
 fn is_simit_repo_url(url: &str) -> bool {
-    let url = url.strip_prefix("git+").unwrap_or(url);
-    let url = url.split(['?', '#']).next().unwrap_or(url);
-    let url = url.trim_end_matches('/');
-    let url = url.strip_suffix(".git").unwrap_or(url);
-    url.eq_ignore_ascii_case("https://github.com/caniko/simit")
+    registry::coordinate_from_remote(url.strip_prefix("git+").unwrap_or(url)).as_deref()
+        == Some(SIMIT)
 }
 
 /// A URL without userinfo, query or fragment: facts must not carry credentials.
@@ -1050,7 +1097,9 @@ fn is_revision(value: &str) -> bool {
 fn flake_refs(line: &str, refs: &mut Refs) -> bool {
     const NAME: &str = "caniko/simit";
     let mut found = false;
-    for (start, _) in line.match_indices(NAME) {
+    // GitHub names are case-insensitive; ASCII lowercasing keeps byte offsets.
+    let lowered = line.to_ascii_lowercase();
+    for (start, _) in lowered.match_indices(NAME) {
         let end = start + NAME.len();
         if line[end..].starts_with(|c: char| c.is_ascii_alphanumeric() || c == '-' || c == '_') {
             continue; // another repository, such as caniko/simit-extra
@@ -1062,7 +1111,10 @@ fn flake_refs(line: &str, refs: &mut Refs) -> bool {
             .find(|c: char| c.is_whitespace() || "\"'),".contains(c))
             .map_or(line.len(), |index| end + index);
         let prefix = &line[token_start..start];
-        if prefix != "github:" && !(prefix.starts_with("git+") && prefix.ends_with("github.com/")) {
+        // A `git+` source must name github.com itself, not a host that ends in it.
+        if !prefix.eq_ignore_ascii_case("github:")
+            && !(prefix.starts_with("git+") && is_simit_repo_url(&format!("{prefix}{NAME}")))
+        {
             continue;
         }
         found = true;
@@ -1119,13 +1171,19 @@ fn flake_refs(line: &str, refs: &mut Refs) -> bool {
     found
 }
 
+type FlakeInput = (&'static str, String, Option<String>);
+
 /// `(usage kind, input path, locked revision)` for every simit node a
 /// `flake.lock` owns, plus `simit` inputs cut with `follows = ""`.
-fn flake_inputs(lock: &Value) -> Vec<(&'static str, String, Option<String>)> {
+/// Errors when the lock has no root or a reachable input names a missing node.
+fn flake_inputs(lock: &Value) -> Result<Vec<FlakeInput>, String> {
     let nodes = &lock["nodes"];
     let Some(root) = lock["root"].as_str() else {
-        return Vec::new();
+        return Err("no root node".into());
     };
+    if nodes.get(root).is_none() {
+        return Err(format!("root node {root:?} is missing"));
+    }
     let is_simit = |node: &Value| {
         let locked = &node["locked"];
         match locked["type"].as_str() {
@@ -1133,7 +1191,13 @@ fn flake_inputs(lock: &Value) -> Vec<(&'static str, String, Option<String>)> {
                 locked["owner"]
                     .as_str()
                     .is_some_and(|owner| owner.eq_ignore_ascii_case("caniko"))
-                    && locked["repo"] == "simit"
+                    && locked["repo"]
+                        .as_str()
+                        .is_some_and(|repo| repo.eq_ignore_ascii_case("simit"))
+                    // A GitHub Enterprise host is another forge.
+                    && locked["host"]
+                        .as_str()
+                        .is_none_or(|host| host.eq_ignore_ascii_case("github.com"))
             }
             Some("git") => locked["url"].as_str().is_some_and(is_simit_repo_url),
             _ => false,
@@ -1150,6 +1214,12 @@ fn flake_inputs(lock: &Value) -> Vec<(&'static str, String, Option<String>)> {
             input.push(name.clone());
             match target {
                 Value::String(child) if seen.insert(child.clone()) => {
+                    if nodes.get(child).is_none() {
+                        return Err(format!(
+                            "input {} references missing node {child:?}",
+                            input.join("/")
+                        ));
+                    }
                     if is_simit(&nodes[child]) {
                         let kind = if path.is_empty() {
                             "flake-input.direct"
@@ -1168,7 +1238,7 @@ fn flake_inputs(lock: &Value) -> Vec<(&'static str, String, Option<String>)> {
             }
         }
     }
-    found
+    Ok(found)
 }
 
 /// Static facts of one workflow file.
@@ -1859,7 +1929,7 @@ mod tests {
             }
         });
         assert_eq!(
-            flake_inputs(&lock),
+            flake_inputs(&lock).unwrap(),
             vec![
                 (
                     "flake-input.direct",
@@ -2007,5 +2077,57 @@ mod tests {
             BTreeSet::from(["SIMIT_REVISION".to_owned()])
         );
         assert!(refs.floating.is_empty());
+    }
+
+    #[test]
+    fn flake_references_need_the_exact_host_and_ignore_case() {
+        let mut refs = Refs::default();
+        assert!(flake_refs("nix run GitHub:Caniko/Simit/v0.19.0", &mut refs));
+        assert!(flake_refs(
+            "nix run git+ssh://git@github.com/caniko/simit.git?ref=v0.20.0",
+            &mut refs
+        ));
+        for line in [
+            "nix run git+https://notgithub.com/caniko/simit",
+            "nix run git+https://mirror.example/github.com/caniko/simit",
+        ] {
+            assert!(!flake_refs(line, &mut refs), "{line}");
+        }
+        assert_eq!(
+            refs.tags,
+            BTreeSet::from(["v0.19.0", "v0.20.0"].map(String::from))
+        );
+        assert!(is_simit_repo_url("git@github.com:Caniko/simit.git"));
+        assert!(is_simit_repo_url("ssh://git@github.com/caniko/simit"));
+    }
+
+    #[test]
+    fn wrapped_commands_join_before_classification() {
+        let lines = logical_lines(
+            "cargo install --git https://github.com/caniko/simit \\\n  --rev 4c6841cce19327927ea8a8f6e856276dd5c878f0 \\\n  simit\n# keep \\\nnext\n",
+        );
+        assert_eq!(lines.len(), 3);
+        assert!(lines[0].1.contains("--rev 4c68") && lines[0].1.ends_with(" simit"));
+        assert_eq!(
+            lines[0].0,
+            "cargo install --git https://github.com/caniko/simit \\"
+        );
+        assert_eq!(lines[1].1, "# keep \\");
+        assert_eq!(lines[2].1, "next");
+    }
+
+    #[test]
+    fn flake_locks_with_dangling_references_are_errors() {
+        let dangling = json!({"root": "root", "nodes": {"root": {"inputs": {"simit": "gone"}}}});
+        assert!(flake_inputs(&dangling).unwrap_err().contains("gone"));
+        let no_root = json!({"root": "root", "nodes": {}});
+        assert!(flake_inputs(&no_root).is_err());
+        assert!(flake_inputs(&json!({"nodes": {}})).is_err());
+        // A GitHub Enterprise simit is another forge.
+        let ghe = json!({"root": "root", "nodes": {
+            "root": {"inputs": {"simit": "simit"}},
+            "simit": {"locked": {"type": "github", "owner": "caniko", "repo": "simit", "host": "ghe.example", "rev": "a"}}
+        }});
+        assert!(flake_inputs(&ghe).unwrap().is_empty());
     }
 }

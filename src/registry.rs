@@ -2163,7 +2163,7 @@ pub(crate) fn origin_coordinate(workspace_root: &Path) -> Result<String> {
         .context("the origin remote is not a HOST/OWNER/REPO forge URL")
 }
 
-fn coordinate_from_remote(url: &str) -> Option<String> {
+pub(crate) fn coordinate_from_remote(url: &str) -> Option<String> {
     // `scheme://[user@]host[:port]/path` or scp-style `[user@]host:path`.
     let (authority, path) = match url.split_once("://") {
         Some((_, rest)) => rest.split_once('/')?,
@@ -2176,6 +2176,13 @@ fn coordinate_from_remote(url: &str) -> Option<String> {
     // A query or fragment can carry credentials; it is never part of the coordinate.
     let path = path.split(['?', '#']).next()?.trim_matches('/');
     let path = path.strip_suffix(".git").unwrap_or(path);
+    // These forges match owner and repository names case-insensitively, so
+    // one repository must have one coordinate however the remote spells it.
+    let path = if matches!(host.as_str(), "github.com" | "gitlab.com" | "codeberg.org") {
+        path.to_ascii_lowercase()
+    } else {
+        path.to_owned()
+    };
     (!host.is_empty()
         && !host.contains('/')
         && path.split('/').count() >= 2
@@ -2848,6 +2855,14 @@ jobs:
             (
                 "https://github.com/caniko/simit.git?token=secret#frag",
                 Some("github.com/caniko/simit"),
+            ),
+            (
+                "git@GitHub.com:Example/Demo.git",
+                Some("github.com/example/demo"),
+            ),
+            (
+                "https://git.example/Team/Repo",
+                Some("git.example/Team/Repo"),
             ),
             ("git@github.com:demo.git", None),
             ("/data/checkouts/simit", None),

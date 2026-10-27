@@ -909,6 +909,11 @@
       "to": "rev:github.com/caniko/simit@5d6841cce19327927ea8a8f6e856276dd5c878f1"
     },
     {
+      "from": "usage:github.com/example/drifted#runtime.cargo-install:scripts/release.sh",
+      "kind": "pins",
+      "to": "rev:github.com/caniko/simit@6e6841cce19327927ea8a8f6e856276dd5c878f2"
+    },
+    {
       "from": "usage:github.com/example/drifted#runtime.ci-engine:.github/workflows/ci.yaml",
       "kind": "pins",
       "to": "rev:github.com/caniko/simit@8a132e416caf9cc58a753005b804343181477200"
@@ -1146,6 +1151,14 @@
         "source": "github.com/caniko/simit"
       },
       "id": "rev:github.com/caniko/simit@5d6841cce19327927ea8a8f6e856276dd5c878f1",
+      "kind": "rev"
+    },
+    {
+      "attrs": {
+        "revision": "6e6841cce19327927ea8a8f6e856276dd5c878f2",
+        "source": "github.com/caniko/simit"
+      },
+      "id": "rev:github.com/caniko/simit@6e6841cce19327927ea8a8f6e856276dd5c878f2",
       "kind": "rev"
     },
     {
@@ -1435,7 +1448,8 @@
         "path": "scripts/release.sh",
         "revisions": [
           "4c6841cce19327927ea8a8f6e856276dd5c878f0",
-          "5d6841cce19327927ea8a8f6e856276dd5c878f1"
+          "5d6841cce19327927ea8a8f6e856276dd5c878f1",
+          "6e6841cce19327927ea8a8f6e856276dd5c878f2"
         ],
         "state": "unknown",
         "usageKind": "runtime.cargo-install"
