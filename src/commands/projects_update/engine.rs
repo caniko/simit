@@ -3456,7 +3456,7 @@ else:
     }
 
     #[test]
-    fn readme_patch_waits_for_a_run_that_leaves_badge_inputs_alone() {
+    fn namespace_readme_patch_waits_for_a_run_that_leaves_badge_inputs_alone() {
         let mut f = Fixture::new();
         let readme = json!({"relative_path":"README.md","content":"# demo\n<!-- simit:badges:start -->\ncurrent\n<!-- simit:badges:end -->\n"});
         // The checkout's CI workflow differs from the plan, so badges derived
