@@ -301,6 +301,93 @@ required_gates = [
 }
 
 #[test]
+fn manual_gates_render_dispatch_only_and_stay_out_of_ci() {
+    let temp = init_package(true);
+    fs::write(
+        temp.path().join("simit.toml"),
+        r#"[ci]
+platform = "github"
+provider = "actions"
+runtime = "nix"
+manual_gates = [{ id = "boot", run = "nix run .#boot", timeout_minutes = 20 }]
+"#,
+    )
+    .unwrap();
+    fs::write(
+        temp.path().join("README.md"),
+        "<!-- simit:badges:start -->\n<!-- simit:badges:end -->\n",
+    )
+    .unwrap();
+    // Regenerating and checking with manual-gates.yaml present must not
+    // infer its gates back into CI.
+    for check in [false, false, true] {
+        let mut command = simit();
+        command.current_dir(temp.path()).args(["init", "ci"]);
+        if check {
+            command.arg("--check");
+        }
+        let output = command.output().unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+    let workflows = temp.path().join(".github/workflows");
+    let ci = fs::read_to_string(workflows.join("ci.yaml")).unwrap();
+    assert!(!ci.contains("gate-"), "{ci}");
+    let manual: serde_yaml::Value =
+        serde_yaml::from_str(&fs::read_to_string(workflows.join("manual-gates.yaml")).unwrap())
+            .unwrap();
+    let triggers = manual["on"].as_mapping().unwrap();
+    assert_eq!(triggers.len(), 1);
+    assert!(triggers.contains_key("workflow_dispatch"));
+    assert_eq!(manual["jobs"].as_mapping().unwrap().len(), 1);
+    assert_eq!(
+        manual["jobs"]["gate-boot"]["timeout-minutes"].as_u64(),
+        Some(20)
+    );
+    let config = fs::read_to_string(temp.path().join("simit.toml")).unwrap();
+    assert!(config.contains("manual_gates"), "{config}");
+    let readme = fs::read_to_string(temp.path().join("README.md")).unwrap();
+    assert!(readme.contains("CI-managed"), "{readme}");
+}
+
+#[test]
+fn manual_and_required_gates_may_share_artifact_names() {
+    let temp = init_package(true);
+    let gate = |table: &str, id: &str| {
+        format!(
+            "[[ci.{table}]]\nid = \"{id}\"\nrun = \"nix run .#{id}\"\n[ci.{table}.artifacts]\nname = \"evidence\"\npaths = [\"target/evidence/\"]\n"
+        )
+    };
+    let config = |manual_id: &str| {
+        format!(
+            "[ci]\nplatform = \"github\"\nprovider = \"actions\"\nruntime = \"nix\"\n{}{}",
+            gate("required_gates", "boot"),
+            gate("manual_gates", manual_id)
+        )
+    };
+    let init = |text: String| {
+        fs::write(temp.path().join("simit.toml"), text).unwrap();
+        simit()
+            .current_dir(temp.path())
+            .args(["init", "ci"])
+            .output()
+            .unwrap()
+    };
+    // Separate workflows: the shared artifact name cannot collide.
+    let output = init(config("soak"));
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    // Ids still share one namespace across both lists.
+    assert!(!init(config("boot")).status.success());
+}
+
+#[test]
 fn required_gate_evidence_survives_failure_and_round_trips_through_publishers() {
     let temp = init_package(true);
     fs::write(
@@ -2113,6 +2200,56 @@ check_push_secret = "ATTIC_TOKEN"
             .unwrap()
             .success()
     );
+}
+
+#[test]
+fn crow_check_secret_reaches_every_event_in_one_gate() {
+    let temp = init_package(true);
+    let config = temp.path().join("simit.toml");
+    fs::write(
+        &config,
+        r#"[ci]
+provider = "crow"
+platform = "forgejo"
+runtime = "nix"
+
+[ci.crow]
+check_command = "nix develop -c cargo run -p demo-ci -- ci"
+check_secret = "ATTIC_TOKEN"
+"#,
+    )
+    .unwrap();
+    assert!(
+        simit()
+            .current_dir(temp.path())
+            .args(["init", "ci"])
+            .status()
+            .unwrap()
+            .success()
+    );
+    let workflow = fs::read_to_string(temp.path().join(".crow/build.yaml")).unwrap();
+    let yaml: serde_yaml::Value = serde_yaml::from_str(&workflow).unwrap();
+    let steps = yaml["steps"].as_sequence().unwrap();
+    assert_eq!(steps.len(), 2, "Nix setup and one event-agnostic gate");
+    let gate = &steps[1];
+    assert_eq!(gate["name"], "project-check");
+    assert_eq!(
+        gate["environment"]["ATTIC_TOKEN"]["from_secret"],
+        "ATTIC_TOKEN"
+    );
+    assert!(gate.get("when").is_none(), "the gate runs on every event");
+    assert!(steps[0]["environment"].get("ATTIC_TOKEN").is_none());
+
+    let mut both = fs::read_to_string(&config).unwrap();
+    both.push_str("check_push_secret = \"ATTIC_TOKEN\"\n");
+    fs::write(&config, both).unwrap();
+    let output = simit()
+        .current_dir(temp.path())
+        .args(["init", "ci", "--check"])
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("mutually exclusive"));
 }
 
 #[test]
@@ -6803,6 +6940,87 @@ fn local_gate_is_opt_in_and_disabling_it_retires_the_script() {
     assert!(!script_path.exists());
 }
 
+fn write_local_gate_steps(root: &Path, local_gate: bool, steps: &str) {
+    write_local_gate_config(root, local_gate);
+    let config = read(&root.join("simit.toml")).replacen(
+        "\n[ci.nix_build]",
+        &format!("local_gate_steps = [{steps}]\n\n[ci.nix_build]"),
+        1,
+    );
+    fs::write(root.join("simit.toml"), config).unwrap();
+}
+
+#[test]
+fn local_gate_steps_follow_ci_steps_and_are_drift_checked() {
+    let temp = init_package(true);
+    let browser = r#"{ name = "Browser suite", run = "CI=1 bash -euc 'npm test'" }"#;
+    write_local_gate_steps(temp.path(), true, browser);
+    assert_ok(&run_init_ci(temp.path(), false));
+    let script_path = temp.path().join("scripts/ci-local.sh");
+    let script = read(&script_path);
+    let step = script
+        .find("step 'Browser suite' 'CI=1 bash -euc '\\''npm test'\\'''\n")
+        .expect(&script);
+    assert!(script.find("step 'Nix build .#oci api'").unwrap() < step);
+    assert_eq!(
+        simit::config::ProjectConfig::load(temp.path())
+            .unwrap()
+            .ci
+            .local_gate_steps
+            .len(),
+        1
+    );
+    let listed = Command::new("bash")
+        .arg(&script_path)
+        .arg("--list")
+        .output()
+        .unwrap();
+    assert_ok(&listed);
+    let listed = String::from_utf8(listed.stdout).unwrap();
+    assert!(listed.trim_end().ends_with("Browser suite"), "{listed}");
+
+    assert_ok(&run_init_ci(temp.path(), true));
+    write_local_gate_steps(
+        temp.path(),
+        true,
+        r#"{ name = "Browser suite", run = "npm test" }"#,
+    );
+    assert!(!run_init_ci(temp.path(), true).status.success());
+}
+
+#[test]
+fn local_gate_steps_require_local_gate_and_unique_names() {
+    let temp = init_package(true);
+    for (local_gate, steps, error) in [
+        (
+            false,
+            r#"{ name = "Browser suite", run = "npm test" }"#,
+            "requires [ci].local_gate = true",
+        ),
+        (
+            true,
+            r#"{ name = "a", run = "true" }, { name = "a", run = "false" }"#,
+            "duplicate name `a`",
+        ),
+        (
+            true,
+            r#"{ name = " ", run = "true" }"#,
+            "non-empty single lines",
+        ),
+        (
+            true,
+            r#"{ name = "a", run = " " }"#,
+            "run must not be empty",
+        ),
+    ] {
+        write_local_gate_steps(temp.path(), local_gate, steps);
+        let output = run_init_ci(temp.path(), false);
+        assert!(!output.status.success(), "{steps}");
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(stderr.contains(error), "{steps}: {stderr}");
+    }
+}
+
 #[test]
 fn prebuild_only_accepts_crow_options_only_for_a_crow_prebuild() {
     let crow = r#"[prebuild]
@@ -6866,4 +7084,96 @@ nix_image = "nixos/nix:2.34.8"
         "{}",
         String::from_utf8_lossy(&actions.stderr)
     );
+}
+
+#[test]
+fn native_system_runners_persist_without_a_runner_and_pass_the_next_check() {
+    let ci = "platform = \"github\"\nruntime = \"nix\"\nnix_builds = [\".#default\"]\n";
+    let runners = "\"x86_64-linux\" = \"ubuntu-24.04\"\n";
+    for (path, config) in [
+        (
+            "simit.toml",
+            format!("[ci]\n{ci}\n[ci.nix_system_runners]\n{runners}"),
+        ),
+        (
+            "Cargo.toml",
+            format!(
+                "[package]\nname = \"demo\"\nversion = \"0.1.0\"\nedition = \"2024\"\nrust-version = \"1.85\"\nlicense = \"MIT\"\n\n\
+                 [package.metadata.simit.ci]\n{ci}\n[package.metadata.simit.ci.nix_system_runners]\n{runners}"
+            ),
+        ),
+    ] {
+        let temp = init_package(true);
+        fs::write(temp.path().join(path), config).unwrap();
+        let output = simit()
+            .current_dir(temp.path())
+            .args(["init", "ci"])
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "{path}: {output:?}");
+        let persisted = read(&temp.path().join(path));
+        assert!(!persisted.contains("\nrunner ="), "{path}:\n{persisted}");
+        assert!(
+            persisted.contains("nix_system_runners = { x86_64-linux = \"ubuntu-24.04\" }"),
+            "{path}:\n{persisted}"
+        );
+        let check = simit()
+            .current_dir(temp.path())
+            .args(["init", "ci", "--check"])
+            .output()
+            .unwrap();
+        assert!(check.status.success(), "{path}: {check:?}");
+    }
+}
+
+#[test]
+fn manual_gates_audit_clean_and_supersede_inferred_required_gates() {
+    let temp = init_package(true);
+    let config = |gates: &str| {
+        format!("[ci]\nplatform = \"github\"\nprovider = \"actions\"\nruntime = \"nix\"\n{gates}\n")
+    };
+    let write = |text: String| fs::write(temp.path().join("simit.toml"), text).unwrap();
+    let init = || {
+        let output = simit()
+            .current_dir(temp.path())
+            .args(["init", "ci"])
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    };
+    write(config(
+        "required_gates = [{ id = \"boot\", run = \"nix run .#boot\" }]",
+    ));
+    init();
+    let ci = temp.path().join(".github/workflows/ci.yaml");
+    assert!(
+        fs::read_to_string(&ci)
+            .unwrap()
+            .contains("Required gate boot")
+    );
+    // Moving the gate to manual_gates must not re-infer it from the old ci.yaml.
+    write(config(
+        "manual_gates = [{ id = \"boot\", run = \"nix run .#boot\" }]",
+    ));
+    init();
+    assert!(
+        !fs::read_to_string(&ci)
+            .unwrap()
+            .contains("Required gate boot")
+    );
+    assert!(
+        temp.path()
+            .join(".github/workflows/manual-gates.yaml")
+            .is_file()
+    );
+    let output = simit()
+        .current_dir(temp.path())
+        .args(["projects", "audit", ".", "--json"])
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{output:?}");
 }

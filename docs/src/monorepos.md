@@ -60,7 +60,9 @@ workspace members.
 An unknown source path selects all components. The default shared paths are
 `simit.toml`, `flake.nix`, `flake.lock`, `Cargo.toml`, `Cargo.lock`,
 `rust-toolchain.toml`, `deny.toml`, and `.github`; `shared_paths` can replace
-that list. Git selection includes committed, staged, unstaged, and untracked
+that list. Changes under `ignore_paths` (for example `["README.md", "docs"]`)
+select nothing; an ignored path must not overlap owned or shared paths. Git
+selection includes committed, staged, unstaged, and untracked
 changes relative to the base. Renames retain both old and new paths; deletions
 retain their old owners. Missing or invalid base revisions fail locally.
 
@@ -115,6 +117,27 @@ The root `devShells.<system>.ci` must supply Simit with this component support,
 Cargo, and the tools used by checks. Each command runs in that shell with its
 declared environment and timeout. `systems` can select native runners using
 `[ci.nix_system_runners]`. Handwritten supplementary workflows are retained.
+
+Each component gets its own `component-<id>` job by default. Components that
+set the same `job` share one `component-<job>` job instead: one checkout, Nix
+install, and store, with each member's checks running in dependency order and
+guarded by that member's selection. A dependent then substitutes what its
+prerequisite already built, instead of rebuilding it on another runner. Members
+of a job must declare the same `systems`, and their checks share the job's
+360-minute budget.
+
+```toml
+[[monorepo.components]]
+id = "fleetix"
+job = "libs"
+
+[[monorepo.components]]
+id = "secret-manager"
+job = "libs"
+```
+
+`[ci.cache]` substituters and trusted keys apply to the planner and component
+jobs, as in single-project CI. Publication workflows drop them.
 
 `simit init flake` also resolves member invocations to the root. Optional
 `formatter_modules` are composed into the generated root treefmt module; custom

@@ -3244,6 +3244,42 @@ fn push_required_gate_jobs(
     }
 }
 
+/// `[[ci.manual_gates]]`: the same gate jobs in a GitHub workflow triggered
+/// only by `workflow_dispatch`, so they stay generated and drift-checked
+/// without running on push/PR or gating publication.
+pub fn manual_gates_file(
+    runtime: Runtime,
+    package: &Package,
+    runners: &ResolvedCiRunners,
+    options: &CiOptions,
+    gates: &[crate::config::RequiredGate],
+) -> GeneratedFile {
+    let mut workflow = String::new();
+    push_generated_workflow_header(&mut workflow);
+    workflow.push_str(
+        "name: Manual gates\n\non:\n  workflow_dispatch:\n\npermissions:\n  contents: read\n\njobs:",
+    );
+    let options = CiOptions {
+        repository_checks: true,
+        package_scoped: false,
+        independent_lanes: false,
+        required_gates: gates.to_vec(),
+        ..options.clone()
+    };
+    push_required_gate_jobs(
+        &mut workflow,
+        Platform::Github,
+        runtime,
+        package,
+        runners,
+        &options,
+    );
+    GeneratedFile {
+        relative_path: PathBuf::from(Platform::Github.workflow_dir()).join("manual-gates.yaml"),
+        content: workflow,
+    }
+}
+
 pub(crate) fn push_required_gate_artifacts(
     workflow: &mut String,
     gate: &crate::config::RequiredGate,

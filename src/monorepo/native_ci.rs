@@ -62,7 +62,7 @@ pub(super) fn files(
             let node24 = crate::render::ci::github_runner_supports_node24(runner);
             let mut validate_steps = vec![
                 super::ci::checkout(node24),
-                super::ci::install_nix(node24),
+                super::ci::install_nix(node24, None),
                 super::ci::input_transport(),
                 tag_check.clone(),
                 run("pack"),

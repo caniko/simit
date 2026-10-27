@@ -382,7 +382,15 @@ impl ResolvedCiInputs {
             })
             .unwrap_or_default();
         let required_gates = if cfg.ci.required_gates.is_empty() {
-            inference.required_gates.unwrap_or_default()
+            // A gate moved to `manual_gates` must not be re-inferred from the old ci.yaml.
+            let mut inferred = inference.required_gates.unwrap_or_default();
+            inferred.retain(|gate| {
+                cfg.ci
+                    .manual_gates
+                    .iter()
+                    .all(|manual| manual.id != gate.id)
+            });
+            inferred
         } else {
             cfg.ci.required_gates.clone()
         };
@@ -553,7 +561,9 @@ impl ResolvedCiInputs {
         let mut ci = cfg.ci.clone();
         ci.platform = Some(platform);
         ci.runtime = (self.runtime != Runtime::Cargo).then_some(self.runtime);
-        ci.runner = runner;
+        // Native system runners replace the single runner, and config
+        // validation rejects both together.
+        ci.runner = runner.filter(|_| ci.nix_system_runners.is_empty());
         ci.windows_runner = windows_runner;
         ci.workspace = self.workspace;
         ci.workspace_strategy = self.workspace_strategy;
