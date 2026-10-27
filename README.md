@@ -682,7 +682,8 @@ simit dist apt verify --repo ../apt-foo --version 0.3.1
 Relevant project config sections are `[aur]`, `[copr]`, `[apt]`,
 `[homebrew]`, `[chocolatey]`, `[scoop]`, `[flatpak]`, `[winget]`,
 `[release.codeberg]`, `[release.github]`, `[release.artifacts]`, `[release.attic]`,
-`[release.changelog]`, `[release.announce]`, and `[release.windows_signing]`. The publish workflow
+`[release.changelog]`, `[release.announce]`, `[release.windows_signing]`, and `[release.pypi]`
+(prebuilt `release/*.whl` to PyPI; see the distribution-channels guide). The publish workflow
 secret names are configurable with `[aur].ssh_key_secret`,
 `[copr].login_secret`, `[copr].username_secret`, `[copr].token_secret`,
 `[apt].gpg_key_secret`, `[apt].gpg_key_id_secret`,
@@ -692,8 +693,8 @@ secret names are configurable with `[aur].ssh_key_secret`,
 `[chocolatey].api_key_from_runner`, `[release.codeberg].token_secret`,
 `[release.github].token_secret`,
 `[flatpak].token_secret`, `[winget].token_secret`,
-`[release.announce].*_secret`, and
-`[release.windows_signing].*_secret`.
+`[release.announce].*_secret`,
+`[release.windows_signing].*_secret`, and `[release.pypi].token_secret`.
 
 APT uses a repository-backed Pages branch rather than rebuilding a fresh
 repository tree on every release:

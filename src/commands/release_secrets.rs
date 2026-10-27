@@ -128,6 +128,7 @@ pub(crate) fn project_credentials(
         flatpak: cfg.flatpak.as_ref(),
         winget: cfg.winget.as_ref(),
         announce: cfg.release.announce.as_ref(),
+        pypi: cfg.release.pypi.as_ref(),
     };
     let mut credentials = release_workflow::credential_contract(&inputs);
     if cfg.ci.publish_strategy == crate::config::PublishStrategy::ReleasePlz {

@@ -349,6 +349,10 @@ That reusable `release: true` entry exists only when `[release.github]` or
 `[prebuild].release_archives` is configured. A publish-only prebuild has no
 caller, so it omits the entry, its tag/changelog/keyring validation, and the
 `attic_token` indirection, and reads the Attic token from the repository secret.
+Generated Crow `build` and `ci` workflows run on every pull request, but push
+pipelines only on `${CI_REPO_DEFAULT_BRANCH}` and the updater's default
+maintenance refs (`simit/update/**`). Pull request pipelines gate other branches,
+so a branch push would only repeat them on metered agents.
 Projects without a GitHub mirror set `[prebuild].provider = "crow"`. Then
 `simit init ci --prebuild-only` renders `.crow/prebuild.yaml` with the
 `[ci.crow]` image and labels. It runs only on pushes to
