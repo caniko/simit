@@ -1062,6 +1062,10 @@ fn run_nix_only_at(command: InitCiCommand, workspace_root: &Path) -> Result<()> 
         *configured = cli.unwrap_or(*configured);
     }
     cfg.ci.nix_flake_check = command.nix_flake_check.or(cfg.ci.nix_flake_check);
+    // Moving to another runner fleet also drops the old fleet's per-system labels.
+    if command.reset_step_runners {
+        cfg.ci.nix_system_runners.clear();
+    }
     cfg.ci.validate_nix_only_language_options()?;
     if cfg.ci.publish_crates
         && !configured_publish_crates

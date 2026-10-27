@@ -845,3 +845,15 @@ fn runner_override_replaces_the_ci_runner_fallback() {
     let migrated = print(&["--runner", "ubuntu-24.04"]);
     assert!(migrated.contains("ubuntu-24.04") && !migrated.contains("codeberg-small"));
 }
+
+#[test]
+fn forgejo_release_plan_needs_a_project_runner() {
+    let project = init_package_without_release_runner("plan-runner-demo");
+    let output = simit()
+        .current_dir(project.path())
+        .args(["init", "release", "--plan-json"])
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("project policy"));
+}

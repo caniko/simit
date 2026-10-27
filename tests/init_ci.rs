@@ -368,6 +368,37 @@ fn private_github_runner_generation_preserves_the_compatible_checkout_baseline()
 }
 
 #[test]
+fn provider_migration_resets_nix_system_runners_and_accepts_runner() {
+    let temp = init_flake_only();
+    fs::write(
+        temp.path().join("simit.toml"),
+        "[ci]\nplatform = \"github\"\nprovider = \"actions\"\nruntime = \"nix\"\nnix_builds = [\".#default\"]\n[ci.nix_system_runners]\nx86_64-linux = \"private-x86\"\n",
+    )
+    .unwrap();
+    let plan = |extra: &[&str]| {
+        simit()
+            .current_dir(temp.path())
+            .args(["init", "ci", "--plan-json", "--runner=ubuntu-24.04"])
+            .args(extra)
+            .output()
+            .unwrap()
+    };
+    assert!(!plan(&[]).status.success());
+    let output = plan(&["--reset-step-runners"]);
+    assert!(output.status.success(), "{output:?}");
+    let plan: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    let config = plan["patches"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|patch| patch["relative_path"] == "simit.toml")
+        .unwrap()["content"]
+        .as_str()
+        .unwrap();
+    assert!(!config.contains("nix_system_runners") && config.contains("ubuntu-24.04"));
+}
+
+#[test]
 fn native_runner_matrices_keep_unknown_workers_on_compatible_actions() {
     for (arm_runner, checkout, upload) in [
         ("ubuntu-24.04-arm", "v7.0.1", "v7.0.2"),
