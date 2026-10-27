@@ -6906,6 +6906,87 @@ fn local_gate_is_opt_in_and_disabling_it_retires_the_script() {
     assert!(!script_path.exists());
 }
 
+fn write_local_gate_steps(root: &Path, local_gate: bool, steps: &str) {
+    write_local_gate_config(root, local_gate);
+    let config = read(&root.join("simit.toml")).replacen(
+        "\n[ci.nix_build]",
+        &format!("local_gate_steps = [{steps}]\n\n[ci.nix_build]"),
+        1,
+    );
+    fs::write(root.join("simit.toml"), config).unwrap();
+}
+
+#[test]
+fn local_gate_steps_follow_ci_steps_and_are_drift_checked() {
+    let temp = init_package(true);
+    let browser = r#"{ name = "Browser suite", run = "CI=1 bash -euc 'npm test'" }"#;
+    write_local_gate_steps(temp.path(), true, browser);
+    assert_ok(&run_init_ci(temp.path(), false));
+    let script_path = temp.path().join("scripts/ci-local.sh");
+    let script = read(&script_path);
+    let step = script
+        .find("step 'Browser suite' 'CI=1 bash -euc '\\''npm test'\\'''\n")
+        .expect(&script);
+    assert!(script.find("step 'Nix build .#oci api'").unwrap() < step);
+    assert_eq!(
+        simit::config::ProjectConfig::load(temp.path())
+            .unwrap()
+            .ci
+            .local_gate_steps
+            .len(),
+        1
+    );
+    let listed = Command::new("bash")
+        .arg(&script_path)
+        .arg("--list")
+        .output()
+        .unwrap();
+    assert_ok(&listed);
+    let listed = String::from_utf8(listed.stdout).unwrap();
+    assert!(listed.trim_end().ends_with("Browser suite"), "{listed}");
+
+    assert_ok(&run_init_ci(temp.path(), true));
+    write_local_gate_steps(
+        temp.path(),
+        true,
+        r#"{ name = "Browser suite", run = "npm test" }"#,
+    );
+    assert!(!run_init_ci(temp.path(), true).status.success());
+}
+
+#[test]
+fn local_gate_steps_require_local_gate_and_unique_names() {
+    let temp = init_package(true);
+    for (local_gate, steps, error) in [
+        (
+            false,
+            r#"{ name = "Browser suite", run = "npm test" }"#,
+            "requires [ci].local_gate = true",
+        ),
+        (
+            true,
+            r#"{ name = "a", run = "true" }, { name = "a", run = "false" }"#,
+            "duplicate name `a`",
+        ),
+        (
+            true,
+            r#"{ name = " ", run = "true" }"#,
+            "non-empty single lines",
+        ),
+        (
+            true,
+            r#"{ name = "a", run = " " }"#,
+            "run must not be empty",
+        ),
+    ] {
+        write_local_gate_steps(temp.path(), local_gate, steps);
+        let output = run_init_ci(temp.path(), false);
+        assert!(!output.status.success(), "{steps}");
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(stderr.contains(error), "{steps}: {stderr}");
+    }
+}
+
 #[test]
 fn prebuild_only_accepts_crow_options_only_for_a_crow_prebuild() {
     let crow = r#"[prebuild]

@@ -1,5 +1,6 @@
 //! Local gate script derived from the rendered CI workflows, so a project whose
-//! forge runs no CI can run the same checks before pushing.
+//! forge runs no CI can run the same checks before pushing. Project-owned
+//! `[ci].local_gate_steps` follow the derived steps.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -71,7 +72,7 @@ fn single_quoted(text: &str) -> String {
 
 pub fn local_gate_script(files: &[GeneratedFile], ci: &CiConfig) -> Result<GeneratedFile> {
     let steps = workflow_steps(files)?;
-    if steps.is_empty() {
+    if steps.is_empty() && ci.local_gate_steps.is_empty() {
         bail!("[ci].local_gate needs GitHub/Forgejo Actions CI workflows to derive steps from");
     }
     let mut workflows_per_command: BTreeMap<&str, usize> = BTreeMap::new();
@@ -133,6 +134,13 @@ step() {{\n\
             single_quoted(&command)
         ));
     }
+    for extra in &ci.local_gate_steps {
+        script.push_str(&format!(
+            "step {} {}\n",
+            single_quoted(&extra.name),
+            single_quoted(&extra.run)
+        ));
+    }
     Ok(GeneratedFile {
         // ponytail: written without the executable bit (run via `bash`), and
         // the registry's ci=drift scan only covers workflow dirs; disabling
@@ -140,4 +148,22 @@ step() {{\n\
         relative_path: PathBuf::from(LOCAL_GATE_PATH),
         content: script,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::LocalGateStep;
+
+    #[test]
+    fn local_only_steps_do_not_need_derived_workflow_steps() {
+        let mut ci = CiConfig::default();
+        assert!(local_gate_script(&[], &ci).is_err());
+        ci.local_gate_steps.push(LocalGateStep {
+            name: "Browser suite".into(),
+            run: "npm test".into(),
+        });
+        let script = local_gate_script(&[], &ci).unwrap();
+        assert!(script.content.contains("step 'Browser suite' 'npm test'"));
+    }
 }
