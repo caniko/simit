@@ -3194,6 +3194,14 @@ impl ProjectConfig {
             .and_then(|source| source.ci))
     }
 
+    /// Labels of the non-empty static config sources; never evaluates a flake.
+    pub(crate) fn static_source_labels(workspace_root: &Path) -> Result<Vec<String>> {
+        Ok(Self::load_static_sources(workspace_root)?
+            .into_iter()
+            .map(|source| source.label)
+            .collect())
+    }
+
     fn load_static_sources(workspace_root: &Path) -> Result<Vec<ProjectConfigSource>> {
         let mut sources = Vec::new();
 
@@ -5012,10 +5020,23 @@ fn load_cargo_metadata_config(workspace_root: &Path) -> Result<Vec<ProjectConfig
     Ok(sources)
 }
 
+static NO_FLAKE_EVAL: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Refuse to evaluate flake `simitConfig` sources for the rest of this
+/// process. Child simit processes opt out with `SIMIT_NO_FLAKE_EVAL=1`.
+pub(crate) fn disable_flake_eval() {
+    NO_FLAKE_EVAL.store(true, std::sync::atomic::Ordering::Relaxed);
+}
+
 fn load_flake_config(workspace_root: &Path) -> Result<Option<ProjectConfigSource>> {
     let path = workspace_root.join("flake.nix");
     if !path.exists() || !flake_declares_simit_config(&path)? {
         return Ok(None);
+    }
+    if NO_FLAKE_EVAL.load(std::sync::atomic::Ordering::Relaxed)
+        || std::env::var_os("SIMIT_NO_FLAKE_EVAL").is_some_and(|value| value == "1")
+    {
+        bail!("flake outputs.simitConfig was not evaluated (flake evaluation is disabled)");
     }
 
     let command_text = "nix --extra-experimental-features 'nix-command flakes' eval --json --no-update-lock-file --no-write-lock-file --option accept-flake-config false --option allow-import-from-derivation false .#simitConfig";

@@ -906,13 +906,13 @@ fn is_supplementary_workflow(file: &WorkflowFile) -> bool {
 }
 
 #[derive(Debug, Clone)]
-struct WorkflowFile {
-    relative_path: PathBuf,
-    content: String,
-    marked: bool,
+pub(crate) struct WorkflowFile {
+    pub(crate) relative_path: PathBuf,
+    pub(crate) content: String,
+    pub(crate) marked: bool,
 }
 
-fn collect_workflow_files(workspace_root: &Path) -> Result<Vec<WorkflowFile>> {
+pub(crate) fn collect_workflow_files(workspace_root: &Path) -> Result<Vec<WorkflowFile>> {
     let mut workflows = Vec::new();
 
     for relative_dir in [".forgejo/workflows", ".github/workflows", ".crow"] {
@@ -960,6 +960,15 @@ fn collect_workflow_files(workspace_root: &Path) -> Result<Vec<WorkflowFile>> {
 
     workflows.sort_by(|left, right| left.relative_path.cmp(&right.relative_path));
     Ok(workflows)
+}
+
+/// The CI files Simit would generate today for the checkout's marked workflows.
+pub(crate) fn expected_ci_files(workspace_root: &Path) -> Result<Vec<project::GeneratedFile>> {
+    let marked = collect_workflow_files(workspace_root)?
+        .into_iter()
+        .filter(|file| file.marked && !is_release_workflow(file))
+        .collect::<Vec<_>>();
+    infer_expected_ci_files(workspace_root, &marked)
 }
 
 fn marked_workflows_drift(workspace_root: &Path, marked: &[WorkflowFile]) -> bool {
@@ -2145,6 +2154,37 @@ fn origin_owner_repo(workspace_root: &Path) -> Result<String> {
     Ok(format!("{owner}/{repo}"))
 }
 
+/// `host/owner/repo` (lowercase host) of the checkout's `origin` remote. The
+/// remote URL is never echoed: it may carry credentials.
+pub(crate) fn origin_coordinate(workspace_root: &Path) -> Result<String> {
+    let origin = crate::git::output(workspace_root, &["remote", "get-url", "origin"])
+        .context("reading the origin remote")?;
+    coordinate_from_remote(origin.trim())
+        .context("the origin remote is not a HOST/OWNER/REPO forge URL")
+}
+
+fn coordinate_from_remote(url: &str) -> Option<String> {
+    // `scheme://[user@]host[:port]/path` or scp-style `[user@]host:path`.
+    let (authority, path) = match url.split_once("://") {
+        Some((_, rest)) => rest.split_once('/')?,
+        None => url.split_once(':')?,
+    };
+    let host = authority
+        .rsplit_once('@')
+        .map_or(authority, |(_, host)| host);
+    let host = host.split(':').next()?.to_ascii_lowercase();
+    // A query or fragment can carry credentials; it is never part of the coordinate.
+    let path = path.split(['?', '#']).next()?.trim_matches('/');
+    let path = path.strip_suffix(".git").unwrap_or(path);
+    (!host.is_empty()
+        && !host.contains('/')
+        && path.split('/').count() >= 2
+        && path
+            .split('/')
+            .all(|part| !part.is_empty() && part != "." && part != ".."))
+    .then(|| format!("{host}/{path}"))
+}
+
 fn infer_primary_runner(marked: &[WorkflowFile], workflow_kind: &str) -> Result<ResolvedRunner> {
     let workflow = marked
         .iter()
@@ -2274,7 +2314,7 @@ fn detect_hooks_status_without_git(workspace_root: &Path) -> FeatureStatus {
     }
 }
 
-fn has_hooks_config(workspace_root: &Path) -> bool {
+pub(crate) fn has_hooks_config(workspace_root: &Path) -> bool {
     workspace_root.join("nix/pre-commit.nix").exists()
         || workspace_root.join(".pre-commit-config.yaml").exists()
         || workspace_root.join(".pre-commit-config.yml").exists()
@@ -2784,6 +2824,38 @@ jobs:
             format!("{error:#}").contains("[ci.pages].repo"),
             "unhelpful error: {error:#}"
         );
+    }
+
+    #[test]
+    fn remote_urls_map_to_forge_coordinates() {
+        for (url, coordinate) in [
+            (
+                "https://github.com/caniko/simit.git",
+                Some("github.com/caniko/simit"),
+            ),
+            (
+                "https://user:token@GitHub.com/caniko/simit/",
+                Some("github.com/caniko/simit"),
+            ),
+            (
+                "ssh://git@codefloe.com:2222/caniko/pink-raven.git",
+                Some("codefloe.com/caniko/pink-raven"),
+            ),
+            (
+                "git@codeberg.org:caniko/group/sub.git",
+                Some("codeberg.org/caniko/group/sub"),
+            ),
+            (
+                "https://github.com/caniko/simit.git?token=secret#frag",
+                Some("github.com/caniko/simit"),
+            ),
+            ("git@github.com:demo.git", None),
+            ("/data/checkouts/simit", None),
+            ("file:///data/checkouts/simit", None),
+            ("https://github.com/caniko/../simit", None),
+        ] {
+            assert_eq!(coordinate_from_remote(url).as_deref(), coordinate, "{url}");
+        }
     }
 
     #[test]

@@ -109,6 +109,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `simit init release` on GitHub falls back to hosted runners without a simit
   user config, as `simit init ci` already did.
 
+- `simit projects facts` reports simit's own flake references and `cargo install`
+  commands in simit-generated files as `runtime.generated-ref`, covered by
+  regenerating that file, instead of manual `runtime.flake-ref` /
+  `runtime.cargo-install` pins. Config commands copied into generated files
+  stay manual pins.
+- Add `simit projects facts [PATH...] [--eval-flake]`: a read-only
+  `fleetix.supply-facts.v1` document (vocabulary `simit.usage-facts.v1`) of
+  every simit usage in the given checkouts (config sources, generated CI,
+  release, flake, hooks, README badges and distribution files, flake inputs,
+  runtime references, pins and Cargo dependencies), with repository blockers
+  and the capability matrix of upgrade paths. Updater rows are `implemented`
+  exactly when the new `SUPPORTED_SCOPES`, `UPDATER_ADAPTERS` and
+  `SUPPORTED_LANDINGS` constants say so. Flake `simitConfig` is evaluated only
+  with `--eval-flake`; `SIMIT_NO_FLAKE_EVAL=1` disables that evaluation in any
+  simit process. Every workflow file also becomes a `workflow:` node with its
+  static triggers, runner labels and step names. See
+  `docs/src/projects-facts.md`.
+  simit process. See `docs/src/projects-facts.md`.
 - Add `[release.pypi]`: the release workflow uploads the prebuilt
   `release/*.whl` (e.g. from a Nix `release-bundle`) to PyPI with
   `uv publish --check-url` after the hosted release, using PyPI trusted

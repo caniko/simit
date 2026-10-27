@@ -5,6 +5,14 @@ use std::{
     path::{Path, PathBuf},
 };
 
+/// Generated-file scopes a profile can enroll. `ci` is required and is the
+/// only qualification set; the others are carried update-only consumptions.
+pub const SUPPORTED_SCOPES: &[&str] = &["ci", "ci-extra", "release", "flake", "readme"];
+/// Built-in forge adapter protocols (`simit projects update-<name>-adapter`).
+pub const UPDATER_ADAPTERS: &[&str] = &["github", "forgejo"];
+/// How a qualified candidate reaches the target branch.
+pub const SUPPORTED_LANDINGS: &[&str] = &["direct", "pull-request"];
+
 #[derive(Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct Config {
@@ -446,7 +454,7 @@ impl Config {
                 scopes.len() == profile.scopes.len()
                     && scopes
                         .iter()
-                        .all(|scope| super::SUPPORTED_SCOPES.contains(&scope.as_str()))
+                        .all(|scope| SUPPORTED_SCOPES.contains(&scope.as_str()))
                     && scopes.contains(&"ci".to_owned()),
                 "profile scopes must be unique, supported and include ci (ci-extra extends it)"
             );
@@ -745,7 +753,7 @@ mod tests {
             assert!(cfg.validate().is_err(), "{scopes:?}");
         }
         let mut cfg = config();
-        cfg.profiles.get_mut("fleet").unwrap().scopes = super::super::SUPPORTED_SCOPES
+        cfg.profiles.get_mut("fleet").unwrap().scopes = SUPPORTED_SCOPES
             .iter()
             .rev()
             .map(|scope| scope.to_string())

@@ -2318,6 +2318,10 @@ pub enum ProjectsAction {
     Scan(ProjectsScanArgs),
     #[command(about = "Audit live project CI without reading or writing the registry")]
     Audit(ProjectsAuditArgs),
+    #[command(
+        about = "Print simit usage facts for the fleetix supply graph without writing anything"
+    )]
+    Facts(ProjectsFactsArgs),
     #[command(about = "Regenerate selected generated CI and release workflows")]
     Regenerate(ProjectsRegenerateArgs),
     #[command(about = "Qualify and deploy generated primary CI updates without pull requests")]
@@ -2409,6 +2413,20 @@ pub struct ProjectsAuditArgs {
     pub paths: Vec<Utf8PathBuf>,
     #[arg(long, help = "Print a stable machine-readable JSON report")]
     pub json: bool,
+}
+
+#[derive(Debug, Args)]
+pub struct ProjectsFactsArgs {
+    #[arg(
+        value_name = "PATH",
+        help = "Repository checkout; defaults to the current directory; may be repeated"
+    )]
+    pub paths: Vec<Utf8PathBuf>,
+    #[arg(
+        long,
+        help = "Evaluate flake outputs.simitConfig with nix instead of reporting it unresolved"
+    )]
+    pub eval_flake: bool,
 }
 
 #[derive(Debug, Args)]

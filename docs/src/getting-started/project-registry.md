@@ -61,6 +61,9 @@ string, so automation should key off `provider`, not `platform`. Exit status
 `0` means clean, `1` means attention is required, and `2` means the live
 comparison could not be completed for one or more projects.
 
+`simit projects facts` extends this to every simit usage, not only CI, and
+says which upgrade path covers each one; see [Usage Facts](../projects-facts.md).
+
 ## Onboarding existing projects
 
 Run discovery once per machine to populate the registry from projects simit
