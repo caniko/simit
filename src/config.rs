@@ -430,6 +430,15 @@ pub struct RequiredGate {
     pub artifacts: Option<RequiredGateArtifacts>,
 }
 
+/// A `[ci].local_gate_steps` entry: a local-only check, such as a browser
+/// suite no hosted CI runs, appended to `scripts/ci-local.sh`.
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct LocalGateStep {
+    pub name: String,
+    pub run: String,
+}
+
 #[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct RequiredGateArtifacts {
@@ -633,6 +642,11 @@ pub struct CiConfig {
     /// Rendered as dedicated required jobs; failures block publication.
     #[serde(default)]
     pub required_gates: Vec<RequiredGate>,
+    /// Gates rendered into `manual-gates.yaml`, triggered only by
+    /// `workflow_dispatch`: generated and drift-checked, but never run on
+    /// push/PR and never prerequisites of publication.
+    #[serde(default)]
+    pub manual_gates: Vec<RequiredGate>,
     /// Whether generated Rust checks should pass `--all-features`.
     #[serde(default)]
     pub all_features: Option<bool>,
@@ -655,6 +669,9 @@ pub struct CiConfig {
     /// Also generate `scripts/ci-local.sh`, the CI checks runnable locally.
     #[serde(default)]
     pub local_gate: bool,
+    /// Project-owned commands the local gate runs after the derived CI steps.
+    #[serde(default)]
+    pub local_gate_steps: Vec<LocalGateStep>,
     #[serde(default)]
     pub with_artifacts: bool,
     #[serde(default)]
@@ -705,6 +722,11 @@ impl CiConfig {
         platform: Platform,
     ) -> Result<()> {
         self.validate_required_gate_artifacts_backend(provider, platform)?;
+        if !self.manual_gates.is_empty()
+            && (provider != CiProvider::Actions || platform != Platform::Github)
+        {
+            bail!("[[ci.manual_gates]] requires the effective GitHub Actions backend");
+        }
         if self.separate_events && !self.push_branches.is_empty() {
             bail!(
                 "[ci].push_branches cannot filter explicitly retained separate_events producers; migrate event evidence and policy together"
@@ -779,7 +801,7 @@ impl CiConfig {
                 "[ci].check_command and nix_flake_check=false require Rust language CI; use [ci].components for Nix-only checks"
             );
         }
-        if !self.required_gates.is_empty() {
+        if !self.required_gates.is_empty() || !self.manual_gates.is_empty() {
             bail!("[[ci.required_gates]] requires Rust language CI; use Nix installables instead");
         }
         Ok(())
@@ -1235,6 +1257,10 @@ pub struct CrowCiConfig {
     /// Crow secret available only to the push-event copy of `check_command`.
     /// Pull requests run the same gate without receiving this secret.
     pub check_push_secret: Option<String>,
+    /// Crow secret available to `check_command` on every event, including pull
+    /// requests. For read-only credentials such as a private cache pull token;
+    /// excludes `check_push_secret`.
+    pub check_secret: Option<String>,
     pub platform: Option<String>,
     pub labels: BTreeMap<String, String>,
     pub workspace_base: Option<String>,
@@ -1259,6 +1285,7 @@ impl Default for CrowCiConfig {
             nix_image: None,
             check_command: None,
             check_push_secret: None,
+            check_secret: None,
             platform: None,
             labels: BTreeMap::new(),
             workspace_base: None,
@@ -2895,6 +2922,7 @@ impl ProjectConfig {
             );
         }
         validate_required_gates(&self.ci)?;
+        validate_local_gate_steps(&self.ci)?;
         if self
             .ci
             .crow
@@ -2906,14 +2934,23 @@ impl ProjectConfig {
                 "simit project config: [ci.crow].check_command must be a non-empty single-line command"
             );
         }
-        if let Some(secret) = &self.ci.crow.check_push_secret {
-            validate_secret_name("simit project config: [ci.crow].check_push_secret", secret)?;
+        if self.ci.crow.check_push_secret.is_some() && self.ci.crow.check_secret.is_some() {
+            bail!(
+                "simit project config: [ci.crow].check_secret and check_push_secret are mutually exclusive"
+            );
+        }
+        for (key, secret) in [
+            ("check_push_secret", &self.ci.crow.check_push_secret),
+            ("check_secret", &self.ci.crow.check_secret),
+        ] {
+            let Some(secret) = secret else { continue };
+            validate_secret_name(&format!("simit project config: [ci.crow].{key}"), secret)?;
             if self.ci.crow.check_command.is_none() {
-                bail!("simit project config: [ci.crow].check_push_secret requires check_command");
+                bail!("simit project config: [ci.crow].{key} requires check_command");
             }
             if self.ci.required_secrets.contains(secret) {
                 bail!(
-                    "simit project config: [ci.crow].check_push_secret must not also be a global required_secret"
+                    "simit project config: [ci.crow].{key} must not also be a global required_secret"
                 );
             }
         }
@@ -4293,7 +4330,13 @@ fn validate_required_gates(ci: &CiConfig) -> Result<()> {
     use std::collections::BTreeSet;
     let mut seen = BTreeSet::new();
     let mut artifact_names = BTreeSet::new();
-    for gate in &ci.required_gates {
+    // Manual gates share the namespace so ids stay unique across workflows.
+    for (manual, gate) in ci
+        .required_gates
+        .iter()
+        .map(|gate| (false, gate))
+        .chain(ci.manual_gates.iter().map(|gate| (true, gate)))
+    {
         let id = gate.id.trim();
         if id.is_empty() {
             bail!("simit project config: [[ci.required_gates]] id must not be empty");
@@ -4344,7 +4387,9 @@ fn validate_required_gates(ci: &CiConfig) -> Result<()> {
                 || artifacts
                     .name
                     .contains(['/', '\\', ':', '"', '<', '>', '|', '*', '?'])
-                || !artifact_names.insert(&artifacts.name)
+                // Each list renders its own workflow, so artifact names only
+                // need to be unique within it.
+                || !artifact_names.insert((manual, &artifacts.name))
             {
                 bail!(
                     "simit project config: required gate artifact names must be valid and unique without surrounding whitespace"
@@ -4383,9 +4428,46 @@ fn validate_required_gates(ci: &CiConfig) -> Result<()> {
     Ok(())
 }
 
-fn set_required_gates_table(table: &mut Table, gates: &[RequiredGate]) {
+fn validate_local_gate_steps(ci: &CiConfig) -> Result<()> {
+    if !ci.local_gate_steps.is_empty() && !ci.local_gate {
+        bail!("simit project config: [ci].local_gate_steps requires [ci].local_gate = true");
+    }
+    let mut seen = std::collections::BTreeSet::new();
+    for step in &ci.local_gate_steps {
+        let name = step.name.trim();
+        if name.is_empty() || step.name.contains(['\n', '\r']) {
+            bail!(
+                "simit project config: [ci].local_gate_steps names must be non-empty single lines"
+            );
+        }
+        if !seen.insert(name) {
+            bail!("simit project config: [ci].local_gate_steps duplicate name `{name}`");
+        }
+        if step.run.trim().is_empty() {
+            bail!("simit project config: [ci].local_gate_steps `{name}` run must not be empty");
+        }
+    }
+    Ok(())
+}
+
+fn set_local_gate_steps(table: &mut Table, steps: &[LocalGateStep]) {
+    if steps.is_empty() {
+        table.remove("local_gate_steps");
+        return;
+    }
+    let mut array = Array::new();
+    for step in steps {
+        let mut item = InlineTable::default();
+        item.insert("name", Value::from(step.name.as_str()));
+        item.insert("run", Value::from(step.run.as_str()));
+        array.push(Value::InlineTable(item));
+    }
+    table["local_gate_steps"] = Item::Value(Value::Array(array));
+}
+
+fn set_required_gates_table(table: &mut Table, key: &str, gates: &[RequiredGate]) {
     if gates.is_empty() {
-        table.remove("required_gates");
+        table.remove(key);
         return;
     }
     let mut array = Array::new();
@@ -4419,7 +4501,7 @@ fn set_required_gates_table(table: &mut Table, gates: &[RequiredGate]) {
         }
         array.push(Value::InlineTable(item));
     }
-    table["required_gates"] = Item::Value(Value::Array(array));
+    table[key] = Item::Value(Value::Array(array));
 }
 
 fn validate_nix_system_runners(ci: &CiConfig) -> Result<()> {
@@ -4724,6 +4806,7 @@ fn set_ci_table(table: &mut Table, ci: &CiConfig) {
     set_bool(table, "with_deny", ci.with_deny);
     set_bool(table, "with_docs", ci.with_docs);
     set_bool(table, "local_gate", ci.local_gate);
+    set_local_gate_steps(table, &ci.local_gate_steps);
     set_bool(table, "with_artifacts", ci.with_artifacts);
     set_bool(table, "with_pypi_publish", ci.with_pypi_publish);
     set_optional_string(table, "pypi_token_secret", ci.pypi_token_secret.as_deref());
@@ -4737,7 +4820,8 @@ fn set_ci_table(table: &mut Table, ci: &CiConfig) {
     } else {
         table.remove("publish_strategy");
     }
-    set_required_gates_table(table, &ci.required_gates);
+    set_required_gates_table(table, "required_gates", &ci.required_gates);
+    set_required_gates_table(table, "manual_gates", &ci.manual_gates);
     set_string_array(table, "extra_setup", &ci.extra_setup);
     set_string_map(table, "extra_env", &ci.extra_env);
     set_string_map(table, "workflow_templates", &ci.workflow_templates);
@@ -4780,6 +4864,11 @@ fn set_crow_table(table: &mut Table, crow: &CrowCiConfig) {
         &mut crow_table,
         "check_push_secret",
         crow.check_push_secret.as_deref(),
+    );
+    set_optional_string(
+        &mut crow_table,
+        "check_secret",
+        crow.check_secret.as_deref(),
     );
     if let Some(platform) = &crow.platform {
         crow_table["platform"] = value(platform.as_str());
@@ -4884,6 +4973,11 @@ fn set_string_map(table: &mut Table, key: &str, values: &BTreeMap<String, String
     if values.is_empty() {
         table.remove(key);
         return;
+    }
+    // Replacing a `[ci.<key>]` table in place keeps its header key decor,
+    // which renders `key= {...}`; a fresh key gets normal formatting.
+    if table.get(key).is_some_and(Item::is_table) {
+        table.remove(key);
     }
     let mut inline = InlineTable::default();
     for (map_key, map_value) in values {

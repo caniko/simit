@@ -19,6 +19,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Fixed: Chocolatey package install URLs always pointed at codeberg.org. They
   now follow the release host (`[release.github]` gives github.com, Codeberg
   and Forgejo configs keep codeberg.org).
+- Fix `simit init ci` with `[ci].nix_system_runners`: it no longer persists a
+  `runner` that its own validation then rejects, and a `[ci.nix_system_runners]`
+  table is rewritten as `nix_system_runners = { ... }` instead of
+  `nix_system_runners= { ... }`.
+- Strict producer custody workflows now share one workflow-level concurrency
+  group per completion producer workflow, source repository, commit, event,
+  branch and first PR.
+  Superseded completions no longer each queue an identity runner: on simit,
+  about 50 queued custody runs per trunk commit had starved the account's
+  Actions queue. Sealed custody is unchanged.
+- Add `[ci.crow].check_secret`: a Crow secret given to a single
+  `check_command` gate on push and pull_request events, for read-only
+  credentials such as a private cache pull token. It excludes
+  `check_push_secret`, which keeps the secret off pull requests.
+- Add `[ci].local_gate_steps`: project-owned `{ name, run }` checks that
+  `scripts/ci-local.sh` runs after the derived CI steps and Nix builds, for
+  suites no hosted CI runs. It requires `local_gate = true`, and names must be
+  unique single lines.
 - Add `[release.pypi]`: the release workflow uploads the prebuilt
   `release/*.whl` (e.g. from a Nix `release-bundle`) to PyPI with
   `uv publish --check-url` after the hosted release, using PyPI trusted
@@ -27,6 +45,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   under `activated-remote` until the PyPI project exists, and a `staged` channel
   skips a missing token or wheels. Crow release workflows reject the section
   unless the channel is disabled.
+- Monorepo components can share a CI job with `job = "<name>"`. Members run in
+  one `component-<name>` job (one checkout, Nix install and store) in dependency
+  order, each check guarded by its member's selection, and the `qualified` gate
+  maps members to their job. Superprojects can now cut their job count and stop
+  rebuilding a prerequisite on every dependent's runner.
+- Monorepo qualification now applies `[ci.cache]` substituters and trusted keys
+  to the planner and component jobs instead of silently ignoring them.
+  Publication workflows still resolve without them.
+- `[monorepo].ignore_paths` lists paths whose changes select no component, so
+  README or docs edits no longer trigger full qualification.
 - Generated Crow `build` and `ci` workflows now run push pipelines only on the
   default branch and the fleet updater's `simit/update/**` maintenance refs.
   Pull request pipelines still gate every branch, and other branch pushes no

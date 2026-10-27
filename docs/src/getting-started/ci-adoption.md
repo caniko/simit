@@ -57,6 +57,22 @@ installable with the `[ci.nix_build]` job limits. Steps tied to the hosted
 runner, such as those using `$GITHUB_*`, Actions expressions or global Git
 configuration, are left out, and so is job `env`.
 
+Checks that no hosted CI runs, such as a development browser suite, go in
+`[ci].local_gate_steps`. Each entry runs after the derived steps and Nix builds,
+under its own name, so `--list` and `SIMIT_LOCAL_ONLY` cover it:
+
+```toml
+[ci]
+local_gate = true
+local_gate_steps = [
+  { name = "Browser suite", run = "CI=1 nix develop -c npm --prefix tests/browser run test:ci" },
+]
+```
+
+Names must be unique non-empty single lines, `run` must not be empty, and the
+key requires `local_gate = true`. Changing a step is reported as drift until
+`simit init ci` regenerates the script.
+
 ```sh
 bash scripts/ci-local.sh --list                  # list steps
 SIMIT_LOCAL_ONLY="clippy|test" bash scripts/ci-local.sh  # run matching steps
@@ -1171,6 +1187,16 @@ A token-free, contents-read identity job derives the full target digest before
 collection. Collection uses that digest plus head SHA in job-level concurrency;
 different branches, PRs, base refs and case-distinct refs have distinct queues.
 Pending replacement within one target observes the same enrolled producer set.
+The strict protocol also groups the whole workflow by the completion's producer
+workflow id, source repository, head SHA, event, branch and first associated PR.
+Only the newest pending completion for that key queues a runner, instead of one
+identity job per completed producer run. The workflow id keeps a same-named
+workflow that is not enrolled from replacing a pending enrolled completion. That
+key is coarser than the digest, because Actions groups ignore case and see only
+the first PR. Rare distinct targets that collide
+lose a pending run, and that target's status stays missing until its next
+completion, which fails closed. Sealed custody keeps one run per completion,
+because it seals each completion separately.
 The collect job reserves 25 minutes for six-minute capture, upload bounded to five
 minutes, six-minute report lookups and a separate 90-second status POST. Reporting
 runs after failed upload and exhausted lookup budgets to publish failure when the
@@ -1362,6 +1388,11 @@ not inherit test-only services or credentials. Release secrets
 (`CRATES_IO_API_TOKEN`, minisign, etc.) must never appear in gate `env`; they
 belong only to independent default-branch upload jobs in the protected
 `simit-crates-io` environment.
+
+`[[ci.manual_gates]]` takes the same fields but renders the gates into
+`manual-gates.yaml`, triggered only by `workflow_dispatch` (GitHub Actions
+only). They stay generated and drift-checked, never run on push or pull
+requests, and never gate publication. Ids are unique across both lists.
 
 On GitHub Actions, a gate can retain diagnostic files after success or failure:
 
@@ -1578,8 +1609,17 @@ behavior. It cannot be combined with custom `CARGO_HOME` or
 
 These options apply to Rust language CI. The Cargo cache requires the Actions
 provider; Crow supports the generic project command but retains its dedicated
-`[ci.crow].check_command` and push-only secret policy. Exact-only Nix and Python
+`[ci.crow].check_command` and its secret policy. Exact-only Nix and Python
 workflows use `[ci].components` to select their checks instead.
+
+`[ci.crow].check_push_secret` gives one Crow secret to the push-event copy of
+`check_command`; pull requests run the same gate without it.
+`[ci.crow].check_secret` instead gives the secret to a single gate on every
+event the generated build workflow runs on (`push` and `pull_request`). Use it
+only for read-only credentials, such as a pull-only token for a private binary
+cache, and allow the Crow secret on those events. Project-owned workflows that
+also need it on other events, such as `manual`, must list them on the secret
+too. The two keys are mutually exclusive.
 
 ## Cargo-Audit Reliability
 
