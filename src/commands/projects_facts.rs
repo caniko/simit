@@ -217,16 +217,20 @@ impl Facts {
             );
         }
         let host = coordinate.split('/').next().unwrap_or_default().to_owned();
-        // ponytail: forge software by well-known host; every other host is
-        // Forgejo. Take the kind from operator forge policy if that stops holding.
-        let forge = match host.as_str() {
-            "github.com" => "github",
-            "gitlab.com" => "gitlab",
-            _ => "forgejo",
+        let target = registry::infer_project_ci_target(&root);
+        // ponytail: public hosts by name; any other host takes the platform its
+        // committed CI targets, else stays unknown. Read operator forge policy
+        // if that guess stops holding.
+        let forge = match (host.as_str(), &target) {
+            ("github.com", _) => "github",
+            ("gitlab.com", _) => "gitlab",
+            ("codeberg.org", _) => "forgejo",
+            (_, Ok(Some(backend))) => backend.platform().as_str(),
+            _ => "unknown",
         };
         let mut attrs = Attrs::from([("forge", json!(forge)), ("forgeHost", json!(host))]);
         let mut blockers = Vec::new();
-        match registry::infer_project_ci_target(&root) {
+        match target {
             Ok(Some(backend)) => {
                 let platform = backend.platform().as_str();
                 let target = format!("{}/{platform}", backend.provider().as_str());
@@ -421,12 +425,18 @@ impl Facts {
                     })
                     .ok()
             });
-            let drift = match (&content, expected) {
-                (Some(content), Some(expected)) => expected.content != *content,
-                _ => true,
+            // None: the policy or the expected script could not be resolved.
+            let drift = match (&content, configured, expected) {
+                (_, Some(_), None) => None,
+                (Some(_), None, _) if config.is_none() => None,
+                (Some(content), Some(_), Some(expected)) => Some(expected.content != *content),
+                _ => Some(true),
             };
             let paths = content.iter().map(|_| gate.to_owned()).collect();
-            kinds.insert("ci.local-gate", (paths, drift, false));
+            kinds.insert(
+                "ci.local-gate",
+                (paths, drift == Some(true), drift.is_none()),
+            );
         }
         for (kind, (paths, drift, unaudited)) in kinds {
             let state = if state == "unknown" {
@@ -755,9 +765,16 @@ impl Facts {
                 }
             }
         }
-        let config = ["simit.toml", "Cargo.toml"]
-            .map(|name| fs::read_to_string(root.join(name)).unwrap_or_default())
-            .concat();
+        // Config text plus its decoded string values: a command with quotes or
+        // backslashes is escaped on disk but verbatim in generated files.
+        let mut config = String::new();
+        for name in ["simit.toml", "Cargo.toml"] {
+            let text = fs::read_to_string(root.join(name)).unwrap_or_default();
+            if let Ok(decoded) = toml_edit::de::from_str::<Value>(&text) {
+                collect_strings(&decoded, &mut config);
+            }
+            config.push_str(&text);
+        }
         files.sort();
         for (path, content, script, generated) in files {
             let path = path.display().to_string();
@@ -769,8 +786,6 @@ impl Facts {
                 // Simit pins its own invocations in generated files to the generator
                 // revision, so they move with their file. Generated files also copy
                 // config commands (required gates, setup) verbatim; those stay human.
-                // ponytail: raw substring check, so a TOML-escaped command (quotes,
-                // backslashes) reads as generator-owned.
                 let command = line
                     .trim_start_matches("- ")
                     .trim_start_matches("run:")
@@ -943,6 +958,9 @@ impl Facts {
             let (Some("simit"), Some(source)) = (field("name"), field("source")) else {
                 continue;
             };
+            if !is_canonical_simit_source(source) {
+                continue;
+            }
             found = true;
             if let Some((_, revision)) = source.rsplit_once('#')
                 && is_revision(revision)
@@ -956,6 +974,36 @@ impl Facts {
             self.reference(coordinate, "cargo.dependency", "Cargo.lock", locked);
         }
     }
+}
+
+/// Every string value of a config document, one per line.
+fn collect_strings(value: &Value, out: &mut String) {
+    match value {
+        Value::String(text) => {
+            out.push_str(text);
+            out.push('\n');
+        }
+        Value::Array(items) => items.iter().for_each(|item| collect_strings(item, out)),
+        Value::Object(map) => map.values().for_each(|item| collect_strings(item, out)),
+        _ => {}
+    }
+}
+
+/// Whether a Cargo.lock package source is simit from crates.io or the canonical
+/// repository; forks and path sources are other code under the same name.
+fn is_canonical_simit_source(source: &str) -> bool {
+    if source.starts_with("registry+") || source.starts_with("sparse+") {
+        return true;
+    }
+    let Some(url) = source.strip_prefix("git+") else {
+        return false;
+    };
+    let url = url.split(['?', '#']).next().unwrap_or(url);
+    let url = url
+        .strip_suffix(".git")
+        .unwrap_or(url)
+        .trim_end_matches('/');
+    url.eq_ignore_ascii_case("https://github.com/caniko/simit")
 }
 
 /// A URL without userinfo, query or fragment: facts must not carry credentials.
@@ -1883,6 +1931,27 @@ mod tests {
             crow.triggers,
             json!({"events": ["push"], "branches": [], "branchesIgnore": ["simit/update/*"]})
         );
+    }
+
+    #[test]
+    fn cargo_sources_and_config_commands_are_classified() {
+        for source in [
+            "git+https://github.com/caniko/simit?rev=abc#abc",
+            "git+https://github.com/caniko/simit.git#abc",
+            "registry+https://github.com/rust-lang/crates.io-index",
+        ] {
+            assert!(is_canonical_simit_source(source), "{source}");
+        }
+        for source in [
+            "git+https://github.com/someone/simit?rev=abc#abc",
+            "git+https://github.com/caniko/simit-fork#abc",
+        ] {
+            assert!(!is_canonical_simit_source(source), "{source}");
+        }
+        let decoded: Value = toml_edit::de::from_str("run = \"echo \\\"a\\\" \\\\ b\"").unwrap();
+        let mut out = String::new();
+        collect_strings(&decoded, &mut out);
+        assert_eq!(out, "echo \"a\" \\ b\n");
     }
 
     #[test]

@@ -654,6 +654,11 @@
       "to": "usage:codefloe.com/example/pink#ci.primary"
     },
     {
+      "from": "repo:git.example.com/example/ghe",
+      "kind": "uses",
+      "to": "usage:git.example.com/example/ghe#ci.primary"
+    },
+    {
       "from": "repo:github.com/example/conflict",
       "kind": "uses",
       "to": "usage:github.com/example/conflict#config.cargo-package"
@@ -761,6 +766,11 @@
     {
       "from": "repo:github.com/example/flake-config",
       "kind": "uses",
+      "to": "usage:github.com/example/flake-config#ci.local-gate"
+    },
+    {
+      "from": "repo:github.com/example/flake-config",
+      "kind": "uses",
       "to": "usage:github.com/example/flake-config#ci.primary"
     },
     {
@@ -812,6 +822,16 @@
       "from": "usage:codefloe.com/example/pink#ci.primary",
       "kind": "contains",
       "to": "workflow:codefloe.com/example/pink#.crow/ci.yaml"
+    },
+    {
+      "from": "usage:git.example.com/example/ghe#ci.primary",
+      "kind": "runsOn",
+      "to": "runner:github.com/ubuntu-latest"
+    },
+    {
+      "from": "usage:git.example.com/example/ghe#ci.primary",
+      "kind": "contains",
+      "to": "workflow:git.example.com/example/ghe#.github/workflows/ci.yaml"
     },
     {
       "from": "usage:github.com/example/crow-on-github#ci.primary",
@@ -944,6 +964,11 @@
       "to": "workflow:github.com/example/unsigned#.github/workflows/release.yml"
     },
     {
+      "from": "workflow:git.example.com/example/ghe#.github/workflows/ci.yaml",
+      "kind": "runsOn",
+      "to": "runner:github.com/ubuntu-latest"
+    },
+    {
       "from": "workflow:github.com/example/drifted#.github/workflows/ci.yaml",
       "kind": "runsOn",
       "to": "runner:github.com/ubuntu-24.04"
@@ -997,6 +1022,23 @@
         "forgeHost": "codefloe.com"
       },
       "id": "repo:codefloe.com/example/pink",
+      "kind": "repo"
+    },
+    {
+      "attrs": {
+        "forge": "unknown",
+        "forgeHost": "git.example.com"
+      },
+      "id": "repo:git.example.com/example/bare",
+      "kind": "repo"
+    },
+    {
+      "attrs": {
+        "ciTarget": "actions/github",
+        "forge": "github",
+        "forgeHost": "git.example.com"
+      },
+      "id": "repo:git.example.com/example/ghe",
       "kind": "repo"
     },
     {
@@ -1170,6 +1212,24 @@
         }
       ],
       "id": "usage:codefloe.com/example/pink#ci.primary",
+      "kind": "usage"
+    },
+    {
+      "attrs": {
+        "paths": [
+          ".github/workflows/ci.yaml"
+        ],
+        "state": "drift",
+        "usageKind": "ci.primary"
+      },
+      "expects": [
+        {
+          "attr": "generatorRevision",
+          "blocker": "unknown-generator-revision",
+          "reason": "No receipt or pin proves which generator revision rendered these files."
+        }
+      ],
+      "id": "usage:git.example.com/example/ghe#ci.primary",
       "kind": "usage"
     },
     {
@@ -1488,6 +1548,24 @@
     {
       "attrs": {
         "paths": [
+          "scripts/ci-local.sh"
+        ],
+        "state": "unknown",
+        "usageKind": "ci.local-gate"
+      },
+      "expects": [
+        {
+          "attr": "generatorRevision",
+          "blocker": "unknown-generator-revision",
+          "reason": "No receipt or pin proves which generator revision rendered these files."
+        }
+      ],
+      "id": "usage:github.com/example/flake-config#ci.local-gate",
+      "kind": "usage"
+    },
+    {
+      "attrs": {
+        "paths": [
           ".github/workflows/ci.yaml"
         ],
         "state": "unknown",
@@ -1646,6 +1724,22 @@
         }
       },
       "id": "workflow:codefloe.com/example/pink#.crow/ci.yaml",
+      "kind": "workflow"
+    },
+    {
+      "attrs": {
+        "generated": true,
+        "labels": [
+          "ubuntu-latest"
+        ],
+        "path": ".github/workflows/ci.yaml",
+        "steps": [],
+        "triggers": {
+          "branches": [],
+          "events": []
+        }
+      },
+      "id": "workflow:git.example.com/example/ghe#.github/workflows/ci.yaml",
       "kind": "workflow"
     },
     {

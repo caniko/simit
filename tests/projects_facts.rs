@@ -232,6 +232,24 @@ fn fixtures(root: &Path) {
         "on: [release]\n",
     );
 
+    // A local gate whose policy sits in an unevaluated flake is unknown, not drift.
+    write(
+        &flake,
+        "scripts/ci-local.sh",
+        &format!("{MARKER}\n#!/bin/sh\n"),
+    );
+
+    // Self-hosted hosts take the forge of their committed CI, else stay unknown.
+    let ghe = checkout(root, "ghe", "https://git.example.com/example/ghe");
+    package(&ghe, "ghe", "");
+    write(
+        &ghe,
+        ".github/workflows/ci.yaml",
+        &format!("{MARKER}\njobs:\n  test:\n    runs-on: ubuntu-latest\n"),
+    );
+    let bare = checkout(root, "bare", "https://git.example.com/example/bare");
+    package(&bare, "bare", "");
+
     // A flake-defined signing policy is unknown, not required.
     write(
         &flake,
@@ -285,6 +303,8 @@ fn facts_match_the_golden_document_without_evaluating_flakes_or_writing() {
             "unsigned",
             "manual",
             "mixed",
+            "ghe",
+            "bare",
             "no-origin",
             "missing",
         ],
