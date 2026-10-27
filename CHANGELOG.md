@@ -11,6 +11,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `runner` that its own validation then rejects, and a `[ci.nix_system_runners]`
   table is rewritten as `nix_system_runners = { ... }` instead of
   `nix_system_runners= { ... }`.
+- Strict producer custody workflows now share one workflow-level concurrency
+  group per completion producer workflow, source repository, commit, event,
+  branch and first PR.
+  Superseded completions no longer each queue an identity runner: on simit,
+  about 50 queued custody runs per trunk commit had starved the account's
+  Actions queue. Sealed custody is unchanged.
 - Add `[release.pypi]`: the release workflow uploads the prebuilt
   `release/*.whl` (e.g. from a Nix `release-bundle`) to PyPI with
   `uv publish --check-url` after the hosted release, using PyPI trusted

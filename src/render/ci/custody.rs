@@ -33,7 +33,17 @@ pub fn file(config: &Config) -> Result<GeneratedFile> {
     for name in config.producers.keys() {
         workflow.push_str(&format!("      - \"{}\"\n", yaml_double_quote(name)));
     }
-    workflow.push_str("    types: [completed]\n\npermissions:\n  contents: read\n  actions: read\n  statuses: write\n\njobs:\n  identity:\n    runs-on: ubuntu-24.04\n    timeout-minutes: 2\n    permissions:\n      contents: read\n    outputs:\n      group: ${{ steps.identity.outputs.group }}\n      eligible: ${{ steps.identity.outputs.eligible }}\n    steps:\n      - name: Establish completion target identity\n        id: identity\n        shell: python\n        env:\n          SIMIT_CUSTODY_PHASE: identity\n");
+    // Completions of the same producer workflow, commit, event, branch, PR and
+    // source repository supersede each other: `collect` re-reads every sibling
+    // producer run, so only the newest pending completion needs a runner.
+    // Without this every completion (PR branches included) queued its own
+    // identity job. The producer's workflow id keeps a same-named unenrolled
+    // workflow from replacing a pending enrolled completion.
+    // ponytail: Actions groups are case-insensitive and see only the first
+    // associated PR, so rare distinct targets can share this queue; a replaced
+    // run then leaves that target's custody status missing (fails closed) until
+    // its next completion, and the job-level digest group stays exact.
+    workflow.push_str("    types: [completed]\n\nconcurrency:\n  group: producer-custody-${{ github.event.workflow_run.workflow_id }}-${{ github.event.workflow_run.head_repository.id }}-${{ github.event.workflow_run.head_sha }}-${{ github.event.workflow_run.event }}-${{ github.event.workflow_run.head_branch }}-${{ github.event.workflow_run.pull_requests[0].number }}\n  cancel-in-progress: false\n\npermissions:\n  contents: read\n  actions: read\n  statuses: write\n\njobs:\n  identity:\n    runs-on: ubuntu-24.04\n    timeout-minutes: 2\n    permissions:\n      contents: read\n    outputs:\n      group: ${{ steps.identity.outputs.group }}\n      eligible: ${{ steps.identity.outputs.eligible }}\n    steps:\n      - name: Establish completion target identity\n        id: identity\n        shell: python\n        env:\n          SIMIT_CUSTODY_PHASE: identity\n");
     workflow.push_str(&format!(
         "          SIMIT_CUSTODY_CONFIG: '{}'\n        run: |\n",
         serde_json::to_string(config)?.replace('\'', "''")
