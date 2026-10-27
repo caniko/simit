@@ -354,6 +354,40 @@ manual_gates = [{ id = "boot", run = "nix run .#boot", timeout_minutes = 20 }]
 }
 
 #[test]
+fn manual_and_required_gates_may_share_artifact_names() {
+    let temp = init_package(true);
+    let gate = |table: &str, id: &str| {
+        format!(
+            "[[ci.{table}]]\nid = \"{id}\"\nrun = \"nix run .#{id}\"\n[ci.{table}.artifacts]\nname = \"evidence\"\npaths = [\"target/evidence/\"]\n"
+        )
+    };
+    let config = |manual_id: &str| {
+        format!(
+            "[ci]\nplatform = \"github\"\nprovider = \"actions\"\nruntime = \"nix\"\n{}{}",
+            gate("required_gates", "boot"),
+            gate("manual_gates", manual_id)
+        )
+    };
+    let init = |text: String| {
+        fs::write(temp.path().join("simit.toml"), text).unwrap();
+        simit()
+            .current_dir(temp.path())
+            .args(["init", "ci"])
+            .output()
+            .unwrap()
+    };
+    // Separate workflows: the shared artifact name cannot collide.
+    let output = init(config("soak"));
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    // Ids still share one namespace across both lists.
+    assert!(!init(config("boot")).status.success());
+}
+
+#[test]
 fn required_gate_evidence_survives_failure_and_round_trips_through_publishers() {
     let temp = init_package(true);
     fs::write(

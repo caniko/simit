@@ -4202,7 +4202,12 @@ fn validate_required_gates(ci: &CiConfig) -> Result<()> {
     let mut seen = BTreeSet::new();
     let mut artifact_names = BTreeSet::new();
     // Manual gates share the namespace so ids stay unique across workflows.
-    for gate in ci.required_gates.iter().chain(&ci.manual_gates) {
+    for (manual, gate) in ci
+        .required_gates
+        .iter()
+        .map(|gate| (false, gate))
+        .chain(ci.manual_gates.iter().map(|gate| (true, gate)))
+    {
         let id = gate.id.trim();
         if id.is_empty() {
             bail!("simit project config: [[ci.required_gates]] id must not be empty");
@@ -4253,7 +4258,9 @@ fn validate_required_gates(ci: &CiConfig) -> Result<()> {
                 || artifacts
                     .name
                     .contains(['/', '\\', ':', '"', '<', '>', '|', '*', '?'])
-                || !artifact_names.insert(&artifacts.name)
+                // Each list renders its own workflow, so artifact names only
+                // need to be unique within it.
+                || !artifact_names.insert((manual, &artifacts.name))
             {
                 bail!(
                     "simit project config: required gate artifact names must be valid and unique without surrounding whitespace"
