@@ -94,6 +94,7 @@ pub fn run(command: InitReleaseCommand) -> Result<()> {
         flatpak: cfg.flatpak.as_ref(),
         winget: cfg.winget.as_ref(),
         announce: cfg.release.announce.as_ref(),
+        pypi: cfg.release.pypi.as_ref(),
     };
     let workflow = if provider == CiProvider::Crow {
         crate::render::crow::release_file(cfg.ci.crow.format, &cfg.ci.crow, &inputs)?
