@@ -47,6 +47,14 @@ impl Api {
     pub(super) fn get(&self, path: &str) -> Result<Value> {
         self.send(self.client.get(self.base.join(path)?))
     }
+    fn write(&self, method: &str, path: &str, body: &Value) -> Result<Value> {
+        let method = reqwest::Method::from_bytes(method.as_bytes())?;
+        self.send(
+            self.client
+                .request(method, self.base.join(path)?)
+                .json(body),
+        )
+    }
     fn send(&self, request: reqwest::blocking::RequestBuilder) -> Result<Value> {
         let mut request = request
             .header("User-Agent", "simit-updater")
@@ -74,7 +82,7 @@ impl Api {
         );
         Ok(serde_json::from_slice(&bytes)?)
     }
-    fn admit_classic(&self, repository: &str, branch: &str) -> Result<()> {
+    fn admit_classic(&self, repository: &str, branch: &str, pull_request: bool) -> Result<()> {
         let (owner, name) = repository
             .split_once('/')
             .context("missing repository owner")?;
@@ -85,7 +93,7 @@ impl Api {
         } else {
             "graphql"
         })?;
-        admit_classic_rules(branch, |cursor| {
+        admit_classic_rules(branch, pull_request, |cursor| {
             self.send(self.client.post(endpoint.clone()).json(&serde_json::json!({
             "query":"query($owner:String!,$name:String!,$cursor:String){repository(owner:$owner,name:$name){branchProtectionRules(first:100,after:$cursor){totalCount nodes{id pattern restrictsPushes blocksCreations requiresCommitSignatures requiresApprovingReviews} pageInfo{hasNextPage endCursor}}}}",
             "variables":{"owner":owner,"name":name,"cursor":cursor}
@@ -645,8 +653,10 @@ fn protection_requirements(protection: &Value, authority: u64) -> Result<Vec<Req
     Ok(requirements)
 }
 
+/// A pull-request target tolerates only the approving-review requirement.
 fn admit_classic_rules(
     branch: &str,
+    pull_request: bool,
     mut page: impl FnMut(Option<&str>) -> Result<Value>,
 ) -> Result<()> {
     let mut cursor = None;
@@ -689,7 +699,7 @@ fn admit_classic_rules(
             let reviews = rule["requiresApprovingReviews"]
                 .as_bool()
                 .context("missing classic pull-request protection")?;
-            if pushes || creations || signatures || reviews {
+            if pushes || creations || signatures || (reviews && !pull_request) {
                 // ponytail: reject any matching restricted rule, irrespective
                 // of bypasses/priority, until an adapter binds the Git actor.
                 ensure!(
@@ -729,20 +739,23 @@ pub fn execute(request: &AdapterRequest) -> Result<AdapterResponse> {
     execute_with(
         request,
         |path| api.get(path),
-        |repository, branch| api.admit_classic(repository, branch),
+        |repository, branch, pull_request| api.admit_classic(repository, branch, pull_request),
+        |method, path, body| api.write(method, path, body),
     )
 }
 
 fn execute_with(
     request: &AdapterRequest,
     get: impl Fn(&str) -> Result<Value>,
-    classic: impl Fn(&str, &str) -> Result<()>,
+    classic: impl Fn(&str, &str, bool) -> Result<()>,
+    send: impl Fn(&str, &str, &Value) -> Result<Value>,
 ) -> Result<AdapterResponse> {
     request.validate()?;
     ensure!(
         request.ci_credential_file.is_none(),
         "GitHub Actions checks use the forge credential; a separate CI credential is unsupported"
     );
+    let pull_request = request.landing.as_deref() == Some("pull-request");
     let authority: u64 = request
         .authority
         .parse()
@@ -776,21 +789,22 @@ fn execute_with(
         // name without requiring a branch object or substituting the default.
         admit_rules(&endpoint, branch, |path| list(path, "", &get))?;
         if request.operation == "admit" {
-            classic(repository, branch)?;
+            // Validation binds pull-request admission to the target branch.
+            classic(repository, branch, pull_request)?;
         }
     }
-    let info = if request.operation == "admit" {
-        Value::Null
-    } else {
+    let info = if matches!(request.operation.as_str(), "inspect" | "qualify") {
         get(&format!("{endpoint}/branches/{}", encoded(branch)))?
+    } else {
+        Value::Null
     };
-    let revision = if matches!(request.operation.as_str(), "qualify" | "admit") {
+    let revision = if request.operation == "inspect" {
+        text(&info, "/commit/sha")?
+    } else {
         request
             .revision
             .clone()
             .context("qualification needs exact revision")?
-    } else {
-        text(&info, "/commit/sha")?
     };
     let mut requirements = Vec::new();
     let policy = if request.operation == "inspect" {
@@ -806,7 +820,7 @@ fn execute_with(
             Value::Null
         };
         ensure!(
-            protection["required_pull_request_reviews"].is_null(),
+            protection["required_pull_request_reviews"].is_null() || pull_request,
             "repository requires pull requests; direct updater landing is unsupported"
         );
         requirements = protection_requirements(&protection, authority)?;
@@ -834,8 +848,16 @@ fn execute_with(
         requirements,
         status: "success".into(),
         checks: vec![],
+        change: None,
     };
     if request.operation == "inspect" {
+        return Ok(response);
+    }
+    if matches!(request.operation.as_str(), "propose" | "merge" | "close") {
+        let (status, change) = pull(request, &endpoint, &repo, &get, &send)?;
+        response.status = status.into();
+        response.change = change;
+        response.validate(request)?;
         return Ok(response);
     }
     if request.operation == "admit" {
@@ -994,6 +1016,182 @@ fn execute_with(
     Ok(response)
 }
 
+/// Proposes, merges or closes the maintenance branch's pull request. Merges
+/// are guarded on the exact qualified head; the updater never approves.
+fn pull(
+    request: &AdapterRequest,
+    endpoint: &str,
+    repo: &Value,
+    get: &impl Fn(&str) -> Result<Value>,
+    send: &impl Fn(&str, &str, &Value) -> Result<Value>,
+) -> Result<(&'static str, Option<Change>)> {
+    let (Some(branch), Some(target), Some(revision)) = (
+        request.branch.as_deref(),
+        request.target.as_deref(),
+        request.revision.as_deref(),
+    ) else {
+        anyhow::bail!("pull-request operations need the candidate, its branch and target")
+    };
+    let full_name = text(repo, "/full_name")?;
+    let owner = full_name.split('/').next().unwrap_or_default();
+    let mut pull = if let Some(number) = &request.change {
+        get(&format!("{endpoint}/pulls/{}", encoded(number)))?
+    } else {
+        // Closing finds the branch's request whatever it targets, since
+        // policy may have retargeted the repository since it was proposed.
+        let base = if request.operation == "close" {
+            String::new()
+        } else {
+            format!("&base={}", encoded(target))
+        };
+        let found = list(
+            &format!(
+                "{endpoint}/pulls?state=all&head={}{base}",
+                encoded(&format!("{owner}:{branch}"))
+            ),
+            "",
+            get,
+        )?;
+        // Unmerged closed requests are history; a regenerated candidate may
+        // reuse their branch name and needs a new request.
+        let found = found
+            .as_array()
+            .context("missing pull requests")?
+            .iter()
+            .filter(|pull| pull["state"] != "closed" || !pull["merged_at"].is_null())
+            .collect::<Vec<_>>();
+        ensure!(
+            found.len() <= 1,
+            "ambiguous pull requests for the maintenance branch"
+        );
+        match (found.first(), request.operation.as_str()) {
+            (Some(pull), _) => (*pull).clone(),
+            (None, "close") => return Ok(("success", None)),
+            (None, _) => send(
+                "POST",
+                &format!("{endpoint}/pulls"),
+                &serde_json::json!({
+                    "title": format!("ci: adopt qualified simit candidate {}", &revision[..12]),
+                    "head": branch, "base": target,
+                    "body": "Opened by `simit projects update`. It merges this exact head after qualification.",
+                }),
+            )?,
+        }
+    };
+    let id = &repo["id"];
+    // Closing retires our maintenance branch's change even if policy retargeted.
+    ensure!(
+        pull["head"]["ref"] == branch
+            && pull["head"]["repo"]["id"] == *id
+            && (request.operation == "close" || pull["base"]["ref"] == target)
+            && pull["base"]["repo"]["id"] == *id,
+        "pull request differs from the maintenance branch and target"
+    );
+    let number = number(&pull, "/number")?;
+    let mut state = if !pull["merged_at"].is_null() {
+        "merged"
+    } else {
+        match pull["state"].as_str() {
+            Some("open") => "open",
+            Some("closed") => "closed",
+            _ => anyhow::bail!("unknown pull request state"),
+        }
+    };
+    let mut merge_commit = (state == "merged")
+        .then(|| text(&pull, "/merge_commit_sha"))
+        .transpose()?;
+    match (request.operation.as_str(), state) {
+        ("merge", "open") => {
+            ensure!(
+                pull["head"]["sha"] == revision,
+                "pull request head differs from the qualified candidate"
+            );
+            // The merge `sha` pins only the head. Merge onto the candidate's
+            // own source, so the landed commit can be adopted; a moved target
+            // stays pending until the engine closes and regenerates it.
+            // ponytail: GitHub has no base guard, so a push between this read
+            // and the merge still lands; adoption then fails closed.
+            let parents = get(&format!("{endpoint}/commits/{revision}"))?["parents"].clone();
+            let parents = parents.as_array().context("missing candidate parents")?;
+            ensure!(parents.len() == 1, "candidate must have one parent");
+            let base = get(&format!("{endpoint}/branches/{}", encoded(target)))?;
+            let moved = base["commit"]["sha"] != parents[0]["sha"];
+            match text(&pull, "/mergeable_state")?.as_str() {
+                _ if moved => {}
+                "clean" | "unstable" | "has_hooks" => {
+                    // Linear history forbids merge commits on the target.
+                    // Reading protection needs admin access; a token without
+                    // it assumes no rule rather than failing every merge.
+                    let linear = base["protected"] == true
+                        && get(&format!(
+                            "{endpoint}/branches/{}/protection",
+                            encoded(target)
+                        ))
+                        .is_ok_and(|p| {
+                            p.pointer("/required_linear_history/enabled")
+                                == Some(&Value::Bool(true))
+                        });
+                    let method = [
+                        ("merge", "allow_merge_commit"),
+                        ("squash", "allow_squash_merge"),
+                        ("rebase", "allow_rebase_merge"),
+                    ]
+                    .into_iter()
+                    .find(|(method, allowed)| {
+                        repo[allowed] == true && !(linear && *method == "merge")
+                    })
+                    .context("repository allows no pull request merge method")?
+                    .0;
+                    let merged = send(
+                        "PUT",
+                        &format!("{endpoint}/pulls/{number}/merge"),
+                        &serde_json::json!({"sha": revision, "merge_method": method}),
+                    )?;
+                    ensure!(
+                        merged["merged"] == true,
+                        "GitHub did not merge the pull request"
+                    );
+                    state = "merged";
+                    merge_commit = Some(text(&merged, "/sha")?);
+                }
+                // Approvals, required checks, staleness and GitHub's own
+                // mergeability computation can all resolve without the updater.
+                "blocked" | "behind" | "unknown" | "draft" => {}
+                "dirty" => anyhow::bail!("pull request conflicts with its target"),
+                other => anyhow::bail!("unsupported pull request mergeable state {other}"),
+            }
+        }
+        ("close", "open") => {
+            pull = send(
+                "PATCH",
+                &format!("{endpoint}/pulls/{number}"),
+                &serde_json::json!({"state": "closed"}),
+            )?;
+            ensure!(
+                pull["state"] == "closed",
+                "GitHub did not close the pull request"
+            );
+            state = "closed";
+        }
+        _ => {}
+    }
+    let status = if request.operation == "merge" && state == "open" {
+        "pending"
+    } else {
+        "success"
+    };
+    Ok((
+        status,
+        Some(Change {
+            id: number.to_string(),
+            state: state.into(),
+            head: text(&pull, "/head/sha")?,
+            base: text(&pull, "/base/ref")?,
+            merge_commit,
+        }),
+    ))
+}
+
 fn record_checks(
     response: &mut AdapterResponse,
     jobs: &[Value],
@@ -1122,6 +1320,10 @@ mod tests {
     use super::*;
     use serde_json::json;
 
+    fn refuse(method: &str, path: &str, _: &Value) -> Result<Value> {
+        anyhow::bail!("unexpected replay write {method} {path}")
+    }
+
     #[test]
     fn production_adapter_replays_inspection_admission_and_original_qualification() {
         use std::{cell::RefCell, collections::BTreeMap};
@@ -1190,16 +1392,16 @@ mod tests {
                 .with_context(|| format!("unexpected replay endpoint {path}"))
         };
         let classic_calls = RefCell::new(Vec::new());
-        let classic = |repository: &str, branch: &str| {
+        let classic = |repository: &str, branch: &str, pull_request: bool| {
             assert_eq!(repository, "team/demo");
             classic_calls.borrow_mut().push(branch.to_owned());
-            admit_classic_rules(branch, |_| {
+            admit_classic_rules(branch, pull_request, |_| {
                 Ok(json!({"data":{"repository":{"branchProtectionRules":{
                     "totalCount":0,"nodes":[],"pageInfo":{"hasNextPage":false,"endCursor":null}
                 }}}}))
             })
         };
-        let inspected = execute_with(&request, get, classic).unwrap();
+        let inspected = execute_with(&request, get, classic, refuse).unwrap();
         inspected.validate(&request).unwrap();
         assert_eq!(inspected.requirements.len(), 1);
         assert!(
@@ -1212,7 +1414,7 @@ mod tests {
             .borrow_mut()
             .get_mut("repos/team/demo/branches/trunk/protection/required_signatures")
             .unwrap()["enabled"] = json!(true);
-        assert!(execute_with(&request, get, classic).is_err());
+        assert!(execute_with(&request, get, classic, refuse).is_err());
         responses
             .borrow_mut()
             .get_mut("repos/team/demo/branches/trunk/protection/required_signatures")
@@ -1231,7 +1433,7 @@ mod tests {
         });
         for branch in ["maintenance/candidate", "trunk"] {
             request.branch = Some(branch.into());
-            let admitted = execute_with(&request, get, classic).unwrap();
+            let admitted = execute_with(&request, get, classic, refuse).unwrap();
             admitted.validate(&request).unwrap();
             assert_eq!(
                 admitted.checks[0].run,
@@ -1245,14 +1447,14 @@ mod tests {
         let inventory_key = "repos/team/demo/actions/workflows?per_page=100&page=1";
         responses.borrow_mut().get_mut(inventory_key).unwrap()["workflows"][0]["state"] =
             json!("disabled_manually");
-        assert!(execute_with(&request, get, classic).is_err());
+        assert!(execute_with(&request, get, classic, refuse).is_err());
         responses.borrow_mut().get_mut(inventory_key).unwrap()["workflows"][0]["state"] =
             json!("active");
         request.operation = "qualify".into();
         request.plan = None;
         for (branch, run_id) in [("maintenance/candidate", 43), ("trunk", 42)] {
             request.branch = Some(branch.into());
-            let qualified = execute_with(&request, get, classic).unwrap();
+            let qualified = execute_with(&request, get, classic, refuse).unwrap();
             qualified.validate(&request).unwrap();
             assert_eq!(qualified.status, "success");
             assert_eq!(qualified.checks[0].revision, revision);
@@ -1263,7 +1465,7 @@ mod tests {
             );
             responses.borrow_mut().get_mut(&key).unwrap()["workflow_runs"][0]["conclusion"] =
                 json!("cancelled");
-            assert!(execute_with(&request, get, classic).is_err());
+            assert!(execute_with(&request, get, classic, refuse).is_err());
             responses.borrow_mut().get_mut(&key).unwrap()["workflow_runs"][0]["conclusion"] =
                 json!("success");
         }
@@ -1272,11 +1474,248 @@ mod tests {
         request.branch = None;
         request.workflows.clear();
         assert_eq!(
-            execute_with(&request, get, classic).unwrap().status,
+            execute_with(&request, get, classic, refuse).unwrap().status,
             "success"
         );
         responses.borrow_mut().remove(inventory_key);
-        assert!(execute_with(&request, get, classic).is_err());
+        assert!(execute_with(&request, get, classic, refuse).is_err());
+    }
+
+    #[test]
+    fn production_adapter_replays_pull_request_proposal_merge_and_close() {
+        use std::cell::RefCell;
+        let revision = "a".repeat(40);
+        let list = "repos/team/demo/pulls?state=all&head=team%3Amaintenance%2Fcandidate&base=trunk&per_page=100&page=1";
+        let open = json!({
+            "number":7,"state":"open","merged_at":null,"merge_commit_sha":"f".repeat(40),"mergeable_state":"blocked",
+            "head":{"ref":"maintenance/candidate","sha":revision,"repo":{"id":2}},"base":{"ref":"trunk","repo":{"id":2}}
+        });
+        let listed = RefCell::new(json!([]));
+        let pull = RefCell::new(open.clone());
+        let writes = RefCell::new(Vec::new());
+        let source = "5".repeat(40);
+        let target = RefCell::new(source.clone());
+        let linear = RefCell::new(Some(true));
+        let merge_method = RefCell::new("squash");
+        let get = |path: &str| -> Result<Value> {
+            Ok(match path {
+                "repos/team/demo" => json!({
+                    "id":2,"full_name":"team/demo","archived":false,"disabled":false,"default_branch":"trunk",
+                    "clone_url":"https://forge.example/team/demo.git",
+                    "allow_merge_commit":true,"allow_squash_merge":true,"allow_rebase_merge":true
+                }),
+                "repos/team/demo/pulls/7" => pull.borrow().clone(),
+                "repos/team/demo/branches/trunk" => {
+                    json!({"protected":true,"commit":{"sha":*target.borrow()}})
+                }
+                "repos/team/demo/branches/trunk/protection" => {
+                    let enabled = (*linear.borrow()).context("protection needs admin access")?;
+                    json!({"required_linear_history":{"enabled":enabled}})
+                }
+                _ if path == format!("repos/team/demo/commits/{revision}") => {
+                    json!({"parents":[{"sha":source}]})
+                }
+                _ if path == list => listed.borrow().clone(),
+                // Closing looks the branch up across targets.
+                "repos/team/demo/pulls?state=all&head=team%3Amaintenance%2Fcandidate&per_page=100&page=1" => {
+                    listed.borrow().clone()
+                }
+                _ => anyhow::bail!("unexpected replay endpoint {path}"),
+            })
+        };
+        let send = |method: &str, path: &str, body: &Value| -> Result<Value> {
+            writes.borrow_mut().push(format!("{method} {path}"));
+            Ok(match (method, path) {
+                ("POST", "repos/team/demo/pulls") => {
+                    assert_eq!(
+                        (&body["head"], &body["base"]),
+                        (&json!("maintenance/candidate"), &json!("trunk"))
+                    );
+                    pull.borrow().clone()
+                }
+                ("PUT", "repos/team/demo/pulls/7/merge") => {
+                    assert_eq!(
+                        body,
+                        &json!({"sha":revision,"merge_method":*merge_method.borrow()})
+                    );
+                    json!({"merged":true,"sha":"c".repeat(40)})
+                }
+                ("PATCH", "repos/team/demo/pulls/7") => {
+                    assert_eq!(body, &json!({"state":"closed"}));
+                    let mut closed = pull.borrow().clone();
+                    closed["state"] = json!("closed");
+                    closed
+                }
+                _ => anyhow::bail!("unexpected replay write {method} {path}"),
+            })
+        };
+        let classic = |_: &str, _: &str, _: bool| -> Result<()> {
+            anyhow::bail!("pull requests skip admission")
+        };
+        let mut request: AdapterRequest = serde_json::from_value(json!({
+            "schemaVersion":2,"operation":"propose","coordinate":"forge.example/team/demo",
+            "apiUrl":"https://forge.example/api","authority":"777","revision":revision,
+            "branch":"maintenance/candidate","workflows":[],"requiredChecks":[],
+            "landing":"pull-request","target":"trunk"
+        }))
+        .unwrap();
+        let replay = |request: &AdapterRequest| {
+            let response = execute_with(request, get, classic, send)?;
+            Ok::<_, anyhow::Error>((response.status, response.change))
+        };
+        let (status, change) = replay(&request).unwrap();
+        assert_eq!(
+            (status.as_str(), change.unwrap().state.as_str()),
+            ("success", "open")
+        );
+        assert_eq!(writes.take(), ["POST repos/team/demo/pulls"]);
+        // Proposal is idempotent; an unmerged closed request is only history.
+        let mut closed = open.clone();
+        closed["number"] = json!(6);
+        closed["state"] = json!("closed");
+        *listed.borrow_mut() = json!([closed, open]);
+        assert_eq!(replay(&request).unwrap().1.unwrap().id, "7");
+        assert!(writes.borrow().is_empty());
+        request.operation = "merge".into();
+        request.change = Some("7".into());
+        let (status, change) = replay(&request).unwrap();
+        assert_eq!(
+            (status.as_str(), change.unwrap().merge_commit),
+            ("pending", None)
+        );
+        assert!(writes.borrow().is_empty());
+        for (key, value) in [
+            ("mergeable_state", json!("dirty")),
+            (
+                "head",
+                json!({"ref":"maintenance/candidate","sha":"b".repeat(40),"repo":{"id":2}}),
+            ),
+            (
+                "head",
+                json!({"ref":"maintenance/candidate","sha":revision,"repo":{"id":3}}),
+            ),
+            ("base", json!({"ref":"main","repo":{"id":2}})),
+        ] {
+            let mut changed = open.clone();
+            changed["mergeable_state"] = json!("clean");
+            changed[key] = value;
+            *pull.borrow_mut() = changed;
+            assert!(replay(&request).is_err(), "{key}");
+            assert!(writes.borrow().is_empty());
+        }
+        *pull.borrow_mut() = {
+            let mut clean = open.clone();
+            clean["mergeable_state"] = json!("clean");
+            clean
+        };
+        // A target that moved past the candidate's source is never merged.
+        *target.borrow_mut() = "6".repeat(40);
+        assert_eq!(replay(&request).unwrap().0, "pending");
+        assert!(writes.borrow().is_empty());
+        *target.borrow_mut() = source.clone();
+        // Linear history skips the allowed merge commit for squash.
+        let (status, change) = replay(&request).unwrap();
+        let change = change.unwrap();
+        assert_eq!(
+            (status.as_str(), change.state.as_str()),
+            ("success", "merged")
+        );
+        assert_eq!(change.merge_commit, Some("c".repeat(40)));
+        assert_eq!(writes.take(), ["PUT repos/team/demo/pulls/7/merge"]);
+        *linear.borrow_mut() = Some(false);
+        *merge_method.borrow_mut() = "merge";
+        replay(&request).unwrap();
+        assert_eq!(writes.take(), ["PUT repos/team/demo/pulls/7/merge"]);
+        // Unreadable protection must not block a merge.
+        *linear.borrow_mut() = None;
+        replay(&request).unwrap();
+        assert_eq!(writes.take(), ["PUT repos/team/demo/pulls/7/merge"]);
+        request.operation = "close".into();
+        assert_eq!(replay(&request).unwrap().1.unwrap().state, "closed");
+        assert_eq!(writes.take(), ["PATCH repos/team/demo/pulls/7"]);
+        // A request merged by a human is reported, never closed.
+        pull.borrow_mut()["merged_at"] = json!("2026-10-26T00:00:00Z");
+        let change = replay(&request).unwrap().1.unwrap();
+        assert_eq!(
+            (change.state.as_str(), change.merge_commit),
+            ("merged", Some("f".repeat(40)))
+        );
+        assert!(writes.borrow().is_empty());
+        request.change = None;
+        pull.borrow_mut()["merged_at"] = Value::Null;
+        let mut retargeted = open.clone();
+        retargeted["base"]["ref"] = json!("main");
+        *listed.borrow_mut() = json!([closed, retargeted]);
+        assert_eq!(replay(&request).unwrap().1.unwrap().state, "closed");
+        assert_eq!(writes.take(), ["PATCH repos/team/demo/pulls/7"]);
+        *listed.borrow_mut() = json!([closed]);
+        let (status, change) = replay(&request).unwrap();
+        assert_eq!(status, "success");
+        assert!(change.is_none());
+    }
+
+    #[test]
+    fn pull_request_inspection_relaxes_only_approving_review_protection() {
+        let revision = "a".repeat(40);
+        let protection = |reviews: Value| json!({"required_pull_request_reviews":reviews,"required_status_checks":null,"restrictions":null});
+        let replay = |request: &AdapterRequest, protected: &Value| {
+            execute_with(
+                request,
+                |path| {
+                    Ok(match path {
+                        "repos/team/demo" => {
+                            json!({"id":2,"full_name":"team/demo","archived":false,"disabled":false,"default_branch":"trunk","clone_url":"https://forge.example/team/demo.git"})
+                        }
+                        "repos/team/demo/rules/branches/trunk?per_page=100&page=1" => json!([]),
+                        "repos/team/demo/branches/trunk" => {
+                            json!({"protected":true,"commit":{"sha":revision}})
+                        }
+                        "repos/team/demo/branches/trunk/protection" => protected.clone(),
+                        "repos/team/demo/branches/trunk/protection/required_signatures" => {
+                            json!({"enabled":false})
+                        }
+                        _ => anyhow::bail!("unexpected endpoint {path}"),
+                    })
+                },
+                |_, _, _| Ok(()),
+                refuse,
+            )
+        };
+        let mut request: AdapterRequest = serde_json::from_value(json!({
+            "schemaVersion":1,"operation":"inspect","coordinate":"forge.example/team/demo",
+            "apiUrl":"https://forge.example/api","authority":"777","revision":null,"branch":null,
+            "workflows":[],"requiredChecks":[]
+        }))
+        .unwrap();
+        let reviewed = protection(json!({"required_approving_review_count":1}));
+        assert!(
+            replay(&request, &reviewed)
+                .unwrap_err()
+                .to_string()
+                .contains("requires pull requests")
+        );
+        request.landing = Some("pull-request".into());
+        request.schema_version = 2;
+        let inspected = replay(&request, &reviewed).unwrap();
+        assert_eq!(inspected.schema_version, 2);
+        assert_ne!(
+            inspected.policy_digest,
+            replay(&request, &protection(Value::Null))
+                .unwrap()
+                .policy_digest
+        );
+        let mut restricted = reviewed.clone();
+        restricted["restrictions"] = json!({"users":[]});
+        assert!(replay(&request, &restricted).is_err());
+        let rule = |reviews: bool, pushes: bool| {
+            json!({"data":{"repository":{"branchProtectionRules":{"totalCount":1,"nodes":[{
+                "id":"rule","pattern":"trunk","restrictsPushes":pushes,"blocksCreations":false,
+                "requiresCommitSignatures":false,"requiresApprovingReviews":reviews
+            }],"pageInfo":{"hasNextPage":false,"endCursor":null}}}}})
+        };
+        admit_classic_rules("trunk", true, |_| Ok(rule(true, false))).unwrap();
+        assert!(admit_classic_rules("trunk", false, |_| Ok(rule(true, false))).is_err());
+        assert!(admit_classic_rules("trunk", true, |_| Ok(rule(true, true))).is_err());
     }
 
     #[test]
@@ -1475,7 +1914,8 @@ mod tests {
                             _ => anyhow::bail!("unexpected endpoint {endpoint}"),
                         })
                     },
-                    |_, _| Ok(()),
+                    |_, _, _| Ok(()),
+                    refuse,
                 )
             };
             assert_eq!(replay(&request, &jobs).unwrap().status, "success");
@@ -1773,7 +2213,7 @@ mod tests {
             let mut protected = rule("maintenance/*", false, false);
             protected[field] = json!(true);
             assert!(
-                admit_classic_rules("maintenance/uncreated", |_| Ok(page(
+                admit_classic_rules("maintenance/uncreated", false, |_| Ok(page(
                     json!([protected]),
                     false,
                     Value::Null,
@@ -1784,7 +2224,7 @@ mod tests {
             let mut missing = rule("maintenance/*", false, false);
             missing.as_object_mut().unwrap().remove(field);
             assert!(
-                admit_classic_rules("maintenance/uncreated", |_| Ok(page(
+                admit_classic_rules("maintenance/uncreated", false, |_| Ok(page(
                     json!([missing]),
                     false,
                     Value::Null,
@@ -1800,7 +2240,7 @@ mod tests {
                 "maintenance/0123456789abcdef",
             ] {
                 assert!(
-                    admit_classic_rules("maintenance/0123456789abcdef", |_| Ok(page(
+                    admit_classic_rules("maintenance/0123456789abcdef", false, |_| Ok(page(
                         json!([rule(pattern, pushes, creations)]),
                         false,
                         Value::Null,
@@ -1812,7 +2252,7 @@ mod tests {
                 );
             }
         }
-        admit_classic_rules("maintenance/uncreated", |_| {
+        admit_classic_rules("maintenance/uncreated", false, |_| {
             Ok(page(
                 json!([rule("trunk", true, true)]),
                 false,
@@ -1821,7 +2261,7 @@ mod tests {
             ))
         })
         .unwrap();
-        admit_classic_rules("maintenance/uncreated", |_| {
+        admit_classic_rules("maintenance/uncreated", false, |_| {
             Ok(page(
                 json!([rule("maintenance/*", false, false)]),
                 false,
@@ -1830,7 +2270,7 @@ mod tests {
             ))
         })
         .unwrap();
-        admit_classic_rules("maintenance/uncreated", |_| {
+        admit_classic_rules("maintenance/uncreated", false, |_| {
             Ok(page(json!([]), false, Value::Null, 0))
         })
         .unwrap();
@@ -1842,17 +2282,19 @@ mod tests {
             })
             .collect::<Vec<_>>();
         assert!(
-            admit_classic_rules("maintenance/uncreated", |cursor| Ok(if cursor.is_none() {
-                page(json!(first), true, json!("next"), 101)
-            } else {
-                assert_eq!(cursor, Some("next"));
-                let mut last = rule("maintenance/*", true, true);
-                last["id"] = json!("last");
-                page(json!([last]), false, Value::Null, 101)
-            }))
+            admit_classic_rules("maintenance/uncreated", false, |cursor| Ok(
+                if cursor.is_none() {
+                    page(json!(first), true, json!("next"), 101)
+                } else {
+                    assert_eq!(cursor, Some("next"));
+                    let mut last = rule("maintenance/*", true, true);
+                    last["id"] = json!("last");
+                    page(json!([last]), false, Value::Null, 101)
+                }
+            ))
             .is_err()
         );
-        admit_classic_rules("maintenance/uncreated", |cursor| {
+        admit_classic_rules("maintenance/uncreated", false, |cursor| {
             Ok(if cursor.is_none() {
                 page(json!(first), true, json!("next"), 101)
             } else {
@@ -1887,10 +2329,13 @@ mod tests {
                 1,
             ),
         ] {
-            assert!(admit_classic_rules("maintenance/uncreated", |_| Ok(invalid.clone())).is_err());
+            assert!(
+                admit_classic_rules("maintenance/uncreated", false, |_| Ok(invalid.clone()))
+                    .is_err()
+            );
         }
         assert!(
-            admit_classic_rules("maintenance/uncreated", |_| anyhow::bail!(
+            admit_classic_rules("maintenance/uncreated", false, |_| anyhow::bail!(
                 "classic inventory unavailable"
             ))
             .is_err()

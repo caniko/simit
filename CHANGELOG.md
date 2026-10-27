@@ -45,6 +45,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   feature such as `ciCredentialFile` is present, otherwise 1 with unchanged
   bytes and admission digests. Adapters reject a mismatched declaration and
   responses echo the request version.
+- `simit projects update` can land through pull requests: set
+  `landing = "pull-request"` on a profile or project override. After the
+  candidate qualifies, the updater opens a pull request for the maintenance
+  branch and merges its exact head, only while the target is still the
+  candidate's source, with the first merge method the repository and target
+  protection allow. A request that needs approval or is not yet mergeable parks the
+  repository in `proposed` without failing the run or stopping later
+  repositories; a parked canary still blocks. On later runs a merged request
+  (including one merged by a human) is adopted only if the landed commit has
+  the candidate's tree and its source as first parent. A closed request, or an
+  open one that went stale because the target or policy changed, is closed and
+  regenerated. Only approving-review protection is relaxed; push restrictions,
+  signatures and rulesets still reject.
+- Updater adapter protocol v2 adds the `propose`, `merge` and `close`
+  operations, the request fields `landing`, `target` and `change`, and the
+  response field `change`. Requests that use none of them stay version 1 and
+  byte-identical, and responses must echo the request's version. The built-in
+  GitHub adapter implements v2.
+- Updater receipts are now version 2 and record `landing`, `change`, `landed`
+  and `projectPolicyDigest`. Unfinished v2 receipts resume against
+  `projectPolicyDigest`, which leaves out other repositories' enrollment and
+  overrides, so editing another repository's policy keeps pending candidates.
+  v1 receipts still resume as direct landing; older executors reject v2
+  receipts.
+- The updater deletes its maintenance ref, under a lease on the candidate,
+  after adoption and when it invalidates a candidate. A ref that is already
+  gone or that another writer moved is logged and kept.
+
 - Add `[release.pypi]`: the release workflow uploads the prebuilt
   `release/*.whl` (e.g. from a Nix `release-bundle`) to PyPI with
   `uv publish --check-url` after the hosted release, using PyPI trusted

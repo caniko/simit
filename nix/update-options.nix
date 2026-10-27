@@ -31,6 +31,7 @@
   };
   requirements = types.listOf requirement;
   credential = types.nullOr (types.addCheck absolute (path: !(normalized path == "/nix/store" || lib.hasPrefix "/nix/store/" (normalized path))));
+  landing = types.enum ["direct" "pull-request"];
 in {
   schemaVersion = option (types.enum [1]) 1;
   workspaces = option (types.attrsOf (types.submodule {
@@ -102,6 +103,11 @@ in {
       scopes = option (types.listOf (types.enum ["ci"])) ["ci"];
       enrollCurrent = option types.bool false;
       requiredChecks = option requirements [];
+      landing = mkOption {
+        type = landing;
+        default = "direct";
+        description = "direct pushes the target branch; pull-request has the updater open and merge a pull request, parking until the forge reports it mergeable.";
+      };
       rollout = option (types.submodule {
         options = {
           canaries = option (types.listOf coordinate) [];
@@ -118,6 +124,7 @@ in {
           blocker = option (types.nullOr (types.strMatching "[a-z][a-z0-9-]*")) null;
           targetBranch = option (types.nullOr types.str) null;
           requiredChecks = option requirements [];
+          landing = option (types.nullOr landing) null;
         };
       })) {};
     };

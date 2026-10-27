@@ -355,6 +355,11 @@ fn execute_with(
     crow: impl Fn(&str) -> Result<Value>,
 ) -> Result<AdapterResponse> {
     request.validate()?;
+    ensure!(
+        request.landing.is_none()
+            && !matches!(request.operation.as_str(), "propose" | "merge" | "close"),
+        "the Forgejo adapter supports direct landing only"
+    );
     origin(&request.authority)?;
     ensure!(
         request
@@ -419,6 +424,7 @@ fn execute_with(
         requirements: vec![],
         status: "success".into(),
         checks: vec![],
+        change: None,
     };
     if request.operation == "inspect" {
         let info = forge(&format!("{endpoint}/branches/{}", encoded(branch)))?;

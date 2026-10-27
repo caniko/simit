@@ -82,6 +82,16 @@ pub struct Profile {
     pub enroll_current: bool,
     #[serde(default)]
     pub required_checks: Vec<Requirement>,
+    /// `direct` pushes the target branch; `pull-request` has the updater merge
+    /// a pull request. Omitted when direct, so existing policy digests hold.
+    #[serde(default = "direct", skip_serializing_if = "is_direct")]
+    pub landing: String,
+}
+fn direct() -> String {
+    "direct".into()
+}
+fn is_direct(landing: &str) -> bool {
+    landing == "direct"
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -243,6 +253,8 @@ pub struct Override {
     pub target_branch: Option<String>,
     #[serde(default)]
     pub required_checks: Vec<Requirement>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub landing: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
@@ -492,6 +504,14 @@ impl Config {
                 ensure!(
                     !pattern.starts_with('/') && !pattern.split('/').any(|p| p == ".."),
                     "selection paths must be workspace-relative"
+                );
+            }
+            for landing in std::iter::once(&profile.landing)
+                .chain(profile.project_overrides.values().flat_map(|o| &o.landing))
+            {
+                ensure!(
+                    matches!(landing.as_str(), "direct" | "pull-request"),
+                    "unsupported landing mode {landing}"
                 );
             }
             for (key, value) in &profile.project_overrides {
@@ -947,6 +967,9 @@ mod tests {
                 authority: "777".into(),
             }],
             plan: None,
+            landing: None,
+            target: None,
+            change: None,
         };
         let mut response = AdapterResponse {
             schema_version: 1,
@@ -959,6 +982,7 @@ mod tests {
             requirements: vec![],
             status: "success".into(),
             checks: vec![],
+            change: None,
         };
         assert!(response.validate(&request).is_err());
         response.checks.push(Check {
@@ -977,6 +1001,137 @@ mod tests {
             response.checks[0].status = status.into();
             assert!(response.validate(&request).is_err());
         }
+    }
+
+    #[test]
+    fn landing_policy_is_validated_and_direct_keeps_existing_digests() {
+        let mut cfg = config();
+        assert!(
+            !serde_json::to_value(&cfg.profiles["fleet"])
+                .unwrap()
+                .as_object()
+                .unwrap()
+                .contains_key("landing")
+        );
+        for landing in ["pull-request", "direct"] {
+            cfg.profiles.get_mut("fleet").unwrap().landing = landing.into();
+            cfg.validate().unwrap();
+        }
+        cfg.profiles.get_mut("fleet").unwrap().landing = "merge-queue".into();
+        assert!(cfg.validate().is_err());
+        let mut cfg = config();
+        cfg.profiles
+            .get_mut("fleet")
+            .unwrap()
+            .project_overrides
+            .insert(
+                "forge.example/team/demo".into(),
+                serde_json::from_value(serde_json::json!({"landing":"merge-queue"})).unwrap(),
+            );
+        assert!(cfg.validate().is_err());
+    }
+
+    #[test]
+    fn pull_request_protocol_is_v2_and_binds_candidate_head_and_target() {
+        let qualify = serde_json::json!({
+            "schemaVersion":1,"operation":"qualify","coordinate":"forge.example/team/demo",
+            "apiUrl":"https://forge.example/api","authority":"777","revision":"a".repeat(40),
+            "branch":"maintenance/candidate","workflows":[],"requiredChecks":[]
+        });
+        let legacy: AdapterRequest = serde_json::from_value(qualify.clone()).unwrap();
+        legacy.validate().unwrap();
+        let bytes = serde_json::to_value(&legacy).unwrap();
+        assert!(
+            ["landing", "target", "change"]
+                .iter()
+                .all(|key| bytes.get(key).is_none())
+        );
+        let mut request: AdapterRequest = serde_json::from_value(qualify).unwrap();
+        request.landing = Some("pull-request".into());
+        request.schema_version = request.derived_version();
+        assert!(
+            request.validate().is_err(),
+            "qualification carries no landing"
+        );
+        request.operation = "merge".into();
+        request.target = Some("trunk".into());
+        request.change = Some("7".into());
+        request.schema_version = 1;
+        assert!(request.validate().is_err(), "declared v1");
+        request.schema_version = request.derived_version();
+        request.validate().unwrap();
+        request.change = None;
+        assert!(request.validate().is_err(), "merge names its change");
+        request.change = Some("7".into());
+        let mut response: AdapterResponse = serde_json::from_value(serde_json::json!({
+            "schemaVersion":2,"coordinate":request.coordinate,"repositoryId":"2","defaultBranch":"trunk",
+            "revision":request.revision,"remote":"https://forge.example/team/demo.git","policyDigest":"b".repeat(64),
+            "requirements":[],"status":"success","checks":[],
+            "change":{"id":"7","state":"merged","head":request.revision,"base":"trunk","mergeCommit":"c".repeat(40)}
+        })).unwrap();
+        response.validate(&request).unwrap();
+        response.schema_version = 1;
+        assert!(response.validate(&request).is_err());
+        response.schema_version = 2;
+        for (key, value) in [
+            ("head", serde_json::json!("b".repeat(40))),
+            ("base", serde_json::json!("main")),
+            ("id", serde_json::json!("8")),
+            ("mergeCommit", serde_json::Value::Null),
+            ("state", serde_json::json!("open")),
+        ] {
+            let mut changed = serde_json::to_value(&response).unwrap();
+            changed["change"][key] = value;
+            let changed: AdapterResponse = serde_json::from_value(changed).unwrap();
+            assert!(changed.validate(&request).is_err(), "{key}");
+        }
+        let change = response.change.as_mut().unwrap();
+        change.state = "open".into();
+        change.merge_commit = None;
+        assert!(
+            response.validate(&request).is_err(),
+            "open merge is pending"
+        );
+        response.status = "pending".into();
+        response.validate(&request).unwrap();
+        request.operation = "close".into();
+        assert!(
+            response.validate(&request).is_err(),
+            "close leaves no open change"
+        );
+        request.change = None;
+        response.change = None;
+        assert!(
+            response.validate(&request).is_err(),
+            "an unconfirmed close finds nothing"
+        );
+        response.status = "success".into();
+        response.validate(&request).unwrap();
+        request.change = Some("7".into());
+        assert!(
+            response.validate(&request).is_err(),
+            "a named change is reported"
+        );
+    }
+
+    #[test]
+    fn pull_request_admission_relaxes_only_the_target_branch() {
+        let mut request: AdapterRequest = serde_json::from_value(serde_json::json!({
+            "schemaVersion":2, "operation":"admit", "coordinate":"forge.example/team/demo",
+            "apiUrl":"https://forge.example/api", "authority":"777", "revision":"a".repeat(40),
+            "branch":"trunk", "workflows":[], "requiredChecks":[], "landing":"pull-request", "target":"trunk",
+            "plan":{"schema":"simit.ci-update-plan.v1","files":[],"obsolete":[]}
+        })).unwrap();
+        request.validate().unwrap();
+        request.branch = Some("maintenance/candidate".into());
+        assert!(request.validate().is_err());
+        request.operation = "inspect".into();
+        request.plan = None;
+        request.revision = None;
+        request.branch = None;
+        assert!(request.validate().is_err(), "inspection names no target");
+        request.target = None;
+        request.validate().unwrap();
     }
 
     #[test]
@@ -1261,12 +1416,24 @@ pub struct AdapterRequest {
     /// Exact generated bytes for pre-push backend admission. Omitted otherwise.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub plan: Option<crate::project::CiUpdatePlan>,
+    /// `pull-request` relaxes only approval-review protection of the target.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub landing: Option<String>,
+    /// Branch a pull request merges into.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target: Option<String>,
+    /// Forge identifier of an existing pull request.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub change: Option<String>,
 }
 impl AdapterRequest {
     /// Version 2 marks any request a version-1 adapter could misread. Without
     /// v2 features the request keeps its version-1 bytes and admission digest.
     pub fn derived_version(&self) -> u32 {
         if self.ci_credential_file.is_some()
+            || self.landing.is_some()
+            || self.target.is_some()
+            || self.change.is_some()
             || matches!(self.operation.as_str(), "propose" | "merge" | "close")
             || self
                 .plan
@@ -1282,7 +1449,10 @@ impl AdapterRequest {
     pub fn validate(&self) -> Result<()> {
         ensure!(
             self.schema_version == self.derived_version()
-                && matches!(self.operation.as_str(), "inspect" | "admit" | "qualify"),
+                && matches!(
+                    self.operation.as_str(),
+                    "inspect" | "admit" | "qualify" | "propose" | "merge" | "close"
+                ),
             "unsupported adapter request"
         );
         coordinate(&self.coordinate)?;
@@ -1290,6 +1460,36 @@ impl AdapterRequest {
             crate::review::contract::sha(rev)?;
         }
         requirements(&self.required_checks)?;
+        ensure!(
+            self.landing
+                .as_deref()
+                .is_none_or(|l| matches!(l, "direct" | "pull-request")),
+            "unsupported landing mode"
+        );
+        let pull_request = self.landing.as_deref() == Some("pull-request");
+        match self.operation.as_str() {
+            "propose" | "merge" | "close" => ensure!(
+                pull_request
+                    && self.revision.is_some()
+                    && self.branch.is_some()
+                    && self.target.is_some()
+                    && (self.operation != "merge" || self.change.is_some()),
+                "pull-request operations need the candidate, its branch, target and change"
+            ),
+            // Inspection observes the target itself; admission relaxes only it.
+            "inspect" => ensure!(
+                self.target.is_none() && self.change.is_none(),
+                "inspection carries no pull request"
+            ),
+            "admit" => ensure!(
+                self.change.is_none() && (self.landing.is_none() || self.target == self.branch),
+                "pull-request admission applies only to its target branch"
+            ),
+            _ => ensure!(
+                self.landing.is_none() && self.target.is_none() && self.change.is_none(),
+                "qualification carries no landing"
+            ),
+        }
         if self.operation == "admit" {
             ensure!(
                 self.revision.is_some()
@@ -1323,6 +1523,18 @@ pub struct AdapterResponse {
     pub requirements: Vec<Requirement>,
     pub status: String,
     pub checks: Vec<Check>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub change: Option<Change>,
+}
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct Change {
+    pub id: String,
+    /// `open`, `merged` or `closed` (without merging).
+    pub state: String,
+    pub head: String,
+    pub base: String,
+    pub merge_commit: Option<String>,
 }
 #[derive(Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -1343,6 +1555,41 @@ impl AdapterResponse {
                 && !self.repository_id.is_empty(),
             "adapter identity mismatch"
         );
+        if !matches!(request.operation.as_str(), "propose" | "merge" | "close") {
+            ensure!(self.change.is_none(), "unexpected pull request");
+        } else if matches!(self.status.as_str(), "success" | "pending") {
+            // Closing an untracked candidate may find no pull request at all.
+            let Some(change) = &self.change else {
+                ensure!(
+                    request.operation == "close"
+                        && request.change.is_none()
+                        && self.status == "success",
+                    "pull-request operation returned no change"
+                );
+                return Ok(());
+            };
+            crate::review::contract::sha(&change.head)?;
+            if let Some(commit) = &change.merge_commit {
+                crate::review::contract::sha(commit)?;
+            }
+            ensure!(
+                !change.id.is_empty()
+                    && request.change.as_ref().is_none_or(|id| id == &change.id)
+                    // Closing retires a stale change whose head or target moved.
+                    && (request.operation == "close"
+                        || (request.target.as_ref() == Some(&change.base)
+                            && request.revision.as_ref() == Some(&change.head)))
+                    && matches!(change.state.as_str(), "open" | "merged" | "closed")
+                    && (change.state == "merged") == change.merge_commit.is_some()
+                    // Only an unmerged open merge is pending; close never leaves it open.
+                    && match request.operation.as_str() {
+                        "merge" => (self.status == "pending") == (change.state == "open"),
+                        "close" => self.status == "success" && change.state != "open",
+                        _ => self.status == "success",
+                    },
+                "pull request differs from the qualified candidate or its target"
+            );
+        }
         crate::review::contract::sha(&self.revision)?;
         sha256(&self.policy_digest)?;
         requirements(&self.requirements)?;

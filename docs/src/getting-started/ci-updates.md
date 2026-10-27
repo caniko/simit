@@ -82,6 +82,11 @@ policy for standalone installations.
         # Optional kebab-case code for tooling; only on disabled overrides.
         blocker = "custom-ci";
       };
+      # Protected targets that require pull requests: the updater opens and
+      # merges one instead of pushing. Profiles take the same `landing` option.
+      projectOverrides."github.com/example/reviewed" = {
+        landing = "pull-request";
+      };
     };
   };
 }
@@ -98,7 +103,9 @@ alone does not bind their dynamic loaders or shared libraries.
 Runtime roots and credential paths are strings. Nix evaluation does not inspect
 worktrees, query forges or read credential contents. Git transport authentication
 is supplied by the execution user's existing Git configuration; `credentialFile`
-authenticates API reads only. The execution user's Git identity, signing and
+authenticates API reads only, except under pull-request landing, where it also
+opens, merges and closes pull requests. A fine-grained GitHub token then needs
+`Pull requests: write` and `Contents: write` on the enrolled repositories. The execution user's Git identity, signing and
 hooks are honored when creating candidate commits.
 The sandbox has no personal Simit configuration. Projects must declare their CI
 platform and any private runner labels through project policy; GitHub can use
@@ -249,7 +256,10 @@ For each repository:
    require exact-candidate original push qualification.
 6. Reinspect source and policy, then conditionally advance the target branch to
    the same candidate using an explicit Git lease after repeating target admission.
-7. Verify exact-source default/target-branch adoption and record a new baseline.
+   With `landing = "pull-request"` the updater instead proposes and merges a pull
+   request (see below).
+7. Verify exact-source default/target-branch adoption, record a new baseline and
+   delete the maintenance ref under a lease on the candidate.
 
 Managed identities include the canonical Git mode and blob from the staged/committed
 tree, so clean/smudge filters and newline conversion do not invalidate the next
@@ -299,14 +309,21 @@ before that field existed report `null` until their next transaction.
 Repository clones, receipts and baselines are isolated under a profile-specific
 directory in `stateDirectory`. `--status` reports only the requested profile.
 Receipt policy hashes include the active profile, its workspace, and its generator
-and consumer forge records. Frozen selection keys use the profile, workspace and
+and consumer forge records. Receipts written by this version (`schemaVersion: 2`)
+also record `projectPolicyDigest`, the same hash with other coordinates'
+enrollment, canary membership and overrides removed; unfinished v2 receipts
+resume against it, so editing another repository's policy keeps this one's
+candidate or pull request. Receipts without `schemaVersion` are v1, resume
+against `configDigest` and land directly. Older executors reject v2 receipts. Frozen selection keys use the profile, workspace and
 generator forge policy. Changes to unrelated configuration entries therefore
 preserve the frozen selection and resumable candidates; changes to a transaction's
 referenced policy still invalidate its pending receipt. Frozen projects revalidate
 against the currently enrolled consumer forge host before any adapter request.
 
-Before landing, source movement archives the invalidated receipt and prepares a
-fresh candidate from the newly observed source, preserving the adopted baseline.
+Before landing, source movement archives the invalidated receipt, deletes its
+maintenance ref and prepares a fresh candidate from the newly observed source,
+preserving the adopted baseline. Ref deletion is cleanup: a ref that is already
+gone, or that another writer moved, is logged and kept rather than failing.
 A candidate already awaiting adoption, or one found in the new source's ancestry,
 requires explicit adoption reconciliation instead of silently restarting.
 
@@ -404,8 +421,8 @@ acceptance, and the workflow and all jobs must still succeed.
 This source check applies to generator and consumer qualification, and to
 pre-push admission of committed candidate bytes.
 Required checks from other applications, unbound contexts, active rulesets,
-locked or push-restricted target branches and PR-required protections are rejected
-during admission. The API credential is not evidence of the separate Git
+locked or push-restricted target branches and, for direct landing, PR-required
+protections are rejected during admission. The API credential is not evidence of the separate Git
 transport actor's membership in a push allowlist.
 Signature-required protection is queried through its separate REST endpoint and
 included in the observed policy digest. V1 rejects it before publication; proving
@@ -536,6 +553,67 @@ compiles the workflow. Each workflow becomes a check with run
 exhausted CI quota (`CI quota denied ...`) fails with a distinct quota message;
 rerun the update after the quota resets. Generator qualification stays with
 GitHub Actions; requests without workflows answer `unsupported`.
+## Pull-request landing
+
+`landing` is `direct` (the default) or `pull-request`, set per profile and
+overridden per coordinate. Pull-request landing uses adapter protocol v2: the
+request carries `landing`, the `target` branch and, once known, the forge's
+`change` identifier, and adds three operations. Responses echo the request's
+`schemaVersion` and report `change` as `{id, state, head, base, mergeCommit}`,
+where `state` is `open`, `merged` or `closed`. Requests without these features
+stay version 1 with unchanged bytes and admission digests.
+
+- `propose` returns the open or merged pull request whose head is the
+  maintenance branch at the exact candidate, creating one when none exists.
+  Unmerged closed requests are history and are not reused.
+- `merge` merges only when the head is still the candidate. It reports
+  `pending` while the forge needs approvals, checks, an update or its own
+  mergeability computation, and fails on conflicts.
+- `close` closes the request, or reports it as merged when a human already
+  merged it.
+
+Inspection and target-branch admission relax only approving-review protection:
+GitHub's `required_pull_request_reviews` and the classic
+`requiresApprovingReviews` rule. Push restrictions, signatures, rulesets (and so
+ruleset merge queues), locks and maintenance-branch protection stay rejected. GitHub
+uses the first merge method the repository allows: merge commit, then squash,
+then rebase. The updater never approves its own request; repositories needing
+approvals wait for a human.
+
+After the candidate qualifies and the target is admitted again, the receipt
+enters `proposed` and the updater proposes and merges. If the request cannot
+merge yet, the run reports `proposed` and the repository is parked: it does
+not fail the run or stop a batch, stays in the frozen rollout and moves behind
+unattempted repositories. A canary in `proposed` remains a barrier.
+
+A merged request records `landed` (its merge commit) and enters `adopting`.
+Adoption requires the target to be exactly `landed`, `landed` to have the
+candidate's tree, and its first parent to be the candidate's source; then
+`landed` is qualified on the target. A merge, squash, rebase or fast-forward
+all satisfy this; anything else fails closed and keeps the receipt for
+reconciliation.
+
+Each run first re-reads a parked request:
+
+- merged, including by a human: adopt as above;
+- closed without merging: archive the receipt, delete the maintenance ref and
+  regenerate;
+- open but stale, because the target moved, the repository policy or default
+  branch changed, or `projectPolicyDigest` changed: close it, archive, delete
+  the ref and regenerate.
+
+GitHub merges only while the target is still the candidate's source; a moved
+target leaves the merge pending until the next run closes and regenerates it.
+When the target requires linear history, merge commits are skipped in favour of
+the next allowed method; reading that rule needs `Administration: read`, and
+without it the updater assumes no such rule. Previews (`--dry-run`) report a parked request as
+`proposed` and never close, propose or merge, or delete a ref.
+
+Deselecting or disabling a parked repository revokes the updater's authority
+over it, so the updater no longer touches its open request or maintenance ref;
+close those by hand, or re-enable the repository so a run resumes or retires them.
+
+Other forges add these operations in their own adapters.
 
 ## Dependencies and verification
 
