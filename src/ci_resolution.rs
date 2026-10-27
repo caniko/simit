@@ -382,7 +382,15 @@ impl ResolvedCiInputs {
             })
             .unwrap_or_default();
         let required_gates = if cfg.ci.required_gates.is_empty() {
-            inference.required_gates.unwrap_or_default()
+            // A gate moved to `manual_gates` must not be re-inferred from the old ci.yaml.
+            let mut inferred = inference.required_gates.unwrap_or_default();
+            inferred.retain(|gate| {
+                cfg.ci
+                    .manual_gates
+                    .iter()
+                    .all(|manual| manual.id != gate.id)
+            });
+            inferred
         } else {
             cfg.ci.required_gates.clone()
         };

@@ -474,6 +474,18 @@ pub fn run(command: InitCiCommand) -> Result<()> {
             &cfg.ci.nix_build,
         )?);
     }
+    if !command.primary_only
+        && !cfg.ci.manual_gates.is_empty()
+        && let Some(package) = packages.first()
+    {
+        files.push(ci::manual_gates_file(
+            resolved.runtime,
+            package,
+            &runners,
+            &options,
+            &cfg.ci.manual_gates,
+        ));
+    }
     files.extend(prebuild_files(&cfg, cfg.ci.crow.format)?);
     if !command.primary_only
         && resolved.with_pypi_publish
@@ -1062,6 +1074,7 @@ fn run_nix_only_at(command: InitCiCommand, workspace_root: &Path) -> Result<()> 
         || command.coordinated_publish.is_some()
         || command.publish_strategy.is_some()
         || !cfg.ci.required_gates.is_empty()
+        || !cfg.ci.manual_gates.is_empty()
     {
         bail!("release and language-specific options are not supported for Nix-only CI");
     }
@@ -1265,6 +1278,7 @@ fn run_python(command: InitCiCommand) -> Result<()> {
         || command.coordinated_publish.is_some()
         || command.publish_strategy.is_some()
         || !cfg.ci.required_gates.is_empty()
+        || !cfg.ci.manual_gates.is_empty()
     {
         bail!("Python uv CI currently supports CI only, not release packaging workflows");
     }
@@ -1620,6 +1634,7 @@ fn run_crow_python(
     if command.coordinated_publish.is_some()
         || command.publish_strategy.is_some()
         || !cfg.ci.required_gates.is_empty()
+        || !cfg.ci.manual_gates.is_empty()
     {
         bail!(
             "required gates and coordinated publication are only supported for Actions workflows in v1"
@@ -1815,6 +1830,8 @@ pub(crate) fn workflow_snapshots_for_platform(
                 &content,
             )
             && is_ci_managed_workflow_name(&entry.file_name())
+            // Manual gates are config-owned; inferring them would add CI gates.
+            && entry.file_name() != "manual-gates.yaml"
         {
             snapshots.push(WorkflowSnapshot {
                 relative_path: workflow_dir.join(entry.file_name()),
@@ -2648,6 +2665,7 @@ fn is_ci_managed_workflow_name(name: &std::ffi::OsStr) -> bool {
             | "nix-builds.yaml"
             | "nix-builds.yml"
             | "producer-custody.yaml"
+            | "manual-gates.yaml"
             | "prebuild.yaml"
             | "prebuild.yml"
             | "prebuild.jsonnet"

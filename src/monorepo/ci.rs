@@ -93,6 +93,7 @@ pub(crate) fn files(
         || config.prebuild.is_some()
         || !config.ci.nix_builds.is_empty()
         || !config.ci.required_gates.is_empty()
+        || !config.ci.manual_gates.is_empty()
         || !config.ci.components.is_empty()
         || config.ci.check_command.is_some()
         || !config.ci.extra_setup.is_empty()
