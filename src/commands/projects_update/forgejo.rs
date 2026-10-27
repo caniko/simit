@@ -98,6 +98,14 @@ fn push_runs(when: Option<&serde_yaml::Value>, branch: &str, default_branch: &st
     Ok(runs)
 }
 
+fn has_event(constraint: &serde_yaml::Value) -> bool {
+    match constraint.get("event") {
+        None | Some(serde_yaml::Value::Null) => false,
+        Some(serde_yaml::Value::Sequence(events)) => !events.is_empty(),
+        Some(_) => true,
+    }
+}
+
 /// Crow substitutes `$` expressions before it names workflows and steps.
 fn literal(value: &serde_yaml::Value) -> Result<String> {
     let value = value
@@ -148,6 +156,15 @@ fn workflow(
             literal(&base.strip_prefix('.').unwrap_or(base).into())?
         }
     };
+    // Crow collects only workflows whose `when` names an event.
+    ensure!(
+        match yaml.get("when") {
+            Some(serde_yaml::Value::Sequence(constraints)) => constraints.iter().any(has_event),
+            Some(constraint) => has_event(constraint),
+            None => false,
+        },
+        "Crow workflow {path} needs an event trigger"
+    );
     let clone = !yaml
         .get("skip_clone")
         .map_or(Some(false), serde_yaml::Value::as_bool)
@@ -232,6 +249,31 @@ fn owned(
         }
     }
     Ok(workflows)
+}
+
+/// Every branch-protection rule; Forgejo pages the inventory, so read until a
+/// page adds nothing (also ends a server that ignores `page`).
+fn branch_protections(endpoint: &str, forge: impl Fn(&str) -> Result<Value>) -> Result<Value> {
+    // ponytail: 20 pages of 50 rules cap the walk; raise if a forge exceeds it.
+    let mut rules: Vec<Value> = Vec::new();
+    for page in 1..=20 {
+        let fetched = forge(&format!(
+            "{endpoint}/branch_protections?page={page}&limit=50"
+        ))?;
+        let fetched = fetched
+            .as_array()
+            .context("missing branch protection inventory")?;
+        let before = rules.len();
+        for rule in fetched {
+            if !rules.contains(rule) {
+                rules.push(rule.clone());
+            }
+        }
+        if rules.len() == before {
+            return Ok(Value::Array(rules));
+        }
+    }
+    bail!("branch protection inventory exceeds adapter pagination ceiling")
 }
 
 /// Matching Forgejo rules; rejects anything direct landing cannot satisfy.
@@ -365,7 +407,7 @@ fn execute_with(
     );
     let ci_id = number(&ci, "/id")?;
     // Rules can govern a maintenance ref before it exists.
-    let rules = admit_protections(&forge(&format!("{endpoint}/branch_protections"))?, branch)?;
+    let rules = admit_protections(&branch_protections(&endpoint, &forge)?, branch)?;
     let mut response = AdapterResponse {
         schema_version: request.schema_version,
         coordinate: request.coordinate.clone(),
@@ -630,15 +672,27 @@ mod tests {
         (value.clone(), value["forge"].clone(), value["crow"].clone())
     }
 
+    /// Fixtures hold the whole branch-protection inventory as page one.
+    fn forge_reply(forge: &Value, path: &str) -> Result<Value> {
+        if let Some((inventory, page)) = path.split_once("?page=")
+            && inventory.ends_with("/branch_protections")
+        {
+            return Ok(if page.starts_with("1&") {
+                forge[inventory].clone()
+            } else {
+                json!([])
+            });
+        }
+        forge
+            .get(path)
+            .cloned()
+            .with_context(|| format!("unexpected forge endpoint {path}"))
+    }
+
     fn replay(request: &AdapterRequest, forge: &Value, crow: &Value) -> Result<AdapterResponse> {
         execute_with(
             request,
-            |path| {
-                forge
-                    .get(path)
-                    .cloned()
-                    .with_context(|| format!("unexpected forge endpoint {path}"))
-            },
+            |path| forge_reply(forge, path),
             |path| {
                 crow.get(path)
                     .cloned()
@@ -1004,7 +1058,7 @@ mod tests {
         let search = |last: usize| {
             execute_with(
                 &request,
-                |path| forge.get(path).cloned().context("forge endpoint"),
+                |path| forge_reply(&forge, path),
                 |path| {
                     let Some(page) = path
                         .strip_prefix(LIST.trim_end_matches("page=1&perPage=50"))
@@ -1031,12 +1085,35 @@ mod tests {
     }
 
     #[test]
+    fn branch_protections_are_read_across_pages() {
+        let (_, forge, crow) = fixture();
+        let mut request = request("inspect");
+        request.branch = Some("trunk".into());
+        let rule = |name: &str| json!({"rule_name":name,"required_approvals":0,"require_signed_commits":false,"protected_file_patterns":"","enable_push":true,"enable_push_whitelist":false});
+        let mut restrictive = rule("trunk");
+        restrictive["required_approvals"] = json!(1);
+        let run = |second: Value| {
+            execute_with(
+                &request,
+                |path| match path.split_once("/branch_protections?page=") {
+                    Some((_, "1&limit=50")) => Ok(json!([rule("other")])),
+                    Some((_, "2&limit=50")) => Ok(second.clone()),
+                    Some(_) => Ok(json!([])),
+                    None => forge_reply(&forge, path),
+                },
+                |path| crow.get(path).cloned().context("Crow endpoint"),
+            )
+        };
+        run(json!([rule("unrelated")])).unwrap();
+        // A matching rule on page two still gates direct landing.
+        assert!(run(json!([restrictive])).is_err());
+    }
+
+    #[test]
     fn crow_conditions_names_and_compile_time_step_filters_follow_crow() {
         let steps = "steps:\n- name: test\n  image: alpine\n  commands: [true]\n- name: pr\n  image: alpine\n  commands: [true]\n  when:\n    event: pull_request\n";
         const RESTRICTED: &str = "when:\n- event: push\n  branch: ['${CI_REPO_DEFAULT_BRANCH}', 'simit/update/**']\n- event: pull_request\n";
         for (when, branch, runs) in [
-            ("", MAINTENANCE, true),
-            ("when: []\n", MAINTENANCE, true),
             ("when:\n  event: push\n", MAINTENANCE, true),
             ("when:\n  event: [tag, pull_request]\n", MAINTENANCE, false),
             (
@@ -1044,15 +1121,23 @@ mod tests {
                 MAINTENANCE,
                 true,
             ),
-            ("when:\n- branch: [main, 'simit/**']\n", MAINTENANCE, true),
-            ("when:\n- branch: simit/*\n", MAINTENANCE, false),
             (
-                "when:\n- branch: ${CI_REPO_DEFAULT_BRANCH}\n",
+                "when:\n- event: push\n  branch: [main, 'simit/**']\n",
+                MAINTENANCE,
+                true,
+            ),
+            (
+                "when:\n- event: push\n  branch: simit/*\n",
                 MAINTENANCE,
                 false,
             ),
             (
-                "when:\n- branch: ${CI_REPO_DEFAULT_BRANCH}\n",
+                "when:\n- event: push\n  branch: ${CI_REPO_DEFAULT_BRANCH}\n",
+                MAINTENANCE,
+                false,
+            ),
+            (
+                "when:\n- event: push\n  branch: ${CI_REPO_DEFAULT_BRANCH}\n",
                 "trunk",
                 true,
             ),
@@ -1077,12 +1162,26 @@ mod tests {
                 );
             }
         }
-        let skip = format!("skip_clone: true\n{steps}");
+        // Crow collects no workflow without an event trigger.
+        for when in [
+            "",
+            "when: []\n",
+            "when:\n- branch: trunk\n",
+            "when:\n  event: []\n",
+        ] {
+            let source = format!("{when}{steps}");
+            assert!(
+                workflow(".crow/ci.yaml", source.as_bytes(), "trunk", "trunk").is_err(),
+                "{when}"
+            );
+        }
+        let skip = format!("when:\n  event: push\nskip_clone: true\n{steps}");
         let parsed = workflow(".crow/ci.yaml", skip.as_bytes(), "trunk", "trunk")
             .unwrap()
             .unwrap();
         assert_eq!((parsed.name.as_str(), parsed.steps.len()), ("ci", 1));
         // Only filtered steps remain: Crow skips the workflow.
+        let steps = format!("when:\n  event: push\n{steps}");
         let filtered = steps.replace(
             "  commands: [true]\n- name: pr",
             "  commands: [true]\n  when:\n    event: tag\n- name: pr",
