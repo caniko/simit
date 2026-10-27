@@ -1152,6 +1152,13 @@ pub fn release_file(
             "Crow release workflows do not support release notes; use an Actions release provider or explicitly select notes source none"
         );
     }
+    if inputs.pypi.is_some()
+        && inputs.publish.policy("pypi") != Some(crate::config::ReleasePublisherPolicy::Disabled)
+    {
+        bail!(
+            "Crow release workflows do not support [release.pypi]; use an Actions release provider to publish the wheels"
+        );
+    }
     let image = nix_image(config)?;
     let mut build = Step::new("release", &image)
         .command("test -n \"$${CI_COMMIT_TAG:-}\"".to_owned())
