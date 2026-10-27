@@ -553,7 +553,9 @@ impl ResolvedCiInputs {
         let mut ci = cfg.ci.clone();
         ci.platform = Some(platform);
         ci.runtime = (self.runtime != Runtime::Cargo).then_some(self.runtime);
-        ci.runner = runner;
+        // Native system runners replace the single runner, and config
+        // validation rejects both together.
+        ci.runner = runner.filter(|_| ci.nix_system_runners.is_empty());
         ci.windows_runner = windows_runner;
         ci.workspace = self.workspace;
         ci.workspace_strategy = self.workspace_strategy;

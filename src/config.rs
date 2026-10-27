@@ -4783,6 +4783,11 @@ fn set_string_map(table: &mut Table, key: &str, values: &BTreeMap<String, String
         table.remove(key);
         return;
     }
+    // Replacing a `[ci.<key>]` table in place keeps its header key decor,
+    // which renders `key= {...}`; a fresh key gets normal formatting.
+    if table.get(key).is_some_and(Item::is_table) {
+        table.remove(key);
+    }
     let mut inline = InlineTable::default();
     for (map_key, map_value) in values {
         inline.insert(map_key, Value::from(map_value.as_str()));

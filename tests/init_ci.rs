@@ -6867,3 +6867,43 @@ nix_image = "nixos/nix:2.34.8"
         String::from_utf8_lossy(&actions.stderr)
     );
 }
+
+#[test]
+fn native_system_runners_persist_without_a_runner_and_pass_the_next_check() {
+    let ci = "platform = \"github\"\nruntime = \"nix\"\nnix_builds = [\".#default\"]\n";
+    let runners = "\"x86_64-linux\" = \"ubuntu-24.04\"\n";
+    for (path, config) in [
+        (
+            "simit.toml",
+            format!("[ci]\n{ci}\n[ci.nix_system_runners]\n{runners}"),
+        ),
+        (
+            "Cargo.toml",
+            format!(
+                "[package]\nname = \"demo\"\nversion = \"0.1.0\"\nedition = \"2024\"\nrust-version = \"1.85\"\nlicense = \"MIT\"\n\n\
+                 [package.metadata.simit.ci]\n{ci}\n[package.metadata.simit.ci.nix_system_runners]\n{runners}"
+            ),
+        ),
+    ] {
+        let temp = init_package(true);
+        fs::write(temp.path().join(path), config).unwrap();
+        let output = simit()
+            .current_dir(temp.path())
+            .args(["init", "ci"])
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "{path}: {output:?}");
+        let persisted = read(&temp.path().join(path));
+        assert!(!persisted.contains("\nrunner ="), "{path}:\n{persisted}");
+        assert!(
+            persisted.contains("nix_system_runners = { x86_64-linux = \"ubuntu-24.04\" }"),
+            "{path}:\n{persisted}"
+        );
+        let check = simit()
+            .current_dir(temp.path())
+            .args(["init", "ci", "--check"])
+            .output()
+            .unwrap();
+        assert!(check.status.success(), "{path}: {check:?}");
+    }
+}
