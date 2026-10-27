@@ -554,7 +554,7 @@ pub fn detect_feature_status(workspace_root: &Path) -> BTreeMap<String, FeatureS
 pub fn audit_ci(workspace_root: &Path) -> Result<CiAudit> {
     let workflows = collect_workflow_files(workspace_root)?
         .into_iter()
-        .filter(|file| !is_release_workflow(file))
+        .filter(|file| !is_release_workflow(file) && !is_manual_gates_workflow(file))
         .collect::<Vec<_>>();
     let (marked, unmarked): (Vec<_>, Vec<_>) = workflows.into_iter().partition(|file| file.marked);
     let unmarked = unmarked
@@ -832,10 +832,7 @@ fn detect_ci_status(workspace_root: &Path) -> FeatureStatus {
     // workflow-inferred expectation below cannot reproduce them.
     let workflows = workflows
         .into_iter()
-        .filter(|file| {
-            !is_release_workflow(file)
-                && file.relative_path.file_name() != Some("manual-gates.yaml".as_ref())
-        })
+        .filter(|file| !is_release_workflow(file) && !is_manual_gates_workflow(file))
         .collect::<Vec<_>>();
     let (marked, unmarked): (Vec<_>, Vec<_>) = workflows.into_iter().partition(|file| file.marked);
     let unmarked = unmarked
@@ -857,6 +854,10 @@ fn detect_ci_status(workspace_root: &Path) -> FeatureStatus {
     } else {
         FeatureStatus::ManagedExtra
     }
+}
+
+fn is_manual_gates_workflow(file: &WorkflowFile) -> bool {
+    file.relative_path.file_name() == Some("manual-gates.yaml".as_ref())
 }
 
 fn is_release_workflow(file: &WorkflowFile) -> bool {

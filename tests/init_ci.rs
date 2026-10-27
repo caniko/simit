@@ -6920,3 +6920,55 @@ nix_image = "nixos/nix:2.34.8"
         String::from_utf8_lossy(&actions.stderr)
     );
 }
+
+#[test]
+fn manual_gates_audit_clean_and_supersede_inferred_required_gates() {
+    let temp = init_package(true);
+    let config = |gates: &str| {
+        format!("[ci]\nplatform = \"github\"\nprovider = \"actions\"\nruntime = \"nix\"\n{gates}\n")
+    };
+    let write = |text: String| fs::write(temp.path().join("simit.toml"), text).unwrap();
+    let init = || {
+        let output = simit()
+            .current_dir(temp.path())
+            .args(["init", "ci"])
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    };
+    write(config(
+        "required_gates = [{ id = \"boot\", run = \"nix run .#boot\" }]",
+    ));
+    init();
+    let ci = temp.path().join(".github/workflows/ci.yaml");
+    assert!(
+        fs::read_to_string(&ci)
+            .unwrap()
+            .contains("Required gate boot")
+    );
+    // Moving the gate to manual_gates must not re-infer it from the old ci.yaml.
+    write(config(
+        "manual_gates = [{ id = \"boot\", run = \"nix run .#boot\" }]",
+    ));
+    init();
+    assert!(
+        !fs::read_to_string(&ci)
+            .unwrap()
+            .contains("Required gate boot")
+    );
+    assert!(
+        temp.path()
+            .join(".github/workflows/manual-gates.yaml")
+            .is_file()
+    );
+    let output = simit()
+        .current_dir(temp.path())
+        .args(["projects", "audit", ".", "--json"])
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{output:?}");
+}
