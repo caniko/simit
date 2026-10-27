@@ -857,7 +857,7 @@ fn detect_ci_status(workspace_root: &Path) -> FeatureStatus {
 }
 
 fn is_manual_gates_workflow(file: &WorkflowFile) -> bool {
-    file.relative_path.file_name() == Some("manual-gates.yaml".as_ref())
+    file.marked && file.relative_path.file_name() == Some("manual-gates.yaml".as_ref())
 }
 
 fn is_release_workflow(file: &WorkflowFile) -> bool {
@@ -3002,6 +3002,17 @@ jobs:
         assert!(is_release_workflow(&release));
         assert!(is_release_workflow(&release_yaml));
         assert!(!is_release_workflow(&ci));
+    }
+
+    #[test]
+    fn manual_gates_exclusion_requires_generated_marker() {
+        let file = |marked| WorkflowFile {
+            relative_path: PathBuf::from(".github/workflows/manual-gates.yaml"),
+            content: String::new(),
+            marked,
+        };
+        assert!(is_manual_gates_workflow(&file(true)));
+        assert!(!is_manual_gates_workflow(&file(false)));
     }
 
     #[test]
