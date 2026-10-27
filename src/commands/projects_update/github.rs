@@ -650,7 +650,7 @@ fn admit_new_workflows(
             }
         }
         for (prefix, names) in &defined {
-            for name in references(&file.content, prefix) {
+            for name in references(&file.content, prefix)? {
                 if name != "GITHUB_TOKEN" && !names.contains(name) {
                     missing.insert(format!("{prefix}{name}"));
                 }
@@ -728,23 +728,42 @@ fn hosted_label(label: &str) -> bool {
         && parts.next().is_none()
 }
 
-/// Names referenced as `PREFIX.NAME`, such as `secrets.ATTIC_TOKEN`.
-fn references<'a>(content: &'a str, prefix: &str) -> BTreeSet<&'a str> {
+/// Names referenced as `PREFIX.NAME` or `PREFIX['NAME']`, such as
+/// `secrets.ATTIC_TOKEN`. A bracket key that is not a static string fails closed.
+fn references<'a>(content: &'a str, prefix: &str) -> Result<BTreeSet<&'a str>> {
     let word = |ch: char| ch.is_ascii_alphanumeric() || ch == '_';
-    content
-        .match_indices(prefix)
+    let base = prefix.trim_end_matches('.');
+    let mut names = BTreeSet::new();
+    for (start, found) in content
+        .match_indices(base)
         .filter(|(start, _)| {
             content[..*start]
                 .chars()
                 .next_back()
                 .is_none_or(|ch| !word(ch) && ch != '.')
         })
-        .map(|(start, _)| {
-            let rest = &content[start + prefix.len()..];
-            &rest[..rest.find(|ch| !word(ch)).unwrap_or(rest.len())]
-        })
-        .filter(|name| !name.is_empty())
-        .collect()
+        .map(|(start, found)| (start, found.len()))
+    {
+        let rest = &content[start + found..];
+        if let Some(rest) = rest.strip_prefix('.') {
+            let name = &rest[..rest.find(|ch| !word(ch)).unwrap_or(rest.len())];
+            if !name.is_empty() {
+                names.insert(name);
+            }
+        } else if let Some(rest) = rest.strip_prefix('[') {
+            let key = rest
+                .trim_start()
+                .strip_prefix('\'')
+                .and_then(|rest| rest.split_once('\''))
+                .filter(|(_, tail)| tail.trim_start().starts_with(']'))
+                .map(|(key, _)| key);
+            let Some(key) = key.filter(|key| !key.is_empty()) else {
+                anyhow::bail!("workflow uses a dynamic {base}[...] key, which cannot be checked");
+            };
+            names.insert(key);
+        }
+    }
+    Ok(names)
 }
 
 fn admit_signatures(signatures: &Value) -> Result<()> {
@@ -1993,11 +2012,14 @@ mod tests {
         }
         assert_eq!(
             references(
-                "${{ secrets.A }} inputs.secrets.B ${{secrets.C_1}}",
+                "${{ secrets.A }} inputs.secrets.B ${{secrets.C_1}} ${{ secrets['D-2'] }} ${{ vars['X'] }}",
                 "secrets."
-            ),
-            BTreeSet::from(["A", "C_1"])
+            )
+            .unwrap(),
+            BTreeSet::from(["A", "C_1", "D-2"])
         );
+        assert!(references("${{ secrets[matrix.name] }}", "secrets.").is_err());
+        assert!(references("${{ vars[format('{0}', 'X')] }}", "vars.").is_err());
         // One runner must carry every label a job requests.
         responses.borrow_mut().insert(
             runners.clone(),
