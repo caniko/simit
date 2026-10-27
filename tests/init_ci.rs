@@ -421,6 +421,30 @@ fn provider_migration_resets_nix_system_runners_and_accepts_runner() {
 }
 
 #[test]
+fn language_ci_migration_resets_nix_system_runners() {
+    let temp = init_package(true);
+    fs::write(
+        temp.path().join("simit.toml"),
+        "[ci]\nplatform = \"github\"\nruntime = \"nix\"\nnix_builds = [\".#default\"]\n[ci.nix_system_runners]\nx86_64-linux = \"private-x86\"\n",
+    )
+    .unwrap();
+    let output = simit()
+        .current_dir(temp.path())
+        .args([
+            "init",
+            "ci",
+            "--runner=ubuntu-24.04",
+            "--reset-step-runners",
+        ])
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{output:?}");
+    let persisted = read(&temp.path().join("simit.toml"));
+    assert!(!persisted.contains("nix_system_runners"), "{persisted}");
+    assert!(persisted.contains("ubuntu-24.04"), "{persisted}");
+}
+
+#[test]
 fn native_runner_matrices_keep_unknown_workers_on_compatible_actions() {
     for (arm_runner, checkout, upload) in [
         ("ubuntu-24.04-arm", "v7.0.1", "v7.0.2"),

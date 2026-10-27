@@ -539,10 +539,14 @@ pub fn run(command: InitCiCommand) -> Result<()> {
         platform,
         with_artifacts,
         &omnix_ref,
-        persisted_runner,
+        persisted_runner.clone(),
         persisted_windows_runner,
     );
     let mut persisted_ci = persisted_ci;
+    if command.reset_step_runners {
+        persisted_ci.nix_system_runners.clear();
+        persisted_ci.runner = persisted_runner;
+    }
     persisted_ci.provider = Some(provider);
     persisted_ci.publish_crates = publish_crates;
     if command.with_codeberg_pages {
