@@ -105,7 +105,7 @@ fn fixtures(root: &Path) {
             "[ci]\nplatform = \"github\"\nprovider = \"actions\"\nlocal_gate = true\n\n\
              [[ci.required_gates]]\nid = \"parity\"\n\
              run = \"nix run github:caniko/simit/{PINNED} -- init ci --check\"\n\n\
-             [release.attic]\ncache = \"canix\"\nurl = \"https://attic.example\"\ntoken_name = \"drifted\"\n"
+             [release.attic]\ncache = \"canix\"\nurl = \"https://deploy:s3cret@attic.example?token=t0ken\"\ntoken_name = \"drifted\"\n"
         ),
     );
     write(
@@ -140,7 +140,7 @@ fn fixtures(root: &Path) {
     write(
         &drifted,
         "scripts/release.sh",
-        "#!/bin/sh\n# simit is not invoked by this comment\nsimit release --dry-run\nnix run github:caniko/simit/$SIMIT_REVISION -- release\ncargo install simit\ncargo install --locked --git https://github.com/caniko/simit.git --rev 4c6841cce19327927ea8a8f6e856276dd5c878f0 simit\n",
+        "#!/bin/sh\n# simit is not invoked by this comment\nsimit release --dry-run\nnix run github:caniko/simit/$SIMIT_REVISION -- release\ncargo install simit\ncargo install --locked --git https://github.com/caniko/simit.git --rev 4c6841cce19327927ea8a8f6e856276dd5c878f0 simit\ncargo install --git https://github.com/caniko/simit.git --rev=5d6841cce19327927ea8a8f6e856276dd5c878f1 simit\n",
     );
     write(
         &drifted,
@@ -164,7 +164,9 @@ fn fixtures(root: &Path) {
         &format!(
             "version = 4\n\n[[package]]\nname = \"drifted\"\nversion = \"0.1.0\"\n\n\
              [[package]]\nname = \"simit\"\nversion = \"0.21.0\"\n\
-             source = \"git+https://github.com/caniko/simit?rev={PINNED}#{PINNED}\"\n"
+             source = \"git+https://github.com/caniko/simit?rev={PINNED}#{PINNED}\"\n\n\
+             [[package]]\nname = \"simit\"\nversion = \"0.20.0\"\n\
+             source = \"registry+https://github.com/rust-lang/crates.io-index\"\n"
         ),
     );
 
@@ -230,6 +232,28 @@ fn fixtures(root: &Path) {
         "on: [release]\n",
     );
 
+    // A flake-defined signing policy is unknown, not required.
+    write(
+        &flake,
+        ".github/workflows/release.yml",
+        &format!("{MARKER}\non:\n  push:\n    tags: ['*']\n"),
+    );
+
+    // Generated CI beside a hand-written workflow.
+    let mixed = checkout(root, "mixed", "https://github.com/example/mixed");
+    package(&mixed, "mixed", "");
+    write(
+        &mixed,
+        ".github/workflows/ci.yaml",
+        &format!("{MARKER}\njobs:\n  test:\n    runs-on: ubuntu-latest\n"),
+    );
+    write(&mixed, ".github/workflows/deploy.yaml", "on: [push]\n");
+    write(
+        &mixed,
+        "simit.toml",
+        "[ci]\nplatform = \"github\"\nprovider = \"actions\"\n",
+    );
+
     // Not a forge checkout.
     fs::create_dir_all(root.join("no-origin")).unwrap();
     git(&root.join("no-origin"), &["init", "--quiet"]);
@@ -260,6 +284,7 @@ fn facts_match_the_golden_document_without_evaluating_flakes_or_writing() {
             "conflict",
             "unsigned",
             "manual",
+            "mixed",
             "no-origin",
             "missing",
         ],
@@ -272,6 +297,11 @@ fn facts_match_the_golden_document_without_evaluating_flakes_or_writing() {
     assert!(
         !root.join("home/.local/share/simit").exists(),
         "facts wrote the project registry"
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        !stdout.contains("s3cret") && !stdout.contains("t0ken"),
+        "facts leaked Attic URL credentials"
     );
     let document = normalize(serde_json::from_slice(&output.stdout).unwrap());
     let golden = Path::new(env!("CARGO_MANIFEST_DIR"))
