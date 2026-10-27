@@ -1563,10 +1563,9 @@ impl AdapterRequest {
             || self.target.is_some()
             || self.change.is_some()
             || matches!(self.operation.as_str(), "propose" | "merge" | "close")
-            || self
-                .plan
-                .as_ref()
-                .is_some_and(|plan| plan.schema == "simit.ci-update-plan.v2" || !plan.patches.is_empty())
+            || self.plan.as_ref().is_some_and(|plan| {
+                plan.schema == "simit.ci-update-plan.v2" || !plan.patches.is_empty()
+            })
         {
             2
         } else {

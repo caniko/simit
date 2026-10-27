@@ -566,6 +566,7 @@ compiles the workflow. Each workflow becomes a check with run
 exhausted CI quota (`CI quota denied ...`) fails with a distinct quota message;
 rerun the update after the quota resets. Generator qualification stays with
 GitHub Actions; requests without workflows answer `unsupported`.
+
 ## Pull-request landing
 
 `landing` is `direct` (the default) or `pull-request`, set per profile and
@@ -627,6 +628,7 @@ over it, so the updater no longer touches its open request or maintenance ref;
 close those by hand, or re-enable the repository so a run resumes or retires them.
 
 Other forges add these operations in their own adapters.
+
 ## Scopes
 
 `scopes` lists the generated-file consumptions a profile maintains. It must

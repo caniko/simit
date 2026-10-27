@@ -60,8 +60,6 @@
       "via": "simit projects update"
     },
     {
-      "blocker": "pr-required-unsupported",
-      "fallback": "land the simit init ci diff through a pull request",
       "lands": true,
       "match": {
         "ciTarget": "actions/github",
@@ -70,14 +68,12 @@
       },
       "orchestrator": "simit-updater",
       "path": "updater",
-      "reason": "The updater cannot land through a pull request yet.",
-      "status": "planned",
+      "reason": "The updater proposes and merges a pull request on GitHub.",
+      "status": "implemented",
       "usageKind": "ci.primary",
       "via": "simit projects update"
     },
     {
-      "blocker": "adapter-missing",
-      "fallback": "simit init ci",
       "lands": true,
       "match": {
         "ciTarget": "crow/forgejo",
@@ -85,8 +81,8 @@
       },
       "orchestrator": "simit-updater",
       "path": "updater",
-      "reason": "The updater has no Forgejo and Crow adapter yet.",
-      "status": "planned",
+      "reason": "The updater regenerates, qualifies and lands primary CI on Forgejo with Crow.",
+      "status": "implemented",
       "usageKind": "ci.primary",
       "via": "simit projects update"
     },
@@ -101,7 +97,7 @@
       },
       "orchestrator": "simit-updater",
       "path": "updater",
-      "reason": "The updater has no Forgejo and Crow adapter yet.",
+      "reason": "The Forgejo and Crow adapter lands directly only.",
       "status": "planned",
       "usageKind": "ci.primary",
       "via": "simit projects update"
@@ -122,8 +118,6 @@
       "via": "simit projects update"
     },
     {
-      "blocker": "provider-mismatch",
-      "fallback": "simit init ci --ci-provider actions --platform github",
       "lands": true,
       "match": {
         "ciTarget": "crow/forgejo",
@@ -131,8 +125,8 @@
       },
       "orchestrator": "simit-updater",
       "path": "migration",
-      "reason": "Crow CI cannot run on github.com, and the updater cannot migrate providers yet.",
-      "status": "planned",
+      "reason": "A profile migration regenerates CI for the provider and platform it selects.",
+      "status": "implemented",
       "usageKind": "ci.primary",
       "via": "simit projects update with a provider migration"
     },
@@ -147,8 +141,6 @@
       "via": "simit init ci"
     },
     {
-      "blocker": "scope-unsupported",
-      "fallback": "simit init ci",
       "lands": true,
       "match": {
         "ciTarget": "actions/github",
@@ -156,14 +148,12 @@
       },
       "orchestrator": "simit-updater",
       "path": "updater",
-      "reason": "The updater lands only the primary CI scope.",
-      "status": "planned",
+      "reason": "The updater carries this scope with the primary CI candidate.",
+      "status": "implemented",
       "usageKind": "ci.publish",
       "via": "simit projects update"
     },
     {
-      "blocker": "adapter-missing",
-      "fallback": "simit init ci",
       "lands": true,
       "match": {
         "ciTarget": "crow/forgejo",
@@ -171,8 +161,8 @@
       },
       "orchestrator": "simit-updater",
       "path": "updater",
-      "reason": "The updater has no Forgejo and Crow adapter yet.",
-      "status": "planned",
+      "reason": "The updater carries this scope with the primary CI candidate.",
+      "status": "implemented",
       "usageKind": "ci.publish",
       "via": "simit projects update"
     },
@@ -187,8 +177,6 @@
       "via": "simit init ci"
     },
     {
-      "blocker": "scope-unsupported",
-      "fallback": "simit init ci",
       "lands": true,
       "match": {
         "ciTarget": "actions/github",
@@ -196,14 +184,12 @@
       },
       "orchestrator": "simit-updater",
       "path": "updater",
-      "reason": "The updater lands only the primary CI scope.",
-      "status": "planned",
+      "reason": "The updater carries this scope with the primary CI candidate.",
+      "status": "implemented",
       "usageKind": "ci.pages",
       "via": "simit projects update"
     },
     {
-      "blocker": "adapter-missing",
-      "fallback": "simit init ci",
       "lands": true,
       "match": {
         "ciTarget": "crow/forgejo",
@@ -211,8 +197,8 @@
       },
       "orchestrator": "simit-updater",
       "path": "updater",
-      "reason": "The updater has no Forgejo and Crow adapter yet.",
-      "status": "planned",
+      "reason": "The updater carries this scope with the primary CI candidate.",
+      "status": "implemented",
       "usageKind": "ci.pages",
       "via": "simit projects update"
     },
@@ -227,8 +213,6 @@
       "via": "simit init ci"
     },
     {
-      "blocker": "scope-unsupported",
-      "fallback": "simit init ci",
       "lands": true,
       "match": {
         "ciTarget": "actions/github",
@@ -236,14 +220,12 @@
       },
       "orchestrator": "simit-updater",
       "path": "updater",
-      "reason": "The updater lands only the primary CI scope.",
-      "status": "planned",
+      "reason": "The updater carries this scope with the primary CI candidate.",
+      "status": "implemented",
       "usageKind": "ci.review",
       "via": "simit projects update"
     },
     {
-      "blocker": "adapter-missing",
-      "fallback": "simit init ci",
       "lands": true,
       "match": {
         "ciTarget": "crow/forgejo",
@@ -251,8 +233,8 @@
       },
       "orchestrator": "simit-updater",
       "path": "updater",
-      "reason": "The updater has no Forgejo and Crow adapter yet.",
-      "status": "planned",
+      "reason": "The updater carries this scope with the primary CI candidate.",
+      "status": "implemented",
       "usageKind": "ci.review",
       "via": "simit projects update"
     },
@@ -267,8 +249,6 @@
       "via": "simit init ci"
     },
     {
-      "blocker": "scope-unsupported",
-      "fallback": "simit init ci",
       "lands": true,
       "match": {
         "ciTarget": "actions/github",
@@ -276,14 +256,12 @@
       },
       "orchestrator": "simit-updater",
       "path": "updater",
-      "reason": "The updater lands only the primary CI scope.",
-      "status": "planned",
+      "reason": "The updater carries this scope with the primary CI candidate.",
+      "status": "implemented",
       "usageKind": "ci.custody",
       "via": "simit projects update"
     },
     {
-      "blocker": "adapter-missing",
-      "fallback": "simit init ci",
       "lands": true,
       "match": {
         "ciTarget": "crow/forgejo",
@@ -291,8 +269,8 @@
       },
       "orchestrator": "simit-updater",
       "path": "updater",
-      "reason": "The updater has no Forgejo and Crow adapter yet.",
-      "status": "planned",
+      "reason": "The updater carries this scope with the primary CI candidate.",
+      "status": "implemented",
       "usageKind": "ci.custody",
       "via": "simit projects update"
     },
@@ -307,8 +285,6 @@
       "via": "simit init ci"
     },
     {
-      "blocker": "scope-unsupported",
-      "fallback": "simit init ci",
       "lands": true,
       "match": {
         "ciTarget": "actions/github",
@@ -316,14 +292,12 @@
       },
       "orchestrator": "simit-updater",
       "path": "updater",
-      "reason": "The updater lands only the primary CI scope.",
-      "status": "planned",
+      "reason": "The updater carries this scope with the primary CI candidate.",
+      "status": "implemented",
       "usageKind": "ci.template",
       "via": "simit projects update"
     },
     {
-      "blocker": "adapter-missing",
-      "fallback": "simit init ci",
       "lands": true,
       "match": {
         "ciTarget": "crow/forgejo",
@@ -331,8 +305,8 @@
       },
       "orchestrator": "simit-updater",
       "path": "updater",
-      "reason": "The updater has no Forgejo and Crow adapter yet.",
-      "status": "planned",
+      "reason": "The updater carries this scope with the primary CI candidate.",
+      "status": "implemented",
       "usageKind": "ci.template",
       "via": "simit projects update"
     },
@@ -347,8 +321,6 @@
       "via": "simit init ci"
     },
     {
-      "blocker": "scope-unsupported",
-      "fallback": "simit init ci",
       "lands": true,
       "match": {
         "ciTarget": "actions/github",
@@ -356,14 +328,12 @@
       },
       "orchestrator": "simit-updater",
       "path": "updater",
-      "reason": "The updater lands only the primary CI scope.",
-      "status": "planned",
+      "reason": "The updater carries this scope with the primary CI candidate.",
+      "status": "implemented",
       "usageKind": "ci.local-gate",
       "via": "simit projects update"
     },
     {
-      "blocker": "adapter-missing",
-      "fallback": "simit init ci",
       "lands": true,
       "match": {
         "ciTarget": "crow/forgejo",
@@ -371,8 +341,8 @@
       },
       "orchestrator": "simit-updater",
       "path": "updater",
-      "reason": "The updater has no Forgejo and Crow adapter yet.",
-      "status": "planned",
+      "reason": "The updater carries this scope with the primary CI candidate.",
+      "status": "implemented",
       "usageKind": "ci.local-gate",
       "via": "simit projects update"
     },
@@ -387,8 +357,6 @@
       "via": "simit init release"
     },
     {
-      "blocker": "scope-unsupported",
-      "fallback": "simit init release",
       "lands": true,
       "match": {
         "ciTarget": "actions/github",
@@ -396,14 +364,12 @@
       },
       "orchestrator": "simit-updater",
       "path": "updater",
-      "reason": "The updater lands only the primary CI scope.",
-      "status": "planned",
+      "reason": "The updater carries this scope with the primary CI candidate.",
+      "status": "implemented",
       "usageKind": "release.workflow",
       "via": "simit projects update"
     },
     {
-      "blocker": "adapter-missing",
-      "fallback": "simit init release",
       "lands": true,
       "match": {
         "ciTarget": "crow/forgejo",
@@ -411,8 +377,8 @@
       },
       "orchestrator": "simit-updater",
       "path": "updater",
-      "reason": "The updater has no Forgejo and Crow adapter yet.",
-      "status": "planned",
+      "reason": "The updater carries this scope with the primary CI candidate.",
+      "status": "implemented",
       "usageKind": "release.workflow",
       "via": "simit projects update"
     },
@@ -427,8 +393,6 @@
       "via": "simit init flake"
     },
     {
-      "blocker": "scope-unsupported",
-      "fallback": "simit init flake",
       "lands": true,
       "match": {
         "ciTarget": "actions/github",
@@ -436,14 +400,12 @@
       },
       "orchestrator": "simit-updater",
       "path": "updater",
-      "reason": "The updater lands only the primary CI scope.",
-      "status": "planned",
+      "reason": "The updater carries this scope with the primary CI candidate.",
+      "status": "implemented",
       "usageKind": "flake.wiring",
       "via": "simit projects update"
     },
     {
-      "blocker": "adapter-missing",
-      "fallback": "simit init flake",
       "lands": true,
       "match": {
         "ciTarget": "crow/forgejo",
@@ -451,8 +413,8 @@
       },
       "orchestrator": "simit-updater",
       "path": "updater",
-      "reason": "The updater has no Forgejo and Crow adapter yet.",
-      "status": "planned",
+      "reason": "The updater carries this scope with the primary CI candidate.",
+      "status": "implemented",
       "usageKind": "flake.wiring",
       "via": "simit projects update"
     },
@@ -467,8 +429,6 @@
       "via": "simit init flake"
     },
     {
-      "blocker": "scope-unsupported",
-      "fallback": "simit init flake",
       "lands": true,
       "match": {
         "ciTarget": "actions/github",
@@ -476,14 +436,12 @@
       },
       "orchestrator": "simit-updater",
       "path": "updater",
-      "reason": "The updater lands only the primary CI scope.",
-      "status": "planned",
+      "reason": "The updater carries this scope with the primary CI candidate.",
+      "status": "implemented",
       "usageKind": "hooks.config",
       "via": "simit projects update"
     },
     {
-      "blocker": "adapter-missing",
-      "fallback": "simit init flake",
       "lands": true,
       "match": {
         "ciTarget": "crow/forgejo",
@@ -491,8 +449,8 @@
       },
       "orchestrator": "simit-updater",
       "path": "updater",
-      "reason": "The updater has no Forgejo and Crow adapter yet.",
-      "status": "planned",
+      "reason": "The updater carries this scope with the primary CI candidate.",
+      "status": "implemented",
       "usageKind": "hooks.config",
       "via": "simit projects update"
     },
@@ -507,8 +465,6 @@
       "via": "simit upgrade"
     },
     {
-      "blocker": "scope-unsupported",
-      "fallback": "simit upgrade",
       "lands": true,
       "match": {
         "ciTarget": "actions/github",
@@ -516,14 +472,12 @@
       },
       "orchestrator": "simit-updater",
       "path": "updater",
-      "reason": "The updater lands only the primary CI scope.",
-      "status": "planned",
+      "reason": "The updater carries this scope with the primary CI candidate.",
+      "status": "implemented",
       "usageKind": "readme.badges",
       "via": "simit projects update"
     },
     {
-      "blocker": "adapter-missing",
-      "fallback": "simit upgrade",
       "lands": true,
       "match": {
         "ciTarget": "crow/forgejo",
@@ -531,8 +485,8 @@
       },
       "orchestrator": "simit-updater",
       "path": "updater",
-      "reason": "The updater has no Forgejo and Crow adapter yet.",
-      "status": "planned",
+      "reason": "The updater carries this scope with the primary CI candidate.",
+      "status": "implemented",
       "usageKind": "readme.badges",
       "via": "simit projects update"
     },

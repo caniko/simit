@@ -1424,7 +1424,7 @@ const FORGEJO_ACTIONS: &[(&str, &str)] = &[("forge", "forgejo"), ("ciTarget", "a
 const CROW_ON_GITHUB: &[(&str, &str)] = &[("forge", "github"), ("ciTarget", "crow/forgejo")];
 
 const CONFIG: &str = "Config sources are maintained by the repository owner; generator upgrades read them and never rewrite them.";
-const NO_FORGEJO: &str = "The updater has no Forgejo and Crow adapter yet.";
+const NO_FORGEJO_PR: &str = "The Forgejo and Crow adapter lands directly only.";
 const VARIABLE: &str = "Repository variable values are forge state; simit never changes them.";
 
 /// The capability matrix. Each updater feature flips its own rows;
@@ -1455,19 +1455,19 @@ fn capabilities() -> Vec<Row> {
             "ci.primary",
             GITHUB_PR,
             ["ci", "github", "pull-request"],
-            Planned,
-            Some("pr-required-unsupported"),
-            "The updater cannot land through a pull request yet.",
-            Some("land the simit init ci diff through a pull request"),
+            Implemented,
+            None,
+            "The updater proposes and merges a pull request on GitHub.",
+            None,
         ),
         updater(
             "ci.primary",
             CROW,
             ["ci", "forgejo", "direct"],
-            Planned,
-            Some("adapter-missing"),
-            NO_FORGEJO,
-            Some("simit init ci"),
+            Implemented,
+            None,
+            "The updater regenerates, qualifies and lands primary CI on Forgejo with Crow.",
+            None,
         ),
         updater(
             "ci.primary",
@@ -1475,7 +1475,7 @@ fn capabilities() -> Vec<Row> {
             ["ci", "forgejo", "pull-request"],
             Planned,
             Some("adapter-missing"),
-            NO_FORGEJO,
+            NO_FORGEJO_PR,
             Some("simit init ci"),
         ),
         updater(
@@ -1491,14 +1491,14 @@ fn capabilities() -> Vec<Row> {
             matches: CROW_ON_GITHUB,
             lands: true,
             orchestrator: Some("simit-updater"),
-            status: Planned,
-            blocker: Some("provider-mismatch"),
-            fallback: Some("simit init ci --ci-provider actions --platform github"),
+            status: Implemented,
+            blocker: None,
+            fallback: None,
             ..settled(
                 "ci.primary",
                 "migration",
                 "simit projects update with a provider migration",
-                "Crow CI cannot run on github.com, and the updater cannot migrate providers yet.",
+                "A profile migration regenerates CI for the provider and platform it selects.",
             )
         },
     ];
@@ -1522,19 +1522,19 @@ fn capabilities() -> Vec<Row> {
                 kind,
                 GITHUB,
                 [scope, "github", "direct"],
-                Planned,
-                Some("scope-unsupported"),
-                "The updater lands only the primary CI scope.",
-                Some(via),
+                Implemented,
+                None,
+                "The updater carries this scope with the primary CI candidate.",
+                None,
             ),
             updater(
                 kind,
                 CROW,
                 [scope, "forgejo", "direct"],
-                Planned,
-                Some("adapter-missing"),
-                NO_FORGEJO,
-                Some(via),
+                Implemented,
+                None,
+                "The updater carries this scope with the primary CI candidate.",
+                None,
             ),
         ]);
     }
@@ -1639,7 +1639,9 @@ mod tests {
             };
             let supported = SUPPORTED_SCOPES.contains(&scope)
                 && UPDATER_ADAPTERS.contains(&adapter)
-                && SUPPORTED_LANDINGS.contains(&landing);
+                && SUPPORTED_LANDINGS.contains(&landing)
+                // The Forgejo adapter rejects pull-request landing.
+                && !(adapter == "forgejo" && landing == "pull-request");
             assert_eq!(
                 row.status == Status::Implemented && row.blocker.is_none(),
                 supported,
