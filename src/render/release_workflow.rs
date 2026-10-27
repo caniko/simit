@@ -19,8 +19,8 @@ use crate::config::{
     AnnounceConfig, ArtifactsConfig, AtticConfig, FlatpakConfig, PrebuildConfig, PypiReleaseConfig,
     ReleaseNotesSource, ReleaseProvider, ReleasePublishConfig, ReleasePublisherEnforcement,
     ReleasePublisherPolicy, RequiredGate, ResolvedApt, ResolvedAur, ResolvedChocolatey,
-    ResolvedCopr, ResolvedHomebrew, ResolvedReleaseTarget, ResolvedScoop, WindowsSigningConfig,
-    WingetConfig,
+    ResolvedCopr, ResolvedHomebrew, ResolvedReleaseTarget, ResolvedScoop, ResolvedWinget,
+    WindowsSigningConfig,
 };
 use crate::project::GeneratedFile;
 use crate::render::ci::{forgejo_action_ref, github_action_ref, immutable_action_ref};
@@ -49,7 +49,7 @@ pub struct ReleaseWorkflowInputs<'a> {
     pub chocolatey: Option<&'a ResolvedChocolatey>,
     pub windows_signing: Option<&'a WindowsSigningConfig>,
     pub flatpak: Option<&'a FlatpakConfig>,
-    pub winget: Option<&'a WingetConfig>,
+    pub winget: Option<&'a ResolvedWinget>,
     pub announce: Option<&'a AnnounceConfig>,
     pub pypi: Option<&'a PypiReleaseConfig>,
 }
@@ -2528,11 +2528,13 @@ fn push_publish_flathub(w: &mut String, flatpak: &FlatpakConfig, activated_remot
 
 fn push_publish_winget(
     w: &mut String,
-    winget: &WingetConfig,
+    winget: &ResolvedWinget,
     activated_remote: bool,
     platform: Platform,
 ) {
     let zip = winget.zip_archive.replace("{version}", "${VERSION}");
+    let manifest_dir = winget_manifest_dir(&winget.package_id);
+    let id = shell_quote(&winget.package_id);
     w.push_str("      - name: Publish winget manifest PR\n        env:\n");
     writeln!(
         w,
@@ -2560,8 +2562,18 @@ fn push_publish_winget(
     } else {
         w.push_str("          test -s \"release/${ZIP_NAME}\"\n");
     }
-    w.push_str("          export ZIP_URL VERSION WINGET_PAT\n");
-    w.push_str("          nix shell nixpkgs#curl nixpkgs#jq nixpkgs#unzip nixpkgs#wineWow64Packages.stable nixpkgs#util-linux -c bash <<'SCRIPT'\n");
+    w.push_str("          export ZIP_NAME ZIP_URL VERSION WINGET_PAT");
+    if activated_remote {
+        w.push_str(" PUBLISH_WINGET_STATE");
+    }
+    w.push('\n');
+    // Under activated-remote a failed submission stays a warning while the
+    // channel is inactive (the first submission); once active it is an error.
+    w.push_str("          nix shell nixpkgs#curl nixpkgs#jq nixpkgs#unzip nixpkgs#wineWow64Packages.stable nixpkgs#util-linux -c bash <<'SCRIPT'");
+    if activated_remote {
+        w.push_str(" || publisher_missing winget 'wingetcreate submission failed'");
+    }
+    w.push('\n');
     w.push_str("          set -euo pipefail\n          tmpdir=\"$(mktemp -d)\"; trap 'rm -rf \"$tmpdir\"' EXIT\n");
     w.push_str(
         "          export WINEPREFIX=\"$tmpdir/wine\"; export WINEDEBUG=-all; export TERM=xterm\n",
@@ -2569,8 +2581,78 @@ fn push_publish_winget(
     w.push_str("          release_json=\"$(curl -fsSL https://api.github.com/repos/microsoft/winget-create/releases/latest)\"\n");
     w.push_str("          url=\"$(printf '%s' \"$release_json\" | jq -r '.assets[] | select(.name == \"wingetcreate.exe\") | .browser_download_url' | head -n 1)\"\n");
     w.push_str("          curl -fsSL -o \"$tmpdir/wingetcreate.exe\" \"$url\"\n");
-    writeln!(w, "          wine \"$tmpdir/wingetcreate.exe\" update {} --version \"$VERSION\" --urls \"${{ZIP_URL}}|x64\" --token \"$WINGET_PAT\" --submit", winget.package_id).expect("write");
+    // active-required: the package exists in winget-pkgs, so update it.
+    // Anything else: first submission from generated manifests.
+    w.push_str("          state=\"${PUBLISH_WINGET_STATE:-}\"\n");
+    if !activated_remote {
+        w.push_str("          if [ -z \"$state\" ]; then\n");
+        writeln!(
+            w,
+            "            code=\"$(curl -sS -o /dev/null -w '%{{http_code}}' -H \"Authorization: Bearer $WINGET_PAT\" {})\"",
+            shell_quote(&format!(
+                "https://api.github.com/repos/microsoft/winget-pkgs/contents/{manifest_dir}"
+            ))
+        )
+        .expect("write");
+        w.push_str("            case \"$code\" in 200) state=active-required ;; 404) state=inactive-soft ;; *) echo \"::error::winget: unexpected HTTP $code probing winget-pkgs\" >&2; exit 1 ;; esac\n");
+        w.push_str("          fi\n");
+    }
+    w.push_str("          if [ \"$state\" = active-required ]; then\n");
+    writeln!(w, "            wine \"$tmpdir/wingetcreate.exe\" update {} --version \"$VERSION\" --urls \"${{ZIP_URL}}|x64\" --token \"$WINGET_PAT\" --submit", winget.package_id).expect("write");
+    w.push_str("          else\n");
+    match (&winget.license, &winget.short_description) {
+        (Some(license), Some(description)) => {
+            push_winget_bootstrap(w, winget, &id, &manifest_dir, license, description);
+        }
+        _ => {
+            w.push_str("            echo '::error::winget: the package is not in winget-pkgs yet; set [winget].license and [winget].short_description (or Cargo license and description) for the first submission.' >&2; exit 1\n");
+        }
+    }
+    w.push_str("          fi\n");
     w.push_str("          SCRIPT\n");
+}
+
+/// Writes the three ManifestVersion 1.10.0 files and runs `wingetcreate submit`.
+fn push_winget_bootstrap(
+    w: &mut String,
+    winget: &ResolvedWinget,
+    id: &str,
+    manifest_dir: &str,
+    license: &str,
+    description: &str,
+) {
+    let q = shell_quote;
+    let file = |name: &str| format!("\"$dir\"/{id}.{name}yaml");
+    w.push_str("            # yaml(): double-quoted YAML scalar; f KEY VALUE writes one field.\n");
+    w.push_str("            yaml() { local s=\"${1//\\\\/\\\\\\\\}\"; printf '\"%s\"' \"${s//\\\"/\\\\\\\"}\"; }\n");
+    w.push_str("            f() { printf '%s: %s\\n' \"$1\" \"$(yaml \"$2\")\"; }\n");
+    writeln!(
+        w,
+        "            dir=\"$tmpdir/\"{}\"/$VERSION\"; mkdir -p \"$dir\"",
+        q(manifest_dir)
+    )
+    .expect("write");
+    w.push_str("            sha=\"$(sha256sum \"release/${ZIP_NAME}\" | cut -d' ' -f1 | tr '[:lower:]' '[:upper:]')\"\n");
+    // version manifest
+    writeln!(w, "            {{ f PackageIdentifier {id}; f PackageVersion \"$VERSION\"; echo 'DefaultLocale: en-US'; echo 'ManifestType: version'; echo 'ManifestVersion: 1.10.0'; }} > {}", file("")).expect("write");
+    // installer manifest
+    writeln!(w, "            {{ f PackageIdentifier {id}; f PackageVersion \"$VERSION\"; echo 'InstallerType: zip'; echo 'NestedInstallerType: portable'; echo 'NestedInstallerFiles:'; printf '%s\\n' \"- RelativeFilePath: $(yaml {})\" \"  PortableCommandAlias: $(yaml {})\"; echo 'Installers:'; echo '- Architecture: x64'; printf '%s\\n' \"  InstallerUrl: $(yaml \"$ZIP_URL\")\" \"  InstallerSha256: $sha\"; echo 'ManifestType: installer'; echo 'ManifestVersion: 1.10.0'; }} > {}", q(&winget.binary), q(&winget.command), file("installer.")).expect("write");
+    // default-locale manifest
+    let mut locale = format!(
+        "f PackageIdentifier {id}; f PackageVersion \"$VERSION\"; echo 'PackageLocale: en-US'; f Publisher {}; f PackageName {}; f License {};",
+        q(&winget.publisher),
+        q(&winget.package_name),
+        q(license)
+    );
+    if let Some(url) = &winget.license_url {
+        write!(locale, " f LicenseUrl {};", q(url)).expect("write");
+    }
+    write!(locale, " f ShortDescription {};", q(description)).expect("write");
+    if let Some(url) = &winget.homepage {
+        write!(locale, " f PackageUrl {};", q(url)).expect("write");
+    }
+    writeln!(w, "            {{ {locale} echo 'ManifestType: defaultLocale'; echo 'ManifestVersion: 1.10.0'; }} > {}", file("locale.en-US.")).expect("write");
+    w.push_str("            wine \"$tmpdir/wingetcreate.exe\" submit \"$(winepath -w \"$dir\")\" --token \"$WINGET_PAT\"\n");
 }
 
 fn push_publish_chocolatey(
@@ -2836,6 +2918,7 @@ mod tests {
     fn chocolatey() -> ResolvedChocolatey {
         ResolvedChocolatey {
             tag_prefix: crate::release_identity::TagPrefix::None,
+            platform: Platform::Forgejo,
             name: "modde".to_owned(),
             id: "modde".to_owned(),
             title: "modde".to_owned(),
@@ -2890,12 +2973,20 @@ mod tests {
         }
     }
 
-    fn winget() -> WingetConfig {
-        WingetConfig {
+    fn winget() -> ResolvedWinget {
+        ResolvedWinget {
             package_id: "Caniko.Modde".to_owned(),
             download_repo: "caniko/rs-modde".to_owned(),
             zip_archive: "modde-{version}-x86_64-windows.zip".to_owned(),
             token_secret: "WINGET_PAT".to_owned(),
+            publisher: "Caniko".to_owned(),
+            package_name: "Modde".to_owned(),
+            license: Some("MIT".to_owned()),
+            license_url: None,
+            short_description: Some("Cross-platform game mod manager".to_owned()),
+            homepage: Some("https://modde.rs".to_owned()),
+            binary: "modde.exe".to_owned(),
+            command: "modde".to_owned(),
         }
     }
 
@@ -3770,6 +3861,127 @@ esac"#,
         );
 
         assert!(!render(&inputs(None)).contains("PyPI"));
+    }
+
+    fn sorrel_winget() -> ResolvedWinget {
+        ResolvedWinget {
+            package_id: "Caniko.Sorrel".to_owned(),
+            download_repo: "caniko/sorrel".to_owned(),
+            zip_archive: "sorrel-{version}-x86_64-windows.zip".to_owned(),
+            token_secret: "WINGET_PAT".to_owned(),
+            publisher: "Caniko".to_owned(),
+            package_name: "Sorrel".to_owned(),
+            license: Some("MIT OR Apache-2.0".to_owned()),
+            license_url: Some("https://github.com/caniko/sorrel/blob/trunk/LICENSE-MIT".to_owned()),
+            short_description: Some(
+                "Native GUI for curating spike-sorted electrophysiology data".to_owned(),
+            ),
+            homepage: None,
+            binary: "sorrel.exe".to_owned(),
+            command: "sorrel".to_owned(),
+        }
+    }
+
+    /// The `Publish winget manifest PR` step of a GitHub release workflow.
+    fn winget_step(winget: &ResolvedWinget, enforcement: ReleasePublisherEnforcement) -> String {
+        let artifacts = artifacts();
+        let publish = ReleasePublishConfig {
+            enforcement,
+            ..ReleasePublishConfig::default()
+        };
+        let workflow = render(&ReleaseWorkflowInputs {
+            platform: Platform::Github,
+            runner: "ubuntu-latest",
+            preinstalled_nix: false,
+            publish_enforcement: enforcement,
+            publish: &publish,
+            artifacts: &artifacts,
+            prebuild: None,
+            smoke_command: None,
+            release: None,
+            tag_prefix: crate::release_identity::TagPrefix::None,
+            notes_source: None,
+            required_gates: &[],
+            attic: None,
+            aur: None,
+            copr: None,
+            apt: None,
+            homebrew: None,
+            scoop: None,
+            chocolatey: None,
+            windows_signing: None,
+            flatpak: None,
+            winget: Some(winget),
+            announce: None,
+            pypi: None,
+        });
+        let start = workflow
+            .find("      - name: Publish winget manifest PR\n")
+            .expect("winget step");
+        let rest = &workflow[start + 1..];
+        let end = rest.find("\n      - name:").map_or(rest.len(), |i| i + 1);
+        workflow[start..start + 1 + end].to_owned()
+    }
+
+    #[test]
+    fn winget_first_submission_branches_on_state_and_writes_manifests() {
+        let winget = sorrel_winget();
+
+        let standalone = winget_step(&winget, ReleasePublisherEnforcement::default());
+        // Without activated-remote the branch comes from probing winget-pkgs.
+        assert!(standalone.contains("code=\"$(curl -sS -o /dev/null -w '%{http_code}'"));
+        assert!(standalone.contains("'https://api.github.com/repos/microsoft/winget-pkgs/contents/manifests/c/Caniko/Sorrel'"));
+        assert!(standalone.contains("404) state=inactive-soft"));
+        assert!(!standalone.contains("publisher_missing winget 'wingetcreate"));
+
+        let activated = winget_step(&winget, ReleasePublisherEnforcement::ActivatedRemote);
+        // Under activated-remote it reuses the probe result and warns on failure.
+        assert!(!activated.contains("contents/manifests/c/Caniko/Sorrel"));
+        assert!(
+            activated.contains("export ZIP_NAME ZIP_URL VERSION WINGET_PAT PUBLISH_WINGET_STATE")
+        );
+        assert!(activated.contains("state=\"${PUBLISH_WINGET_STATE:-}\""));
+        assert!(
+            activated.contains(
+                "<<'SCRIPT' || publisher_missing winget 'wingetcreate submission failed'"
+            )
+        );
+
+        for step in [&standalone, &activated] {
+            // Existing-package path stays an update.
+            assert!(step.contains("if [ \"$state\" = active-required ]; then"));
+            assert!(step.contains("wine \"$tmpdir/wingetcreate.exe\" update Caniko.Sorrel --version \"$VERSION\" --urls \"${ZIP_URL}|x64\" --token \"$WINGET_PAT\" --submit"));
+            // Bootstrap path.
+            assert!(step.contains("dir=\"$tmpdir/\"'manifests/c/Caniko/Sorrel'\"/$VERSION\""));
+            assert!(step.contains("sha256sum \"release/${ZIP_NAME}\""));
+            assert!(step.contains("tr '[:lower:]' '[:upper:]'"));
+            assert!(step.contains("f PackageIdentifier 'Caniko.Sorrel'"));
+            assert!(
+                step.contains("echo 'InstallerType: zip'; echo 'NestedInstallerType: portable'")
+            );
+            assert!(step.contains("\"- RelativeFilePath: $(yaml 'sorrel.exe')\" \"  PortableCommandAlias: $(yaml 'sorrel')\""));
+            assert!(step.contains("echo '- Architecture: x64'"));
+            assert!(step.contains("InstallerUrl: $(yaml \"$ZIP_URL\")"));
+            assert!(step.contains("InstallerSha256: $sha"));
+            assert!(step.contains("f Publisher 'Caniko'; f PackageName 'Sorrel'; f License 'MIT OR Apache-2.0'; f LicenseUrl 'https://github.com/caniko/sorrel/blob/trunk/LICENSE-MIT'; f ShortDescription 'Native GUI for curating spike-sorted electrophysiology data';"));
+            assert!(step.contains("> \"$dir\"/'Caniko.Sorrel'.yaml"));
+            assert!(step.contains("> \"$dir\"/'Caniko.Sorrel'.installer.yaml"));
+            assert!(step.contains("> \"$dir\"/'Caniko.Sorrel'.locale.en-US.yaml"));
+            assert!(step.contains("ManifestVersion: 1.10.0"));
+            assert!(step.contains("wine \"$tmpdir/wingetcreate.exe\" submit \"$(winepath -w \"$dir\")\" --token \"$WINGET_PAT\"\n"));
+        }
+    }
+
+    #[test]
+    fn winget_first_submission_needs_license_and_description() {
+        let winget = ResolvedWinget {
+            license: None,
+            ..sorrel_winget()
+        };
+        let step = winget_step(&winget, ReleasePublisherEnforcement::ActivatedRemote);
+        assert!(step.contains("set [winget].license and [winget].short_description"));
+        assert!(!step.contains("wingetcreate.exe\" submit"));
+        assert!(step.contains("wingetcreate.exe\" update Caniko.Sorrel"));
     }
 
     #[test]

@@ -264,6 +264,31 @@ pub struct WingetConfig {
     /// CI secret holding the GitHub PAT.
     #[serde(default = "default_winget_token_secret")]
     pub token_secret: String,
+    /// First-submission manifest `Publisher`; defaults to the `package_id`
+    /// segment before the first `.`.
+    #[serde(default)]
+    pub publisher: Option<String>,
+    /// First-submission manifest `PackageName`; defaults to the `package_id`
+    /// remainder after the first `.`.
+    #[serde(default)]
+    pub package_name: Option<String>,
+    /// SPDX or free-text `License`; defaults to Cargo `license`.
+    #[serde(default)]
+    pub license: Option<String>,
+    #[serde(default)]
+    pub license_url: Option<String>,
+    /// `ShortDescription`; defaults to Cargo `description`.
+    #[serde(default)]
+    pub short_description: Option<String>,
+    /// `PackageUrl`; defaults to Cargo `homepage`.
+    #[serde(default)]
+    pub homepage: Option<String>,
+    /// Path of the executable inside the zip; defaults to `<cargo name>.exe`.
+    #[serde(default)]
+    pub binary: Option<String>,
+    /// Portable command alias; defaults to the Cargo package name.
+    #[serde(default)]
+    pub command: Option<String>,
 }
 
 fn default_winget_token_secret() -> String {
@@ -2394,6 +2419,8 @@ pub struct HomebrewOverrides<'a> {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ResolvedChocolatey {
     pub tag_prefix: crate::release_identity::TagPrefix,
+    /// Release host the archives are downloaded from.
+    pub platform: Platform,
     pub name: String,
     pub id: String,
     pub title: String,
@@ -2416,6 +2443,24 @@ pub struct ResolvedChocolatey {
     pub api_key_env: String,
     pub api_key_secret: String,
     pub api_key_from_runner: bool,
+}
+
+/// `[winget]` with Cargo-metadata fallbacks applied, for the first-submission
+/// (`wingetcreate submit`) manifests.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResolvedWinget {
+    pub package_id: String,
+    pub download_repo: String,
+    pub zip_archive: String,
+    pub token_secret: String,
+    pub publisher: String,
+    pub package_name: String,
+    pub license: Option<String>,
+    pub license_url: Option<String>,
+    pub short_description: Option<String>,
+    pub homepage: Option<String>,
+    pub binary: String,
+    pub command: String,
 }
 
 #[derive(Debug, Clone, Copy, Default)]
@@ -3331,6 +3376,62 @@ impl ProjectConfig {
         })
     }
 
+    /// Resolve winget settings for one Cargo package. `license` and
+    /// `short_description` stay optional so update-only projects keep rendering;
+    /// the first-submission step reports them when they are missing.
+    pub fn resolve_winget(&self, package: &crate::cargo::Package) -> Result<ResolvedWinget> {
+        let cfg = self
+            .winget
+            .as_ref()
+            .context("simit project config: [winget] is not configured")?;
+        let (id_publisher, id_name) = cfg
+            .package_id
+            .split_once('.')
+            .unwrap_or((&cfg.package_id, &cfg.package_id));
+        let resolved = ResolvedWinget {
+            package_id: cfg.package_id.clone(),
+            download_repo: cfg.download_repo.clone(),
+            zip_archive: cfg.zip_archive.clone(),
+            token_secret: cfg.token_secret.clone(),
+            publisher: cfg
+                .publisher
+                .clone()
+                .unwrap_or_else(|| id_publisher.to_owned()),
+            package_name: cfg
+                .package_name
+                .clone()
+                .unwrap_or_else(|| id_name.to_owned()),
+            license: cfg.license.clone().or_else(|| package.license.clone()),
+            license_url: cfg.license_url.clone(),
+            short_description: cfg
+                .short_description
+                .clone()
+                .or_else(|| package.description.clone()),
+            homepage: cfg.homepage.clone().or_else(|| package.homepage.clone()),
+            binary: cfg
+                .binary
+                .clone()
+                .unwrap_or_else(|| format!("{}.exe", package.name)),
+            command: cfg.command.clone().unwrap_or_else(|| package.name.clone()),
+        };
+        // The values are written into single-line YAML scalars by the release step.
+        for (field, value) in [
+            ("publisher", Some(&resolved.publisher)),
+            ("package_name", Some(&resolved.package_name)),
+            ("license", resolved.license.as_ref()),
+            ("license_url", resolved.license_url.as_ref()),
+            ("short_description", resolved.short_description.as_ref()),
+            ("homepage", resolved.homepage.as_ref()),
+            ("binary", Some(&resolved.binary)),
+            ("command", Some(&resolved.command)),
+        ] {
+            if value.is_some_and(|value| value.contains(['\n', '\r'])) {
+                bail!("simit project config: [winget].{field} must be a single line");
+            }
+        }
+        Ok(resolved)
+    }
+
     /// Resolve Chocolatey settings for one Cargo package.
     pub fn resolve_chocolatey(
         &self,
@@ -3438,6 +3539,7 @@ impl ProjectConfig {
 
         Ok(ResolvedChocolatey {
             tag_prefix: self.release.tag_prefix,
+            platform: crate::ci_resolution::release_backend(self, None, None)?.platform(),
             name,
             id,
             title,

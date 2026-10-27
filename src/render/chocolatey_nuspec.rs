@@ -205,11 +205,10 @@ pub fn archive_file_name(
 }
 
 pub fn archive_url(resolved: &ResolvedChocolatey, version: &str, arch: Architecture) -> String {
-    format!(
-        "https://codeberg.org/{}/releases/download/{}{version}/{}",
-        resolved.download_repo,
-        resolved.tag_prefix.as_str(),
-        archive_file_name(resolved, version, arch)
+    resolved.platform.release_download_url(
+        &resolved.download_repo,
+        &format!("{}{version}", resolved.tag_prefix.as_str()),
+        &archive_file_name(resolved, version, arch),
     )
 }
 

@@ -6,7 +6,7 @@ use crate::cli::Platform;
 use crate::config::{
     AptOverrides, AurOverrides, ChocolateyOverrides, CoprOverrides, HomebrewOverrides,
     ProjectConfig, ResolvedApt, ResolvedAur, ResolvedChocolatey, ResolvedCopr, ResolvedHomebrew,
-    ResolvedScoop, ScoopOverrides,
+    ResolvedScoop, ResolvedWinget, ScoopOverrides,
 };
 
 /// Shared helper for `release` + `release verify`: parse the selected
@@ -82,6 +82,7 @@ pub struct ReleasePlatformTargets {
     pub homebrew: Option<ResolvedHomebrew>,
     pub scoop: Option<ResolvedScoop>,
     pub chocolatey: Option<ResolvedChocolatey>,
+    pub winget: Option<ResolvedWinget>,
 }
 
 pub fn resolve_release_platform_targets(
@@ -119,6 +120,11 @@ pub fn resolve_release_platform_targets(
         .as_ref()
         .map(|_| cfg.resolve_chocolatey(ChocolateyOverrides::default(), package))
         .transpose()?;
+    let winget = cfg
+        .winget
+        .as_ref()
+        .map(|_| cfg.resolve_winget(package))
+        .transpose()?;
     Ok(ReleasePlatformTargets {
         aur,
         copr,
@@ -126,6 +132,7 @@ pub fn resolve_release_platform_targets(
         homebrew,
         scoop,
         chocolatey,
+        winget,
     })
 }
 

@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- `[winget]` can make the first submission of a package: when it is not in
+  `microsoft/winget-pkgs` yet, the release step writes the ManifestVersion
+  1.10.0 version, installer (zip with a nested portable executable and
+  uppercase SHA-256) and default-locale manifests and runs
+  `wingetcreate submit`; existing packages keep `wingetcreate update`. New
+  optional `publisher`, `package_name`, `license`, `license_url`,
+  `short_description`, `homepage`, `binary` and `command` fields default from
+  the package id and Cargo metadata. Under `activated-remote` a failed first
+  submission warns until the channel is active.
+- Fixed: Chocolatey package install URLs always pointed at codeberg.org. They
+  now follow the release host (`[release.github]` gives github.com, Codeberg
+  and Forgejo configs keep codeberg.org).
 - Add `[release.pypi]`: the release workflow uploads the prebuilt
   `release/*.whl` (e.g. from a Nix `release-bundle`) to PyPI with
   `uv publish --check-url` after the hosted release, using PyPI trusted
