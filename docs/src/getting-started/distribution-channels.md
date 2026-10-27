@@ -154,6 +154,13 @@ The public distribution and release sections are `[aur]`, `[copr]`, `[apt]`,
 `[release.changelog]`, `[release.announce]`, `[release.windows_signing]`, and
 `[release.pypi]`.
 
+`[winget]` also bootstraps: when the package is not yet in `microsoft/winget-pkgs`
+the release step writes the version, installer and default-locale manifests and
+runs `wingetcreate submit` instead of `update`. The optional `publisher`,
+`package_name`, `license`, `license_url`, `short_description`, `homepage`,
+`binary` and `command` fields and their Cargo-metadata defaults are listed in
+[Windows Packaging](windows-packaging.md#winget).
+
 ## Release Secrets
 
 ### Binary-only releases and tag conventions

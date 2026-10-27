@@ -126,7 +126,7 @@ pub(crate) fn project_credentials(
         chocolatey: targets.chocolatey.as_ref(),
         windows_signing: cfg.release.windows_signing.as_ref(),
         flatpak: cfg.flatpak.as_ref(),
-        winget: cfg.winget.as_ref(),
+        winget: targets.winget.as_ref(),
         announce: cfg.release.announce.as_ref(),
         pypi: cfg.release.pypi.as_ref(),
     };
