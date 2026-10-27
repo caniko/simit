@@ -2116,6 +2116,56 @@ check_push_secret = "ATTIC_TOKEN"
 }
 
 #[test]
+fn crow_check_secret_reaches_every_event_in_one_gate() {
+    let temp = init_package(true);
+    let config = temp.path().join("simit.toml");
+    fs::write(
+        &config,
+        r#"[ci]
+provider = "crow"
+platform = "forgejo"
+runtime = "nix"
+
+[ci.crow]
+check_command = "nix develop -c cargo run -p demo-ci -- ci"
+check_secret = "ATTIC_TOKEN"
+"#,
+    )
+    .unwrap();
+    assert!(
+        simit()
+            .current_dir(temp.path())
+            .args(["init", "ci"])
+            .status()
+            .unwrap()
+            .success()
+    );
+    let workflow = fs::read_to_string(temp.path().join(".crow/build.yaml")).unwrap();
+    let yaml: serde_yaml::Value = serde_yaml::from_str(&workflow).unwrap();
+    let steps = yaml["steps"].as_sequence().unwrap();
+    assert_eq!(steps.len(), 2, "Nix setup and one event-agnostic gate");
+    let gate = &steps[1];
+    assert_eq!(gate["name"], "project-check");
+    assert_eq!(
+        gate["environment"]["ATTIC_TOKEN"]["from_secret"],
+        "ATTIC_TOKEN"
+    );
+    assert!(gate.get("when").is_none(), "the gate runs on every event");
+    assert!(steps[0]["environment"].get("ATTIC_TOKEN").is_none());
+
+    let mut both = fs::read_to_string(&config).unwrap();
+    both.push_str("check_push_secret = \"ATTIC_TOKEN\"\n");
+    fs::write(&config, both).unwrap();
+    let output = simit()
+        .current_dir(temp.path())
+        .args(["init", "ci", "--check"])
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("mutually exclusive"));
+}
+
+#[test]
 fn crow_check_push_secret_requires_a_gate_and_cannot_also_be_global() {
     let temp = init_package(true);
     let config = temp.path().join("simit.toml");

@@ -17,6 +17,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Superseded completions no longer each queue an identity runner: on simit,
   about 50 queued custody runs per trunk commit had starved the account's
   Actions queue. Sealed custody is unchanged.
+- Add `[ci.crow].check_secret`: a Crow secret given to a single
+  `check_command` gate on push and pull_request events, for read-only
+  credentials such as a private cache pull token. It excludes
+  `check_push_secret`, which keeps the secret off pull requests.
 - Add `[release.pypi]`: the release workflow uploads the prebuilt
   `release/*.whl` (e.g. from a Nix `release-bundle`) to PyPI with
   `uv publish --check-url` after the hosted release, using PyPI trusted

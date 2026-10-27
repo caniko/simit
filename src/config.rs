@@ -1210,6 +1210,10 @@ pub struct CrowCiConfig {
     /// Crow secret available only to the push-event copy of `check_command`.
     /// Pull requests run the same gate without receiving this secret.
     pub check_push_secret: Option<String>,
+    /// Crow secret available to `check_command` on every event, including pull
+    /// requests. For read-only credentials such as a private cache pull token;
+    /// excludes `check_push_secret`.
+    pub check_secret: Option<String>,
     pub platform: Option<String>,
     pub labels: BTreeMap<String, String>,
     pub workspace_base: Option<String>,
@@ -1234,6 +1238,7 @@ impl Default for CrowCiConfig {
             nix_image: None,
             check_command: None,
             check_push_secret: None,
+            check_secret: None,
             platform: None,
             labels: BTreeMap::new(),
             workspace_base: None,
@@ -2861,14 +2866,23 @@ impl ProjectConfig {
                 "simit project config: [ci.crow].check_command must be a non-empty single-line command"
             );
         }
-        if let Some(secret) = &self.ci.crow.check_push_secret {
-            validate_secret_name("simit project config: [ci.crow].check_push_secret", secret)?;
+        if self.ci.crow.check_push_secret.is_some() && self.ci.crow.check_secret.is_some() {
+            bail!(
+                "simit project config: [ci.crow].check_secret and check_push_secret are mutually exclusive"
+            );
+        }
+        for (key, secret) in [
+            ("check_push_secret", &self.ci.crow.check_push_secret),
+            ("check_secret", &self.ci.crow.check_secret),
+        ] {
+            let Some(secret) = secret else { continue };
+            validate_secret_name(&format!("simit project config: [ci.crow].{key}"), secret)?;
             if self.ci.crow.check_command.is_none() {
-                bail!("simit project config: [ci.crow].check_push_secret requires check_command");
+                bail!("simit project config: [ci.crow].{key} requires check_command");
             }
             if self.ci.required_secrets.contains(secret) {
                 bail!(
-                    "simit project config: [ci.crow].check_push_secret must not also be a global required_secret"
+                    "simit project config: [ci.crow].{key} must not also be a global required_secret"
                 );
             }
         }
@@ -4678,6 +4692,11 @@ fn set_crow_table(table: &mut Table, crow: &CrowCiConfig) {
         &mut crow_table,
         "check_push_secret",
         crow.check_push_secret.as_deref(),
+    );
+    set_optional_string(
+        &mut crow_table,
+        "check_secret",
+        crow.check_secret.as_deref(),
     );
     if let Some(platform) = &crow.platform {
         crow_table["platform"] = value(platform.as_str());
