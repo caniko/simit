@@ -486,6 +486,15 @@ fn release_plan_only_maintains_an_existing_generated_workflow() {
         serde_json::json!([".github/workflows/release.yaml"])
     );
     assert!(!root.join(".github/workflows/release.yml").exists());
+    // A hand-written destination is preserved even though the marked source
+    // workflow is obsolete.
+    fs::write(
+        root.join(".github/workflows/release.yml"),
+        "name: hand-written\n",
+    )
+    .unwrap();
+    assert_eq!(plan(), empty);
+    fs::remove_file(root.join(".github/workflows/release.yml")).unwrap();
 
     // With two release targets and no [ci].platform, the default backend must
     // not silently move the existing GitHub release workflow to Forgejo.
