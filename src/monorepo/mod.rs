@@ -221,6 +221,14 @@ impl Config {
         {
             validate_relative_path(path)?;
         }
+        for ignored in &self.ignore_paths {
+            for module in &self.formatter_modules {
+                ensure!(
+                    !covers(ignored, module) && !covers(module, ignored),
+                    "ignore path {ignored} overlaps formatter module {module}"
+                );
+            }
+        }
         self.graph(None)?.validate_ownership()
     }
 
