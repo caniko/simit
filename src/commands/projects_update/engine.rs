@@ -248,12 +248,16 @@ pub fn policy_digest(
     canonical_digest(&(scoped, workspace, generator, consumer))
 }
 
+fn is_legacy(version: &u32) -> bool {
+    *version == 0
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct Receipt {
     /// Absent (0) in v1 receipts, which always landed directly. Older binaries
     /// reject v2 fields as unknown rather than misreading a pull request.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "is_legacy")]
     pub schema_version: u32,
     pub coordinate: String,
     pub config_digest: String,
@@ -3881,6 +3885,9 @@ else:
         let adopted = f.update(true).unwrap();
         assert_eq!(adopted.phase, "qualified");
         assert_eq!(adopted.schema_version, 0);
+        // Resaving a v1 receipt must not add fields an older binary rejects.
+        let resaved: serde_json::Value = crate::review::read_json(&path).unwrap();
+        assert!(resaved.get("schemaVersion").is_none());
         assert_eq!(adopted.candidate, pending.candidate);
         assert_eq!(adopted.landed, None);
         assert_eq!(f.remote_head(), pending.candidate);
