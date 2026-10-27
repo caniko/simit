@@ -57,7 +57,10 @@ pub(super) fn install_nix(node24: bool, cache: Option<&NixCiCacheConfig>) -> Val
     {
         let mut config = "experimental-features = nix-command flakes\n".to_owned();
         if !cache.substituters.is_empty() {
-            config.push_str(&format!("substituters = {}\n", cache.substituters.join(" ")));
+            config.push_str(&format!(
+                "substituters = {}\n",
+                cache.substituters.join(" ")
+            ));
         }
         if !cache.trusted_public_keys.is_empty() {
             config.push_str(&format!(
@@ -165,7 +168,13 @@ pub(crate) fn files(
     // Evaluated policy retains native worker validation; static policy has one owner.
     let evaluated_policy =
         flake_path.is_file() && crate::config::flake_declares_simit_config(&flake_path)?;
-    let cache = config.ci.cache.as_ref();
+    // Same default as single-project CI: [ci.cache], else release artifact caches.
+    let artifacts = config.ci_cache_artifacts();
+    let cache = NixCiCacheConfig {
+        substituters: artifacts.substituters,
+        trusted_public_keys: artifacts.trusted_public_keys,
+    };
+    let cache = Some(&cache);
     let mut plan_steps = vec![
         checkout(node24),
         install_nix(node24, cache),
@@ -197,7 +206,10 @@ pub(crate) fn files(
         Default::default();
     for id in &graph.order {
         let component = &graph.components[id];
-        groups.entry(component.job_id()).or_default().push(component);
+        groups
+            .entry(component.job_id())
+            .or_default()
+            .push(component);
     }
     let selected = |id: &str| format!("contains(fromJSON(needs.plan.outputs.selected), '{id}')");
     for (job_id, members) in &groups {
@@ -332,12 +344,17 @@ pub(crate) fn files(
             .map(|c| (c.id.clone(), json!(c.job_id())))
             .collect();
         require["env"]["OWNERS"] = json!(serde_json::to_string(&owners)?);
-        require["run"] = json!("printf '%s' \"$RESULTS\" | jq -e --argjson selected \"$SELECTED\" --argjson owners \"$OWNERS\" '. as $jobs | $jobs.plan.result == \"success\" and all($selected[]; $jobs[\"component-\" + $owners[.]].result == \"success\")'");
+        require["run"] = json!(
+            "printf '%s' \"$RESULTS\" | jq -e --argjson selected \"$SELECTED\" --argjson owners \"$OWNERS\" '. as $jobs | $jobs.plan.result == \"success\" and all($selected[]; $jobs[\"component-\" + $owners[.]].result == \"success\")'"
+        );
     }
-    jobs.insert("qualified".into(), json!({
-        "needs": needs, "if": "${{ always() }}", "runs-on": runner, "timeout-minutes": 5,
-        "steps": [require]
-    }));
+    jobs.insert(
+        "qualified".into(),
+        json!({
+            "needs": needs, "if": "${{ always() }}", "runs-on": runner, "timeout-minutes": 5,
+            "steps": [require]
+        }),
+    );
     let branches = if config.ci.push_branches.is_empty() {
         vec!["**".to_owned()]
     } else {

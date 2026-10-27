@@ -221,18 +221,6 @@ impl Config {
         {
             validate_relative_path(path)?;
         }
-        for ignored in &self.ignore_paths {
-            for path in self
-                .shared_paths
-                .iter()
-                .chain(self.components.iter().flat_map(|c| &c.paths))
-            {
-                ensure!(
-                    !covers(ignored, path) && !covers(path, ignored),
-                    "ignore path {ignored} overlaps owned or shared path {path}"
-                );
-            }
-        }
         self.graph(None)?.validate_ownership()
     }
 
@@ -451,6 +439,19 @@ impl Config {
 
 impl Graph {
     fn validate_ownership(&self) -> Result<()> {
+        // Checked on the resolved graph so Cargo-inferred member directories count.
+        for ignored in &self.ignore_paths {
+            for path in self
+                .shared_paths
+                .iter()
+                .chain(self.components.values().flat_map(|c| &c.paths))
+            {
+                ensure!(
+                    !covers(ignored, path) && !covers(path, ignored),
+                    "ignore path {ignored} overlaps owned or shared path {path}"
+                );
+            }
+        }
         let mut paths: Vec<(&str, &str)> = Vec::new();
         for component in self.components.values() {
             for path in &component.paths {

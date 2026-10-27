@@ -2983,13 +2983,15 @@ fn grouped_components_share_one_job_with_member_guards_and_ci_cache() {
             .any(|step| step["name"] == "test" && step.get("if").is_none())
     );
     let qualified = &yaml["jobs"]["qualified"]["steps"][0];
-    let owners: Value =
-        serde_json::from_str(qualified["env"]["OWNERS"].as_str().unwrap()).unwrap();
+    let owners: Value = serde_json::from_str(qualified["env"]["OWNERS"].as_str().unwrap()).unwrap();
     assert_eq!(owners["worker"], "cargo");
     assert_eq!(owners["core"], "core");
     assert!(qualified["run"].as_str().unwrap().contains("$owners[.]"));
     // plan + core + cargo + python
-    assert_eq!(text.matches("substituters = https://cache.example").count(), 4);
+    assert_eq!(
+        text.matches("substituters = https://cache.example").count(),
+        4
+    );
     // An ignored path selects nothing; ownership overlaps are rejected.
     let output = plan(temp.path(), &["docs/guide.md"]);
     assert!(output.status.success(), "{output:?}");
@@ -3011,10 +3013,57 @@ fn grouped_components_must_share_native_systems() {
     let temp = fixture();
     let config = fs::read_to_string(temp.path().join("simit.toml"))
         .unwrap()
-        .replace("id = \"rust\"", "id = \"rust\"\njob = \"cargo\"\nsystems = [\"x86_64-linux\"]")
+        .replace(
+            "id = \"rust\"",
+            "id = \"rust\"\njob = \"cargo\"\nsystems = [\"x86_64-linux\"]",
+        )
         .replace("id = \"worker\"", "id = \"worker\"\njob = \"cargo\"");
     write(temp.path(), "simit.toml", &config);
     let output = plan(temp.path(), &["python/server.py"]);
     assert!(!output.status.success());
     assert!(String::from_utf8_lossy(&output.stderr).contains("must declare the same systems"));
+}
+
+#[test]
+fn ignore_paths_are_checked_against_cargo_inferred_ownership() {
+    let temp = fixture();
+    let config = fs::read_to_string(temp.path().join("simit.toml")).unwrap();
+    // `worker` owns only Cargo package `worker`, so crates/worker is inferred.
+    write(
+        temp.path(),
+        "simit.toml",
+        &config.replace(
+            "schema_version = 1",
+            "schema_version = 1\nignore_paths = [\"crates\"]",
+        ),
+    );
+    let output = plan(temp.path(), &["crates/worker/src/lib.rs"]);
+    assert!(!output.status.success(), "{output:?}");
+    assert!(String::from_utf8_lossy(&output.stderr).contains("overlaps owned or shared path"));
+}
+
+#[test]
+fn monorepo_ci_defaults_to_release_artifact_caches() {
+    let temp = fixture();
+    let config = fs::read_to_string(temp.path().join("simit.toml")).unwrap();
+    write(
+        temp.path(),
+        "simit.toml",
+        &format!(
+            "{config}\n[release.artifacts]\nsubstituters = [\"https://release.example\"]\ntrusted_public_keys = [\"release:key\"]\n"
+        ),
+    );
+    enroll_release_checks(temp.path());
+    write(temp.path(), "flake.nix", "{}\n");
+    let output = common::simit()
+        .current_dir(temp.path())
+        .args(["init", "ci"])
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{output:?}");
+    let text = fs::read_to_string(temp.path().join(".github/workflows/ci.yaml")).unwrap();
+    assert!(
+        text.contains("substituters = https://release.example"),
+        "{text}"
+    );
 }
