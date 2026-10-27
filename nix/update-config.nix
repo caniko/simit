@@ -68,7 +68,7 @@
     && builtins.length (lib.unique profile.scopes) == builtins.length profile.scopes
     && (profile.migrate
       == null
-      || ((profile.migrate.provider != "crow" || profile.migrate.platform == "forgejo")
+      || (((profile.migrate.provider == "actions" && profile.migrate.platform == "github") || (profile.migrate.provider == "crow" && profile.migrate.platform == "forgejo"))
         && lib.elem "ci-extra" profile.scopes
         && !(lib.elem "readme" profile.scopes)))
     && profile.select.coordinates != []

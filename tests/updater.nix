@@ -174,6 +174,10 @@ in
     }
     {
       scopes = ["ci" "ci-extra"];
+      migrate = migration // {platform = "forgejo";};
+    }
+    {
+      scopes = ["ci" "ci-extra"];
       migrate = migration // {platform = "gitlab";};
     }
     {
