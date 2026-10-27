@@ -3,12 +3,7 @@ name: Qualify publisher boundary
 
 on:
   push:
-    branches:
-      [
-        fix/trusted-publisher-boundary,
-        migrate/harbor-monorepo-reconcile-20261012-current,
-        fix/monorepo-nix-diagnostics-20261014,
-      ]
+    branches: ["trunk"]
   pull_request:
 
 permissions:
@@ -19,7 +14,7 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  qualify:
+  publisher-boundary:
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     env:
