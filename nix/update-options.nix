@@ -100,7 +100,7 @@ in {
           };
         };
       }) {};
-      scopes = option (types.listOf (types.enum ["ci"])) ["ci"];
+      scopes = option (types.listOf (types.enum ["ci" "ci-extra" "release" "flake" "readme"])) ["ci"];
       enrollCurrent = option types.bool false;
       requiredChecks = option requirements [];
       landing = mkOption {

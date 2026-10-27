@@ -430,9 +430,14 @@ impl Config {
                 self.workspaces.contains_key(&profile.workspace),
                 "unknown workspace"
             );
+            let scopes = profile.scopes.iter().collect::<BTreeSet<_>>();
             ensure!(
-                profile.scopes == ["ci"],
-                "only primary CI scope is supported"
+                scopes.len() == profile.scopes.len()
+                    && scopes
+                        .iter()
+                        .all(|scope| super::SUPPORTED_SCOPES.contains(&scope.as_str()))
+                    && scopes.contains(&"ci".to_owned()),
+                "profile scopes must be unique, supported and include ci (ci-extra extends it)"
             );
             ensure!(
                 !profile.select.coordinates.is_empty(),
@@ -695,6 +700,56 @@ mod tests {
         );
         cfg.forges.get_mut("weaker").unwrap().host = "other.example".into();
         cfg.validate().unwrap();
+    }
+
+    #[test]
+    fn scopes_are_unique_supported_and_always_include_ci() {
+        for scopes in [
+            &[][..],
+            &["ci-extra"],
+            &["release", "readme"],
+            &["ci", "ci"],
+            &["ci", "lock"],
+        ] {
+            let mut cfg = config();
+            cfg.profiles.get_mut("fleet").unwrap().scopes =
+                scopes.iter().map(|scope| scope.to_string()).collect();
+            assert!(cfg.validate().is_err(), "{scopes:?}");
+        }
+        let mut cfg = config();
+        cfg.profiles.get_mut("fleet").unwrap().scopes = super::super::SUPPORTED_SCOPES
+            .iter()
+            .rev()
+            .map(|scope| scope.to_string())
+            .collect();
+        cfg.validate().unwrap();
+    }
+
+    #[test]
+    fn plan_patches_derive_protocol_version_two() {
+        let mut request: AdapterRequest = serde_json::from_value(serde_json::json!({
+            "schemaVersion":1, "operation":"admit", "coordinate":"forge.example/team/demo",
+            "apiUrl":"https://forge.example/api", "authority":"777", "revision":"a".repeat(40),
+            "branch":"maintenance/candidate", "workflows":[], "requiredChecks":[],
+            "plan":{"schema":"simit.ci-update-plan.v2","files":[],"obsolete":[],
+                "patches":[{"relative_path":"README.md","content":"# demo\n"}]}
+        }))
+        .unwrap();
+        assert!(request.validate().is_err());
+        request.schema_version = 2;
+        request.validate().unwrap();
+        request.plan.as_mut().unwrap().schema = "simit.ci-update-plan.v1".into();
+        assert!(request.validate().is_err());
+        request.plan.as_mut().unwrap().schema = "simit.ci-update-plan.v2".into();
+        let mut response: AdapterResponse = serde_json::from_value(serde_json::json!({
+            "schemaVersion":1,"coordinate":request.coordinate,"repositoryId":"42","defaultBranch":"trunk",
+            "revision":request.revision,"remote":"https://forge.example/team/demo.git","policyDigest":"b".repeat(64),
+            "requirements":[],"status":"pending","checks":[]
+        }))
+        .unwrap();
+        assert!(response.validate(&request).is_err());
+        response.schema_version = 2;
+        response.validate(&request).unwrap();
     }
 
     #[test]
@@ -1438,7 +1493,7 @@ impl AdapterRequest {
             || self
                 .plan
                 .as_ref()
-                .is_some_and(|plan| plan.schema == "simit.ci-update-plan.v2")
+                .is_some_and(|plan| plan.schema == "simit.ci-update-plan.v2" || !plan.patches.is_empty())
         {
             2
         } else {
@@ -1497,7 +1552,7 @@ impl AdapterRequest {
                     && self
                         .plan
                         .as_ref()
-                        .is_some_and(|p| p.schema == "simit.ci-update-plan.v1"),
+                        .is_some_and(crate::project::CiUpdatePlan::schema_matches),
                 "admission needs exact candidate bytes and branch"
             );
         } else {

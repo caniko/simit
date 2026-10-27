@@ -60,14 +60,20 @@ pub fn run(command: InitCiCommand) -> Result<()> {
         && !command.pages_only
     {
         let config = crate::monorepo::ci::resolve_config(&root, &command)?;
-        let files = crate::monorepo::ci::files(&root, &config, !command.primary_only)?;
+        let files =
+            crate::monorepo::ci::files(&root, &config, !command.primary_only, !command.plan_json)?;
         reconcile_ci_files(
             &root,
             files,
             "Monorepo CI drift; run simit init ci",
             &command,
+            Some(&config.ci),
         )?;
-        if !command.check && !command.primary_only && ProjectConfig::can_persist_ci(&root)? {
+        if !command.check
+            && !command.primary_only
+            && !command.plan_json
+            && ProjectConfig::can_persist_ci(&root)?
+        {
             ProjectConfig::write_ci(&root, &config.ci)?;
         }
         return Ok(());
@@ -574,24 +580,34 @@ pub fn run(command: InitCiCommand) -> Result<()> {
         &mut files,
     );
     if (publish_crates || with_artifacts) && !command.primary_only {
-        files.push(release_trust::generated_file(
-            workspace_root,
-            &cfg,
-            &trust_overrides,
-            command.check,
-        )?);
+        if command.plan_json {
+            release_trust::require_committed(workspace_root, &cfg, &trust_overrides)?;
+        } else {
+            files.push(release_trust::generated_file(
+                workspace_root,
+                &cfg,
+                &trust_overrides,
+                command.check,
+            )?);
+        }
     }
 
     if command.check {
-        reconcile_ci_files(workspace_root, files, &check_message, &command)?;
+        reconcile_ci_files(workspace_root, files, &check_message, &command, None)?;
         if command.primary_only {
             Ok(())
         } else {
             upgrade::update_readme_badges_if_present(workspace_root, true, command.diff)
         }
     } else {
-        reconcile_ci_files(workspace_root, files, &check_message, &command)?;
-        if command.primary_only {
+        reconcile_ci_files(
+            workspace_root,
+            files,
+            &check_message,
+            &command,
+            Some(&persisted_ci),
+        )?;
+        if command.primary_only || command.plan_json {
             return Ok(());
         }
         if ProjectConfig::can_persist_ci(workspace_root)? {
@@ -1164,15 +1180,20 @@ fn run_nix_only_at(command: InitCiCommand, workspace_root: &Path) -> Result<()> 
             platform,
             &ResolvedRunner::literal(&runner)?,
         )?);
-        files.push(release_trust::generated_file(
-            workspace_root,
-            &cfg,
-            &TrustOverrides {
-                key: command.maintainer_key.clone(),
-                trust_root: command.maintainers_gpg.clone(),
-            },
-            command.check,
-        )?);
+        let overrides = TrustOverrides {
+            key: command.maintainer_key.clone(),
+            trust_root: command.maintainers_gpg.clone(),
+        };
+        if command.plan_json {
+            release_trust::require_committed(workspace_root, &cfg, &overrides)?;
+        } else {
+            files.push(release_trust::generated_file(
+                workspace_root,
+                &cfg,
+                &overrides,
+                command.check,
+            )?);
+        }
     }
     files.extend(prebuild_files(&cfg, cfg.ci.crow.format)?);
     if let Some(pages) = &pages {
@@ -1196,11 +1217,9 @@ fn run_nix_only_at(command: InitCiCommand, workspace_root: &Path) -> Result<()> 
     };
     // --check reconciles exactly like a write, so it also reports the stale generated
     // workflows a write would remove (e.g. a GitHub matrix after moving to GitLab).
-    reconcile_ci_files(workspace_root, files, &message, &command)?;
-    if !command.check {
-        if command.primary_only {
-            return Ok(());
-        }
+    let persisted_ci = if command.check || command.primary_only {
+        None
+    } else {
         let mut persisted_ci = cfg.ci;
         persisted_ci.provider = Some(CiProvider::Actions);
         persisted_ci.platform = Some(platform);
@@ -1209,6 +1228,16 @@ fn run_nix_only_at(command: InitCiCommand, workspace_root: &Path) -> Result<()> 
         if command.with_codeberg_pages {
             persisted_ci.pages = Some(codeberg_pages_config(&pages)?);
         }
+        Some(persisted_ci)
+    };
+    reconcile_ci_files(
+        workspace_root,
+        files,
+        &message,
+        &command,
+        persisted_ci.as_ref(),
+    )?;
+    if let Some(persisted_ci) = persisted_ci.filter(|_| !command.plan_json) {
         if ProjectConfig::can_persist_ci(workspace_root)? {
             ProjectConfig::write_ci(workspace_root, &persisted_ci)?;
         }
@@ -1410,15 +1439,21 @@ fn run_python(command: InitCiCommand) -> Result<()> {
     );
 
     if command.check {
-        reconcile_ci_files(workspace_root, files, &check_message, &command)?;
+        reconcile_ci_files(workspace_root, files, &check_message, &command, None)?;
         if command.primary_only {
             Ok(())
         } else {
             upgrade::update_readme_badges_if_present(workspace_root, true, command.diff)
         }
     } else {
-        reconcile_ci_files(workspace_root, files, &check_message, &command)?;
-        if command.primary_only {
+        reconcile_ci_files(
+            workspace_root,
+            files,
+            &check_message,
+            &command,
+            Some(&persisted_ci),
+        )?;
+        if command.primary_only || command.plan_json {
             return Ok(());
         }
         if ProjectConfig::can_persist_ci(workspace_root)? {
@@ -1606,11 +1641,17 @@ fn run_crow(
         )
     );
     if command.check {
-        reconcile_ci_files(workspace_root, files, &check_message, &command)?;
+        reconcile_ci_files(workspace_root, files, &check_message, &command, None)?;
         Ok(())
     } else {
-        reconcile_ci_files(workspace_root, files, "Crow CI workflows", &command)?;
-        if command.primary_only {
+        reconcile_ci_files(
+            workspace_root,
+            files,
+            "Crow CI workflows",
+            &command,
+            Some(&persisted_ci),
+        )?;
+        if command.primary_only || command.plan_json {
             return Ok(());
         }
         if ProjectConfig::can_persist_ci(workspace_root)? {
@@ -1698,10 +1739,16 @@ fn run_crow_python(
         )
     );
     if command.check {
-        reconcile_ci_files(workspace_root, files, &check_message, &command)?;
+        reconcile_ci_files(workspace_root, files, &check_message, &command, None)?;
     } else {
-        reconcile_ci_files(workspace_root, files, "Crow Python CI workflows", &command)?;
-        if command.primary_only {
+        reconcile_ci_files(
+            workspace_root,
+            files,
+            "Crow Python CI workflows",
+            &command,
+            Some(&persisted_ci),
+        )?;
+        if command.primary_only || command.plan_json {
             return Ok(());
         }
         if ProjectConfig::can_persist_ci(workspace_root)? {
@@ -2448,11 +2495,14 @@ fn maybe_push_deny_template(
     });
 }
 
+/// `persisted` is the `[ci]` table a write would persist; plan mode emits it as
+/// a patch instead, so a plan never writes project config.
 fn reconcile_ci_files(
     workspace_root: &Path,
     mut files: Vec<project::GeneratedFile>,
     message: &str,
     command: &InitCiCommand,
+    persisted: Option<&crate::config::CiConfig>,
 ) -> Result<()> {
     let config = ProjectConfig::load(workspace_root)?;
     if command.primary_only {
@@ -2472,15 +2522,7 @@ fn reconcile_ci_files(
             }
         }
         if command.plan_json {
-            println!(
-                "{}",
-                serde_json::to_string(&project::CiUpdatePlan {
-                    schema: "simit.ci-update-plan.v1".into(),
-                    files,
-                    obsolete: primary_obsolete,
-                })?
-            );
-            return Ok(());
+            return project::CiUpdatePlan::new(files, primary_obsolete, vec![]).print();
         }
         return project::reconcile_generated_files(
             workspace_root,
@@ -2533,6 +2575,16 @@ fn reconcile_ci_files(
         .any(|file| file.relative_path == Path::new(crate::render::release_plz::CONFIG))
     {
         crate::render::release_plz::validate_migration(workspace_root, &config, &files, &obsolete)?;
+    }
+    if command.plan_json {
+        // A created deny.toml is project policy from then on, not generator-owned.
+        let (mut patches, files): (Vec<_>, Vec<_>) = files
+            .into_iter()
+            .partition(|file| file.relative_path == Path::new("deny.toml"));
+        if let Some(ci) = persisted {
+            patches.extend(ProjectConfig::render_ci(workspace_root, ci)?);
+        }
+        return project::CiUpdatePlan::new(files, obsolete, patches).print();
     }
     project::reconcile_generated_files(
         workspace_root,

@@ -67,7 +67,7 @@ pub fn run(command: InitReleaseCommand) -> Result<()> {
             false,
         )
     } else {
-        resolve_release_runner(&cfg, platform)?
+        resolve_release_runner(&cfg, platform, command.plan_json)?
     };
 
     let inputs = ReleaseWorkflowInputs {
@@ -108,6 +108,32 @@ pub fn run(command: InitReleaseCommand) -> Result<()> {
         owns_name: is_release_workflow_name,
     };
 
+    if command.plan_json {
+        let obsolete =
+            project::obsolete_generated_workflows(workspace_root, &plan.files, plan.owns_name)?;
+        // A plan keeps release automation on its backend unless the platform is
+        // explicit project policy or a --platform (as provider migrations pass).
+        if command.platform.is_none()
+            && cfg.ci.platform.is_none()
+            && obsolete
+                .iter()
+                .any(|path| path.parent() != std::path::Path::new(&workflow_path).parent())
+        {
+            bail!(
+                "release plan would move the generated release workflow to {workflow_path}; set [ci].platform or pass --platform"
+            );
+        }
+        // Update plans only maintain an existing generated release workflow.
+        let generated = std::fs::read_to_string(workspace_root.join(&workflow_path))
+            .is_ok_and(|content| crate::render::ci::is_generated_workflow_marker(&content));
+        return if generated || !obsolete.is_empty() {
+            project::CiUpdatePlan::new(plan.files, obsolete, vec![])
+        } else {
+            project::CiUpdatePlan::new(vec![], vec![], vec![])
+        }
+        .print();
+    }
+
     match mode {
         CheckPrintMode::Print => {
             print!("{}", plan.files[0].content);
@@ -141,7 +167,11 @@ fn is_release_workflow_name(name: &std::ffi::OsStr) -> bool {
     )
 }
 
-fn resolve_release_runner(cfg: &ProjectConfig, platform: Platform) -> Result<(String, bool)> {
+fn resolve_release_runner(
+    cfg: &ProjectConfig,
+    platform: Platform,
+    plan_json: bool,
+) -> Result<(String, bool)> {
     if let Some(runner) = cfg
         .release
         .artifacts
@@ -159,7 +189,21 @@ fn resolve_release_runner(cfg: &ProjectConfig, platform: Platform) -> Result<(St
         return Ok((runner, preinstalled_nix));
     }
 
-    let user_config = UserConfig::load()?;
+    // The updater sandbox has no personal Simit config, so a non-GitHub plan
+    // must get its runner from project policy.
+    if plan_json && platform != Platform::Github {
+        bail!(
+            "release plan for {platform:?} needs a runner from project policy; set [release.artifacts].runner or [ci].runner"
+        );
+    }
+    // Hosted GitHub runners need no workstation runner registry, as in `init ci`.
+    let user_config = UserConfig::load().or_else(|err| {
+        if platform == Platform::Github {
+            Ok(UserConfig::default())
+        } else {
+            Err(err)
+        }
+    })?;
     let runners = user_config.resolve_ci_runners(platform, Runtime::Nix, None, None, false)?;
     Ok((runs_on(&runners.release), platform == Platform::Forgejo))
 }

@@ -12,6 +12,10 @@ mod sandbox;
 pub mod schema;
 use schema::*;
 
+/// Generated-file scopes a profile can enroll. `ci` is required and is the
+/// only qualification set; the others are carried update-only consumptions.
+pub const SUPPORTED_SCOPES: &[&str] = &["ci", "ci-extra", "release", "flake", "readme"];
+
 #[derive(Debug, ClapArgs)]
 pub struct Args {
     #[arg(long, default_value = "/etc/simit/updates.json")]

@@ -64,7 +64,8 @@
     && absolute profile.generator.executable
     && (profile.generator.executableSha256 != null || lib.hasPrefix "/nix/store/" profile.generator.executable)
     && lib.hasPrefix "${cfg.forges.${profile.generator.forge}.host}/" profile.generator.sourceCoordinate
-    && profile.scopes == ["ci"]
+    && lib.elem "ci" profile.scopes
+    && builtins.length (lib.unique profile.scopes) == builtins.length profile.scopes
     && profile.select.coordinates != []
     && lib.all (canary: lib.elem canary profile.select.coordinates) profile.rollout.canaries
     && profile.generator.requiredChecks != []

@@ -670,7 +670,7 @@ pub fn canonical_project_path(path: &Path) -> Result<Utf8PathBuf> {
     canonical_utf8_path(path)
 }
 
-fn detect_flake_status(workspace_root: &Path) -> FeatureStatus {
+pub(crate) fn detect_flake_status(workspace_root: &Path) -> FeatureStatus {
     if resolved_flake_scope_for_status(workspace_root) == FlakeScope::HooksOnly {
         return detect_hooks_only_flake_status(workspace_root);
     }
@@ -1084,7 +1084,7 @@ fn infer_expected_primary_ci_files(
     )?;
     if config.monorepo.is_some() {
         let include_publishers = config.vscode.is_none() && config.jetbrains.is_none();
-        return crate::monorepo::ci::files(workspace_root, &config, include_publishers);
+        return crate::monorepo::ci::files(workspace_root, &config, include_publishers, true);
     }
     let snapshots = workflow_snapshots(marked);
     if backend.provider() == CiProvider::Crow {

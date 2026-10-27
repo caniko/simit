@@ -148,6 +148,8 @@ in
     });
   assert lib.all (pattern: !(accepts (example // {profiles.fleet = example.profiles.fleet // {select = example.profiles.fleet.select // {includePaths = [pattern];};};})) && !(accepts (example // {profiles.fleet = example.profiles.fleet // {select = example.profiles.fleet.select // {excludePaths = [pattern];};};}))) ["[" "[abc" "]" "a**" "**a" "a/**b" "***"];
   assert lib.all (pattern: accepts (example // {profiles.fleet = example.profiles.fleet // {select = example.profiles.fleet.select // {includePaths = [pattern];};};})) ["**" "retired/**" "repos/*/demo?" "literal"];
+  assert lib.all (scopes: !(accepts (example // {profiles.fleet = example.profiles.fleet // {inherit scopes;};}))) [[] ["ci-extra"] ["release" "readme"] ["ci" "ci"] ["ci" "lock"]];
+  assert accepts (example // {profiles.fleet = example.profiles.fleet // {scopes = ["readme" "flake" "release" "ci-extra" "ci"];};});
   assert !(accepts (example // {profiles.fleet = example.profiles.fleet // {rollout.canaries = ["git.example.org/team/typo"];};}));
   assert accepts (example // {profiles.fleet = example.profiles.fleet // {rollout.canaries = example.profiles.fleet.select.coordinates;};});
   assert lib.all (sourceRevision: !(accepts (withGenerator {inherit sourceRevision;}))) ["trunk" "abc123" (lib.concatStrings (lib.replicate 40 "A"))];

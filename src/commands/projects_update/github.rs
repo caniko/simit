@@ -1423,14 +1423,14 @@ mod tests {
         request.revision = Some(revision.clone());
         request.workflows = vec![path.into()];
         request.required_checks = inspected.requirements;
-        request.plan = Some(crate::project::CiUpdatePlan {
-            schema: "simit.ci-update-plan.v1".into(),
-            files: vec![crate::project::GeneratedFile {
+        request.plan = Some(crate::project::CiUpdatePlan::new(
+            vec![crate::project::GeneratedFile {
                 relative_path: path.into(),
                 content: workflow.into(),
             }],
-            obsolete: vec![],
-        });
+            vec![],
+            vec![],
+        ));
         for branch in ["maintenance/candidate", "trunk"] {
             request.branch = Some(branch.into());
             let admitted = execute_with(&request, get, classic, refuse).unwrap();

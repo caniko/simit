@@ -741,6 +741,7 @@ mod tests {
                 })
                 .collect(),
             obsolete: vec![],
+            patches: vec![],
         });
         request
     }
