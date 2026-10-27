@@ -25,6 +25,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `scripts/ci-local.sh` runs after the derived CI steps and Nix builds, for
   suites no hosted CI runs. It requires `local_gate = true`, and names must be
   unique single lines.
+- `simit projects update`: disabled `projectOverrides` accept an optional
+  kebab-case `blocker` code, emitted next to `reason` in
+  `simit.updater-selection-plan.v1` enrollment entries. Receipts record the
+  `generatorRevision` that produced them, shown by `--status`; older receipts
+  still load and gain it on their next transaction.
 - Add `[release.pypi]`: the release workflow uploads the prebuilt
   `release/*.whl` (e.g. from a Nix `release-bundle`) to PyPI with
   `uv publish --check-url` after the hosted release, using PyPI trusted

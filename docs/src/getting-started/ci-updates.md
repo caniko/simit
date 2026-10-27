@@ -79,6 +79,8 @@ policy for standalone installations.
       projectOverrides."github.com/example/custom-ci" = {
         enable = false;
         reason = "Independent project-owned CI";
+        # Optional kebab-case code for tooling; only on disabled overrides.
+        blocker = "custom-ci";
       };
     };
   };
@@ -212,6 +214,9 @@ selection filters. Execution still requires every canary to be eligible and
 included in CLI narrowing. Duplicate eligible canonical identities, unlisted
 canaries and invalid CLI selection remain errors. `--plan` cannot be combined with execution/status modes
 or a batch limit; it reports the full selection before batching.
+Disabled enrollment entries carry the override's `reason` and, when declared,
+its `blocker`: a kebab-case code (`[a-z][a-z0-9-]*`) that fleet tooling can
+group by. Rust and Nix reject a `blocker` on an enabled override.
 
 Use `--config PATH` outside NixOS. `--repo HOST/OWNER/REPO` narrows selection;
 configured canaries must remain included. `--limit N` further bounds the profile's
@@ -288,6 +293,8 @@ movement, changed default branches, protection changes and managed-file edits
 invalidate earlier candidate acceptance. Failed, skipped, cancelled, neutral or
 rerun required cases cannot qualify. Receipts and adapter responses remain in
 `stateDirectory`; `--status` reads them without discovery or forge queries.
+Each receipt records the `generatorRevision` that produced it; receipts written
+before that field existed report `null` until their next transaction.
 
 Repository clones, receipts and baselines are isolated under a profile-specific
 directory in `stateDirectory`. `--status` reports only the requested profile.

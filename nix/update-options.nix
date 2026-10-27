@@ -112,6 +112,7 @@ in {
         options = {
           enable = option types.bool true;
           reason = option (types.nullOr types.str) null;
+          blocker = option (types.nullOr (types.strMatching "[a-z][a-z0-9-]*")) null;
           targetBranch = option (types.nullOr types.str) null;
           requiredChecks = option requirements [];
         };

@@ -76,7 +76,8 @@
       coordinate key
       && requirements override.requiredChecks
       && (override.targetBranch == null || validBranch override.targetBranch)
-      && (override.enable || (override.reason != null && builtins.match "[[:space:]]*" override.reason == null)))
+      && (override.enable || (override.reason != null && builtins.match "[[:space:]]*" override.reason == null))
+      && (override.blocker == null || !override.enable))
     profile.projectOverrides);
   validForge = forge:
     absolute forge.adapter.program

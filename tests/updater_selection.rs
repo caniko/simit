@@ -62,7 +62,7 @@ fn plan_accounts_for_every_enrolled_coordinate_without_executing_adapters_or_gen
                     "requiredChecks": [{"name": "test", "authority": "777"}]
                 },
                 "projectOverrides": {(coordinate("disabled")): {
-                    "enable": false, "reason": "Project-owned CI"
+                    "enable": false, "reason": "Project-owned CI", "blocker": "provider-mismatch"
                 }}
             }}
         }))
@@ -103,6 +103,8 @@ fn plan_accounts_for_every_enrolled_coordinate_without_executing_adapters_or_gen
     assert_eq!(entry("custom")["observations"][0]["reason"], "ci-policy");
     assert_eq!(entry("disabled")["status"], "disabled");
     assert_eq!(entry("disabled")["reason"], "Project-owned CI");
+    assert_eq!(entry("disabled")["blocker"], "provider-mismatch");
+    assert!(entry("demo")["blocker"].is_null());
     assert_eq!(entry("missing")["status"], "missing");
     let narrowed = plan(&["--repo", &coordinate("demo")]);
     assert_eq!(narrowed["selected"].as_array().unwrap().len(), 1);

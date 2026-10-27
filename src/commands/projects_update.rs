@@ -145,6 +145,7 @@ pub fn run(args: Args) -> Result<()> {
                     Ok(serde_json::json!({
                         "coordinate": coordinate, "status": status,
                         "reason": disabled.and_then(|override_| override_.reason.as_deref()),
+                        "blocker": disabled.and_then(|override_| override_.blocker.as_deref()),
                         "observations": observations,
                     }))
                 })
