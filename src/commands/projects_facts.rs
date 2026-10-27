@@ -1666,18 +1666,19 @@ fn capabilities() -> Vec<Row> {
             "No updater adapter qualifies Forgejo Actions.",
             Some("simit init ci"),
         ),
+        // Dispatch follows the repository's forge: the GitHub adapter qualifies
+        // only .github/workflows, and the Crow adapter needs a Forgejo repository.
         Row {
             matches: CROW_ON_GITHUB,
-            lands: true,
             orchestrator: Some("simit-updater"),
-            status: Implemented,
-            blocker: None,
-            fallback: None,
+            status: Unsupported,
+            blocker: Some("adapter-missing"),
+            fallback: Some("simit init ci"),
             ..settled(
                 "ci.primary",
                 "migration",
                 "simit projects update with a provider migration",
-                "A profile migration regenerates CI for the provider and platform it selects.",
+                "No updater adapter qualifies Crow pipelines for a GitHub-hosted repository.",
             )
         },
     ];

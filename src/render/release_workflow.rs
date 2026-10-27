@@ -1952,7 +1952,8 @@ fn push_publisher_missing_helper(w: &mut String) {
     w.push_str("            channel=\"$1\"; message=\"$2\"\n");
     w.push_str("            var=\"PUBLISH_$(printf '%s' \"$channel\" | tr '[:lower:]-' '[:upper:]_')_STATE\"\n");
     w.push_str("            state=\"${!var:-inactive-soft}\"\n");
-    w.push_str("            if [ \"$state\" = active-required ]; then echo \"::error::${channel}: ${message}\" >&2; exit 1; fi\n");
+    // An inconclusive probe never soft-skips: the channel may be live.
+    w.push_str("            case \"$state\" in active-required|probe-failed) echo \"::error::${channel}: ${message} (${state})\" >&2; exit 1 ;; esac\n");
     w.push_str("            echo \"::warning::${channel}: ${message}; staged publisher is not active yet.\" >&2\n");
     w.push_str("            exit 0\n");
     w.push_str("          }\n");
@@ -3715,6 +3716,8 @@ esac"#,
         assert!(workflow.contains("publisher_missing flathub 'FLATHUB_TOKEN unset'"));
         assert!(workflow.contains("publisher_missing winget 'WINGET_PAT unset'"));
         assert!(workflow.contains("winget_state=probe-failed"));
+        // Soft exits (missing token or ZIP) must not swallow an inconclusive probe.
+        assert!(workflow.contains("in active-required|probe-failed) echo \"::error::"));
         assert!(workflow.contains("staged publisher is not active yet."));
         assert!(!workflow.contains("bootstrap channel is inactive, skipping."));
         assert!(!workflow.contains("require_credential 'repo secret' 'modde_apt_repo_gpg_key'"));

@@ -118,6 +118,8 @@
       "via": "simit projects update"
     },
     {
+      "blocker": "adapter-missing",
+      "fallback": "simit init ci",
       "lands": true,
       "match": {
         "ciTarget": "crow/forgejo",
@@ -125,8 +127,8 @@
       },
       "orchestrator": "simit-updater",
       "path": "migration",
-      "reason": "A profile migration regenerates CI for the provider and platform it selects.",
-      "status": "implemented",
+      "reason": "No updater adapter qualifies Crow pipelines for a GitHub-hosted repository.",
+      "status": "unsupported",
       "usageKind": "ci.primary",
       "via": "simit projects update with a provider migration"
     },
