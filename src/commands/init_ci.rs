@@ -1689,6 +1689,11 @@ fn run_crow_python(
             "required gates and coordinated publication are only supported for Actions workflows in v1"
         );
     }
+    if cfg.ci.crow.check_command.is_some() {
+        bail!(
+            "[ci.crow].check_command/check_secret are not supported on the Python uv Crow CI path"
+        );
+    }
     let mut crow = cfg.ci.crow.clone();
     if let Some(format) = command.crow_format {
         crow.format = format;

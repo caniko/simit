@@ -2242,6 +2242,35 @@ fn crow_python_ci_keeps_the_crow_prebuild() {
 }
 
 #[test]
+fn crow_python_ci_rejects_crow_check_command() {
+    let temp = init_python_project();
+    let config = fs::read_to_string(temp.path().join("simit.toml")).unwrap_or_default();
+    fs::write(
+        temp.path().join("simit.toml"),
+        format!("{config}\n[ci.crow]\ncheck_command = \"make check\"\n"),
+    )
+    .unwrap();
+    let output = simit()
+        .current_dir(temp.path())
+        .args([
+            "init",
+            "ci",
+            "--platform",
+            "forgejo",
+            "--ci-provider",
+            "crow",
+            "--runtime",
+            "nix",
+            "--runner",
+            "atlas-nix-trusted",
+        ])
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("Python uv Crow CI path"));
+}
+
+#[test]
 fn crow_ci_rejects_non_forgejo_platforms() {
     let temp = init_package(true);
 
