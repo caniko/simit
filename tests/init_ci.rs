@@ -104,6 +104,28 @@ fn full_plan_patches_changed_project_policy_without_resolving_trust() {
         root.join("keys/maintainers.gpg"),
     )
     .unwrap();
+    // An untracked trust root is not what the publishing workflows fetch.
+    let git = |args: &[&str]| {
+        let output = std::process::Command::new("git")
+            .current_dir(root)
+            .env("GIT_AUTHOR_NAME", "fixture")
+            .env("GIT_AUTHOR_EMAIL", "fixture@example.invalid")
+            .env("GIT_COMMITTER_NAME", "fixture")
+            .env("GIT_COMMITTER_EMAIL", "fixture@example.invalid")
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "{args:?}: {output:?}");
+        String::from_utf8(output.stdout).unwrap().trim().to_owned()
+    };
+    git(&["init", "--quiet"]);
+    let untracked = run(&["init", "ci", "--plan-json"]);
+    assert!(!untracked.status.success());
+    assert!(String::from_utf8_lossy(&untracked.stderr).contains("committed release trust root"));
+    git(&["add", "keys/maintainers.gpg"]);
+    let tree = git(&["write-tree"]);
+    let commit = git(&["commit-tree", "-m", "trust root", &tree]);
+    git(&["update-ref", "HEAD", &commit]);
     let before = fs::read(root.join("simit.toml")).unwrap();
     let plan = || {
         let output = run(&["init", "ci", "--plan-json"]);

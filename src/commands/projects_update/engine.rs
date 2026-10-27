@@ -289,6 +289,10 @@ pub struct Receipt {
     /// baseline does not own.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub patches: BTreeMap<String, Option<String>>,
+    /// The primary qualification set, recorded (v2) only when other scopes
+    /// carry files beyond it. v1 receipts qualify every committed output.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub qualification: Vec<String>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -891,6 +895,13 @@ fn generate_scopes(
     // old tree would be stale; leave the README for the next run, which
     // regenerates it from the landed files.
     let moves_badge_inputs = !merged.obsolete.is_empty()
+        || merged.patches.iter().any(|patch| {
+            // Config patches (e.g. an inferred publish_crates) change badges.
+            fs::read_to_string(checkout.join(&patch.relative_path))
+                .ok()
+                .as_deref()
+                != Some(patch.content.as_str())
+        })
         || merged.files.iter().any(|file| {
             let path = checkout.join(&file.relative_path);
             let badge_input = file.relative_path == Path::new("flake.nix")
@@ -1368,6 +1379,15 @@ pub fn update(
         let tree = git(&checkout, &["write-tree"])?;
         let managed = hashes(&checkout, paths.into_iter(), Some(&tree))?;
         let patches = hashes(&checkout, patch_paths.into_iter(), Some(&tree))?;
+        // ponytail: quadratic scan over a handful of paths.
+        let qualification = if managed
+            .iter()
+            .all(|(path, hash)| hash.is_none() || workflow_paths.contains(path))
+        {
+            vec![]
+        } else {
+            workflow_paths.clone()
+        };
         let diff = git(
             &checkout,
             &[
@@ -1393,6 +1413,7 @@ pub fn update(
             managed,
             diff,
             patches,
+            qualification,
             landing: Some(landing.into()),
             change: None,
             landed: None,
@@ -1572,8 +1593,20 @@ pub fn update(
     );
     // Only the primary CI set qualifies; other owned files are carried.
     let workflow_paths: Vec<String> = crate::review::read_json(&root.join("workflows.json"))?;
+    // The saved set is bound to the receipt, so it cannot be silently narrowed.
+    let expected: BTreeSet<&String> = if receipt.qualification.is_empty() {
+        receipt
+            .managed
+            .iter()
+            .filter(|(_, hash)| hash.is_some())
+            .map(|(path, _)| path)
+            .collect()
+    } else {
+        receipt.qualification.iter().collect()
+    };
     ensure!(
         !workflow_paths.is_empty()
+            && workflow_paths.iter().collect::<BTreeSet<_>>() == expected
             && workflow_paths
                 .iter()
                 .all(|path| receipt.managed.get(path).is_some_and(Option::is_some)),
@@ -3447,7 +3480,8 @@ else:
         let config =
             json!({"relative_path":"simit.toml","content":"[ci]\nplatform = \"github\"\n"});
         let readme = json!({"relative_path":"README.md","content":"# demo\n<!-- simit:badges:start -->\ncurrent\n<!-- simit:badges:end -->\n"});
-        // The CI workflow is already current, so the README plan stays valid.
+        // The CI workflow and config are already current, so the README plan stays valid.
+        fs::write(f.source.join("simit.toml"), "[ci]\nplatform = \"github\"\n").unwrap();
         fs::write(
             f.source.join(".github/workflows/ci.yaml"),
             primary_ci()["content"].as_str().unwrap(),
@@ -3481,6 +3515,21 @@ else:
                 .contains("retained candidate files changed")
         );
         fs::write(f.root().join("receipt.json"), receipt).unwrap();
+
+        // The saved primary set is bound to the receipt and cannot be narrowed.
+        let saved = fs::read(f.root().join("workflows.json")).unwrap();
+        save(
+            &f.root().join("workflows.json"),
+            &[".github/workflows/publish-crate.yaml"],
+        )
+        .unwrap();
+        assert!(
+            f.update(true)
+                .unwrap_err()
+                .to_string()
+                .contains("retained workflow ownership differs")
+        );
+        fs::write(f.root().join("workflows.json"), saved).unwrap();
 
         f.control(json!({"expectedWorkflows":[".github/workflows/ci.yaml"]}));
         let adopted = f.update(true).unwrap();

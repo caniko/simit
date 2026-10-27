@@ -77,9 +77,25 @@ pub fn require_committed(
     config: &ProjectConfig,
     overrides: &TrustOverrides,
 ) -> Result<()> {
-    read_and_validate_existing(workspace_root, &trust_root_path(config, overrides)?)
-        .context("update plans for publishing workflows need a committed release trust root")?;
-    Ok(())
+    let trust_root = trust_root_path(config, overrides)?;
+    // The publishing workflows fetch the committed blob, not the worktree file.
+    let blob = Command::new("git")
+        .current_dir(workspace_root)
+        .arg("show")
+        .arg(format!("HEAD:./{}", trust_root.display()))
+        .output()
+        .context("running git show for the release trust root")?;
+    if !blob.status.success() {
+        bail!(
+            "update plans for publishing workflows need a committed release trust root; {} is not in HEAD",
+            trust_root.display()
+        );
+    }
+    validate_public_key_text(
+        &String::from_utf8(blob.stdout).context("committed release trust root is not UTF-8")?,
+        &format!("committed {}", trust_root.display()),
+    )
+    .context("update plans for publishing workflows need a committed release trust root")
 }
 
 pub fn resolve(
