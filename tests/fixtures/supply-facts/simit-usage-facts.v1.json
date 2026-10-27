@@ -815,6 +815,11 @@
       "to": "usage:github.com/example/flake-config#config.flake"
     },
     {
+      "from": "repo:github.com/example/flake-config",
+      "kind": "uses",
+      "to": "usage:github.com/example/flake-config#release.workflow"
+    },
+    {
       "from": "repo:github.com/example/manual",
       "kind": "uses",
       "to": "usage:github.com/example/manual#ci.primary"
@@ -823,6 +828,21 @@
       "from": "repo:github.com/example/manual",
       "kind": "uses",
       "to": "usage:github.com/example/manual#ci.publish"
+    },
+    {
+      "from": "repo:github.com/example/mixed",
+      "kind": "uses",
+      "to": "usage:github.com/example/mixed#ci.primary"
+    },
+    {
+      "from": "repo:github.com/example/mixed",
+      "kind": "uses",
+      "to": "usage:github.com/example/mixed#ci.template"
+    },
+    {
+      "from": "repo:github.com/example/mixed",
+      "kind": "uses",
+      "to": "usage:github.com/example/mixed#config.simit-toml"
     },
     {
       "from": "repo:github.com/example/unsigned",
@@ -910,6 +930,11 @@
       "to": "rev:github.com/caniko/simit@4c6841cce19327927ea8a8f6e856276dd5c878f0"
     },
     {
+      "from": "usage:github.com/example/drifted#runtime.cargo-install:scripts/release.sh",
+      "kind": "pins",
+      "to": "rev:github.com/caniko/simit@5d6841cce19327927ea8a8f6e856276dd5c878f1"
+    },
+    {
       "from": "usage:github.com/example/drifted#runtime.ci-engine:.github/workflows/ci.yaml",
       "kind": "pins",
       "to": "rev:github.com/caniko/simit@8a132e416caf9cc58a753005b804343181477200"
@@ -930,6 +955,11 @@
       "to": "workflow:github.com/example/flake-config#.github/workflows/ci.yaml"
     },
     {
+      "from": "usage:github.com/example/flake-config#release.workflow",
+      "kind": "contains",
+      "to": "workflow:github.com/example/flake-config#.github/workflows/release.yml"
+    },
+    {
       "from": "usage:github.com/example/manual#ci.primary",
       "kind": "contains",
       "to": "workflow:github.com/example/manual#.github/workflows/ci.yaml"
@@ -938,6 +968,21 @@
       "from": "usage:github.com/example/manual#ci.publish",
       "kind": "contains",
       "to": "workflow:github.com/example/manual#.github/workflows/publish-crate.yaml"
+    },
+    {
+      "from": "usage:github.com/example/mixed#ci.primary",
+      "kind": "runsOn",
+      "to": "runner:github.com/ubuntu-latest"
+    },
+    {
+      "from": "usage:github.com/example/mixed#ci.primary",
+      "kind": "contains",
+      "to": "workflow:github.com/example/mixed#.github/workflows/ci.yaml"
+    },
+    {
+      "from": "usage:github.com/example/mixed#ci.template",
+      "kind": "contains",
+      "to": "workflow:github.com/example/mixed#.github/workflows/deploy.yaml"
     },
     {
       "from": "usage:github.com/example/unsigned#release.workflow",
@@ -961,6 +1006,11 @@
     },
     {
       "from": "workflow:github.com/example/flake-config#.github/workflows/ci.yaml",
+      "kind": "runsOn",
+      "to": "runner:github.com/ubuntu-latest"
+    },
+    {
+      "from": "workflow:github.com/example/mixed#.github/workflows/ci.yaml",
       "kind": "runsOn",
       "to": "runner:github.com/ubuntu-latest"
     }
@@ -1066,6 +1116,15 @@
         "forge": "github",
         "forgeHost": "github.com"
       },
+      "id": "repo:github.com/example/mixed",
+      "kind": "repo"
+    },
+    {
+      "attrs": {
+        "ciTarget": "actions/github",
+        "forge": "github",
+        "forgeHost": "github.com"
+      },
       "id": "repo:github.com/example/unsigned",
       "kind": "repo"
     },
@@ -1083,6 +1142,14 @@
         "source": "github.com/caniko/simit"
       },
       "id": "rev:github.com/caniko/simit@4c6841cce19327927ea8a8f6e856276dd5c878f0",
+      "kind": "rev"
+    },
+    {
+      "attrs": {
+        "revision": "5d6841cce19327927ea8a8f6e856276dd5c878f1",
+        "source": "github.com/caniko/simit"
+      },
+      "id": "rev:github.com/caniko/simit@5d6841cce19327927ea8a8f6e856276dd5c878f1",
       "kind": "rev"
     },
     {
@@ -1199,6 +1266,7 @@
         ],
         "state": "unknown",
         "tags": [
+          "0.20.0",
           "0.21.0"
         ],
         "usageKind": "cargo.dependency"
@@ -1352,7 +1420,8 @@
         "generated": false,
         "path": "scripts/release.sh",
         "revisions": [
-          "4c6841cce19327927ea8a8f6e856276dd5c878f0"
+          "4c6841cce19327927ea8a8f6e856276dd5c878f0",
+          "5d6841cce19327927ea8a8f6e856276dd5c878f1"
         ],
         "state": "unknown",
         "usageKind": "runtime.cargo-install"
@@ -1494,6 +1563,24 @@
     {
       "attrs": {
         "paths": [
+          ".github/workflows/release.yml"
+        ],
+        "state": "unknown",
+        "usageKind": "release.workflow"
+      },
+      "expects": [
+        {
+          "attr": "generatorRevision",
+          "blocker": "unknown-generator-revision",
+          "reason": "No receipt or pin proves which generator revision rendered these files."
+        }
+      ],
+      "id": "usage:github.com/example/flake-config#release.workflow",
+      "kind": "usage"
+    },
+    {
+      "attrs": {
+        "paths": [
           ".github/workflows/ci.yaml"
         ],
         "state": "hand-rolled",
@@ -1511,6 +1598,46 @@
         "usageKind": "ci.publish"
       },
       "id": "usage:github.com/example/manual#ci.publish",
+      "kind": "usage"
+    },
+    {
+      "attrs": {
+        "paths": [
+          ".github/workflows/ci.yaml"
+        ],
+        "state": "drift",
+        "usageKind": "ci.primary"
+      },
+      "expects": [
+        {
+          "attr": "generatorRevision",
+          "blocker": "unknown-generator-revision",
+          "reason": "No receipt or pin proves which generator revision rendered these files."
+        }
+      ],
+      "id": "usage:github.com/example/mixed#ci.primary",
+      "kind": "usage"
+    },
+    {
+      "attrs": {
+        "paths": [
+          ".github/workflows/deploy.yaml"
+        ],
+        "state": "hand-rolled",
+        "usageKind": "ci.template"
+      },
+      "id": "usage:github.com/example/mixed#ci.template",
+      "kind": "usage"
+    },
+    {
+      "attrs": {
+        "paths": [
+          "simit.toml"
+        ],
+        "state": "current",
+        "usageKind": "config.simit-toml"
+      },
+      "id": "usage:github.com/example/mixed#config.simit-toml",
       "kind": "usage"
     },
     {
@@ -1676,6 +1803,22 @@
     },
     {
       "attrs": {
+        "generated": true,
+        "labels": [],
+        "path": ".github/workflows/release.yml",
+        "steps": [],
+        "triggers": {
+          "branches": [],
+          "events": [
+            "tag"
+          ]
+        }
+      },
+      "id": "workflow:github.com/example/flake-config#.github/workflows/release.yml",
+      "kind": "workflow"
+    },
+    {
+      "attrs": {
         "generated": false,
         "labels": [],
         "path": ".github/workflows/ci.yaml",
@@ -1704,6 +1847,38 @@
         }
       },
       "id": "workflow:github.com/example/manual#.github/workflows/publish-crate.yaml",
+      "kind": "workflow"
+    },
+    {
+      "attrs": {
+        "generated": true,
+        "labels": [
+          "ubuntu-latest"
+        ],
+        "path": ".github/workflows/ci.yaml",
+        "steps": [],
+        "triggers": {
+          "branches": [],
+          "events": []
+        }
+      },
+      "id": "workflow:github.com/example/mixed#.github/workflows/ci.yaml",
+      "kind": "workflow"
+    },
+    {
+      "attrs": {
+        "generated": false,
+        "labels": [],
+        "path": ".github/workflows/deploy.yaml",
+        "steps": [],
+        "triggers": {
+          "branches": [],
+          "events": [
+            "push"
+          ]
+        }
+      },
+      "id": "workflow:github.com/example/mixed#.github/workflows/deploy.yaml",
       "kind": "workflow"
     },
     {

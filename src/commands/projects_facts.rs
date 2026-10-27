@@ -386,6 +386,20 @@ impl Facts {
             // The audit leaves out the VS Code and JetBrains publishers.
             entry.2 |= registry::is_release_workflow_path(&file.relative_path);
         }
+        // Hand-written files beside generated ones: join their kind, or stand alone.
+        let mut hand: BTreeMap<&'static str, BTreeSet<String>> = BTreeMap::new();
+        for file in ci.iter().filter(|file| !file.marked) {
+            let kind = ci_kind(&file.relative_path);
+            let path = file.relative_path.display().to_string();
+            match kinds.get_mut(kind) {
+                Some(entry) => {
+                    entry.0.insert(path);
+                }
+                None => {
+                    hand.entry(kind).or_default().insert(path);
+                }
+            }
+        }
         for path in drifted {
             let entry = kinds.entry(ci_kind(&path)).or_default();
             if root.join(&path).is_file() {
@@ -425,6 +439,14 @@ impl Facts {
                 "current"
             };
             self.generated(coordinate, kind, state, paths.into_iter().collect());
+        }
+        for (kind, paths) in hand {
+            if !self
+                .nodes
+                .contains_key(&format!("usage:{coordinate}#{kind}"))
+            {
+                self.generated(coordinate, kind, "hand-rolled", paths.into_iter().collect());
+            }
         }
     }
 
@@ -554,18 +576,24 @@ impl Facts {
             };
             self.generated(coordinate, "readme.badges", state, vec!["README.md".into()]);
         }
+        // Without a loaded config (an unevaluated flake policy) neither the
+        // path nor the requirement is known: report only what is on disk.
         let trust_root = config.map_or_else(
             || "keys/maintainers.gpg".to_owned(),
             |config| config.release.signing.trust_root.clone(),
         );
         let required = release.iter().any(|file| file.marked)
-            && config.is_none_or(|config| config.release.signing.required);
+            && config.is_some_and(|config| config.release.signing.required);
         if root.join(&trust_root).is_file() {
             self.usage(
                 coordinate,
                 "keys.trust-root",
                 None,
-                "current",
+                if config.is_some() {
+                    "current"
+                } else {
+                    "unknown"
+                },
                 Attrs::from([("paths", json!([trust_root]))]),
             );
         } else if required {
@@ -585,7 +613,8 @@ impl Facts {
         }
         if let Some(attic) = config.and_then(|config| config.release.attic.as_ref()) {
             // The server URL is part of the identity: one name on two servers is two caches.
-            let cache = format!("cache:{}@{}", attic.cache, attic.url.trim_end_matches('/'));
+            let url = redact_url(&attic.url);
+            let cache = format!("cache:{}@{url}", attic.cache);
             let mut publishers = vec!["release.workflow"];
             if config
                 .and_then(|config| config.prebuild.as_ref())
@@ -599,7 +628,7 @@ impl Facts {
                     self.node(
                         cache.clone(),
                         "cache",
-                        Attrs::from([("name", json!(attic.cache)), ("url", json!(attic.url))]),
+                        Attrs::from([("name", json!(attic.cache)), ("url", json!(url))]),
                     );
                     self.edges.insert((usage, cache.clone(), "publishesTo"));
                 }
@@ -754,6 +783,11 @@ impl Facts {
                 let words = line
                     .split(|c: char| c.is_whitespace() || ";|&()`\"'$".contains(c))
                     .filter(|word| !word.is_empty())
+                    // `--rev=<sha>` is `--rev <sha>`.
+                    .flat_map(|word| match word.split_once('=') {
+                        Some((flag, value)) if flag.starts_with("--") => vec![flag, value],
+                        _ => vec![word],
+                    })
                     .collect::<Vec<_>>();
                 for (variable, kind) in [
                     ("SIMIT_PUBLISHER_REVISION", "runtime.publisher-var"),
@@ -901,22 +935,39 @@ impl Facts {
             .as_ref()
             .and_then(|lock| lock.get("package"))
             .and_then(|packages| packages.as_array_of_tables());
+        let mut locked = Refs::default();
+        let mut found = false;
         for package in packages.into_iter().flatten() {
             let field = |key| package.get(key).and_then(|value| value.as_str());
             // Workspace members carry no source; only dependencies on simit count.
             let (Some("simit"), Some(source)) = (field("name"), field("source")) else {
                 continue;
             };
-            let mut refs = Refs::default();
+            found = true;
             if let Some((_, revision)) = source.rsplit_once('#')
                 && is_revision(revision)
             {
-                refs.revisions.insert(revision.to_owned());
+                locked.revisions.insert(revision.to_owned());
             }
-            refs.tags.extend(field("version").map(str::to_owned));
-            self.reference(coordinate, "cargo.dependency", "Cargo.lock", refs);
+            locked.tags.extend(field("version").map(str::to_owned));
+        }
+        // One usage per lock file, whatever number of simit records it holds.
+        if found {
+            self.reference(coordinate, "cargo.dependency", "Cargo.lock", locked);
         }
     }
+}
+
+/// A URL without userinfo, query or fragment: facts must not carry credentials.
+fn redact_url(url: &str) -> String {
+    let Ok(mut parsed) = url::Url::parse(url) else {
+        return "<unparseable-url>".to_owned();
+    };
+    let _ = parsed.set_username("");
+    let _ = parsed.set_password(None);
+    parsed.set_query(None);
+    parsed.set_fragment(None);
+    parsed.to_string().trim_end_matches('/').to_owned()
 }
 
 fn merge(into: &mut Refs, from: Refs) {
@@ -1830,6 +1881,19 @@ mod tests {
             crow.triggers,
             json!({"events": ["push"], "branches": [], "branchesIgnore": ["simit/update/*"]})
         );
+    }
+
+    #[test]
+    fn cache_urls_lose_credentials() {
+        assert_eq!(
+            redact_url("https://user:secret@attic.example:8080/cache?token=abc#frag"),
+            "https://attic.example:8080/cache"
+        );
+        assert_eq!(
+            redact_url("https://attic.example/"),
+            "https://attic.example"
+        );
+        assert_eq!(redact_url("not a url secret"), "<unparseable-url>");
     }
 
     #[test]
