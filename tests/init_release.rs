@@ -817,3 +817,15 @@ fn print_matches_checked_workflow_without_writing_file() {
             .exists()
     );
 }
+
+#[test]
+fn forgejo_release_plan_needs_a_project_runner() {
+    let project = init_package_without_release_runner("plan-runner-demo");
+    let output = simit()
+        .current_dir(project.path())
+        .args(["init", "release", "--plan-json"])
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("project policy"));
+}

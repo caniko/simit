@@ -101,7 +101,11 @@ hooks are honored when creating candidate commits.
 The sandbox has no personal Simit configuration. Projects must declare their CI
 platform and any private runner labels through project policy; GitHub can use
 its built-in hosted-runner defaults. An undeclared platform retains Simit's
-Forgejo default and cannot borrow runner configuration from the operator's home.
+Forgejo default and cannot borrow runner configuration from the operator's home,
+so a Forgejo release plan fails unless `[release.artifacts].runner` or `[ci].runner` is set.
+The `readme` scope leaves the README alone in a run that changes CI workflows, the
+flake, other existing outputs or removes files; the next run regenerates the badges
+from the landed tree.
 
 The module creates `simit-updater-<profile>.service` and, when scheduled, its
 timer. State is private and writable; workspace source and user configuration

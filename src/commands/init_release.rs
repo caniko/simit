@@ -67,7 +67,7 @@ pub fn run(command: InitReleaseCommand) -> Result<()> {
             false,
         )
     } else {
-        resolve_release_runner(&cfg, platform)?
+        resolve_release_runner(&cfg, platform, command.plan_json)?
     };
 
     let inputs = ReleaseWorkflowInputs {
@@ -167,7 +167,11 @@ fn is_release_workflow_name(name: &std::ffi::OsStr) -> bool {
     )
 }
 
-fn resolve_release_runner(cfg: &ProjectConfig, platform: Platform) -> Result<(String, bool)> {
+fn resolve_release_runner(
+    cfg: &ProjectConfig,
+    platform: Platform,
+    plan_json: bool,
+) -> Result<(String, bool)> {
     if let Some(runner) = cfg
         .release
         .artifacts
@@ -185,6 +189,13 @@ fn resolve_release_runner(cfg: &ProjectConfig, platform: Platform) -> Result<(St
         return Ok((runner, preinstalled_nix));
     }
 
+    // The updater sandbox has no personal Simit config, so a non-GitHub plan
+    // must get its runner from project policy.
+    if plan_json && platform != Platform::Github {
+        bail!(
+            "release plan for {platform:?} needs a runner from project policy; set [release.artifacts].runner or [ci].runner"
+        );
+    }
     // Hosted GitHub runners need no workstation runner registry, as in `init ci`.
     let user_config = UserConfig::load().or_else(|err| {
         if platform == Platform::Github {

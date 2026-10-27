@@ -744,6 +744,7 @@ fn generate_scopes(
         );
         merged = extra;
     }
+    let mut readme_patches = Vec::new();
     let mut seen = merged
         .files
         .iter()
@@ -767,9 +768,28 @@ fn generate_scopes(
         }
         merged.files.extend(plan.files);
         merged.obsolete.extend(plan.obsolete);
-        merged.patches.extend(plan.patches);
+        if scope == "readme" {
+            readme_patches = plan.patches;
+        } else {
+            merged.patches.extend(plan.patches);
+        }
     }
-    for patch in &merged.patches {
+    // README badges derive from the checkout, not the candidate this run
+    // builds. When the run moves badge inputs (removed files, or edits to
+    // existing outputs, CI workflows or the flake), a patch computed from the
+    // old tree would be stale; leave the README for the next run, which
+    // regenerates it from the landed files.
+    let moves_badge_inputs = !merged.obsolete.is_empty()
+        || merged.files.iter().any(|file| {
+            let path = checkout.join(&file.relative_path);
+            let badge_input = file.relative_path == Path::new("flake.nix")
+                || [".forgejo/workflows/ci.yaml", ".github/workflows/ci.yaml"]
+                    .iter()
+                    .any(|ci| file.relative_path == Path::new(ci));
+            (path.exists() || badge_input)
+                && fs::read_to_string(&path).ok().as_deref() != Some(file.content.as_str())
+        });
+    for patch in merged.patches.iter().chain(&readme_patches) {
         ensure!(
             ![".github/workflows", ".forgejo/workflows", ".crow"]
                 .iter()
@@ -777,6 +797,9 @@ fn generate_scopes(
             "patches cannot target workflow directory path {}",
             patch.relative_path.display()
         );
+    }
+    if !moves_badge_inputs {
+        merged.patches.extend(readme_patches);
     }
     Ok((
         CiUpdatePlan::new(merged.files, merged.obsolete, merged.patches),
@@ -3147,12 +3170,36 @@ else:
     }
 
     #[test]
+    fn readme_patch_waits_for_a_run_that_leaves_badge_inputs_alone() {
+        let mut f = Fixture::new();
+        let readme = json!({"relative_path":"README.md","content":"# demo\n<!-- simit:badges:start -->\ncurrent\n<!-- simit:badges:end -->\n"});
+        // The checkout's CI workflow differs from the plan, so badges derived
+        // from the checkout would be stale for the candidate.
+        scoped_plans(
+            &mut f,
+            &["ci", "readme"],
+            json!({
+                "init ci --primary-only --plan-json": {"schema":"simit.ci-update-plan.v1","files":[primary_ci()],"obsolete":[]},
+                "upgrade --plan-json": {"schema":"simit.ci-update-plan.v2","files":[],"obsolete":[],"patches":[readme]},
+            }),
+        );
+        f.control(json!({"candidate":"pending","expectedWorkflows":[".github/workflows/ci.yaml"]}));
+        assert!(f.update(true).unwrap().patches.is_empty());
+    }
+
+    #[test]
     fn namespace_scopes_carry_unqualified_files_and_unowned_patches() {
         let mut f = Fixture::new();
         let publish = json!({"relative_path":".github/workflows/publish-crate.yaml","content":"name: Publish\non:\n  push:\n    tags: ['*']\n"});
         let config =
             json!({"relative_path":"simit.toml","content":"[ci]\nplatform = \"github\"\n"});
         let readme = json!({"relative_path":"README.md","content":"# demo\n<!-- simit:badges:start -->\ncurrent\n<!-- simit:badges:end -->\n"});
+        // The CI workflow is already current, so the README plan stays valid.
+        fs::write(
+            f.source.join(".github/workflows/ci.yaml"),
+            primary_ci()["content"].as_str().unwrap(),
+        )
+        .unwrap();
         scoped_plans(
             &mut f,
             &["ci", "ci-extra", "readme"],
