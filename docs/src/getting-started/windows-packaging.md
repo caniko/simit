@@ -125,9 +125,11 @@ three ManifestVersion 1.10.0 files (`<id>.yaml`, `<id>.installer.yaml`,
 portable` installer, the uppercase SHA-256 of the released zip, and runs
 `wingetcreate submit` on them. Under
 `[release.publish].enforcement = "activated-remote"` the mode comes from the
-publisher probe (`PUBLISH_WINGET_STATE`) and a failed first submission only
-warns until the package is active; otherwise the step probes
+publisher probe (`PUBLISH_WINGET_STATE`; only a 200 or 404 from winget-pkgs
+counts, any other response fails the release rather than guessing) and a
+failed first submission only warns until the package is active; otherwise the step probes
 `api.github.com/repos/microsoft/winget-pkgs/contents/manifests/...` itself (404
 means first submission) and a failure fails the release. The first submission
 needs a license and a short description (set them or fill the Cargo
-metadata), otherwise the step fails with a message naming the fields.
+metadata; 3-256 characters), otherwise the step fails with a message naming
+the fields.

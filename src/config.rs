@@ -291,6 +291,11 @@ pub struct WingetConfig {
     pub command: Option<String>,
 }
 
+/// winget-pkgs `ShortDescription` schema bounds.
+fn winget_short_description_fits(description: &str) -> bool {
+    (3..=256).contains(&description.chars().count())
+}
+
 fn default_winget_token_secret() -> String {
     "WINGET_PAT".to_owned()
 }
@@ -3440,10 +3445,15 @@ impl ProjectConfig {
                 .unwrap_or_else(|| id_name.to_owned()),
             license: cfg.license.clone().or_else(|| package.license.clone()),
             license_url: cfg.license_url.clone(),
-            short_description: cfg
-                .short_description
-                .clone()
-                .or_else(|| package.description.clone()),
+            short_description: cfg.short_description.clone().or_else(|| {
+                // A Cargo description winget would reject counts as unset, so
+                // update-only projects keep rendering and the first submission
+                // reports it.
+                package
+                    .description
+                    .clone()
+                    .filter(|d| winget_short_description_fits(d))
+            }),
             homepage: cfg.homepage.clone().or_else(|| package.homepage.clone()),
             binary: cfg
                 .binary
@@ -3466,6 +3476,13 @@ impl ProjectConfig {
                 bail!("simit project config: [winget].{field} must be a single line");
             }
         }
+        if cfg
+            .short_description
+            .as_deref()
+            .is_some_and(|d| !winget_short_description_fits(d))
+        {
+            bail!("simit project config: [winget].short_description must be 3-256 characters");
+        }
         Ok(resolved)
     }
 
@@ -3474,6 +3491,18 @@ impl ProjectConfig {
         &self,
         overrides: ChocolateyOverrides<'_>,
         package: &crate::cargo::Package,
+    ) -> Result<ResolvedChocolatey> {
+        let platform = crate::ci_resolution::release_backend(self, None, None)?.platform();
+        self.resolve_chocolatey_for_platform(overrides, package, platform)
+    }
+
+    /// Like [`Self::resolve_chocolatey`], downloading archives from `platform`
+    /// (the effective release platform, including a CLI override).
+    pub fn resolve_chocolatey_for_platform(
+        &self,
+        overrides: ChocolateyOverrides<'_>,
+        package: &crate::cargo::Package,
+        platform: Platform,
     ) -> Result<ResolvedChocolatey> {
         self.validate_chocolatey()?;
 
@@ -3576,7 +3605,7 @@ impl ProjectConfig {
 
         Ok(ResolvedChocolatey {
             tag_prefix: self.release.tag_prefix,
-            platform: crate::ci_resolution::release_backend(self, None, None)?.platform(),
+            platform,
             name,
             id,
             title,

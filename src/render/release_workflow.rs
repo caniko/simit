@@ -1925,14 +1925,17 @@ fn push_publisher_state_probe(w: &mut String, inputs: &ReleaseWorkflowInputs<'_>
         w.push_str("          write_state flathub not-configured '-'\n");
     }
     if let Some(winget) = inputs.winget {
+        // Only 200 (exists) and 404 (missing) are conclusive: a rate limit or
+        // transient error must not read as "missing" and bootstrap an existing
+        // package, so it records `probe-failed` and the publish step fails.
         writeln!(
             w,
-            "          stable_or_state winget {} curl -fsSL {}",
-            shell_quote(&winget.package_id),
+            "          winget_code=\"$(curl -sS -o /dev/null -w '%{{http_code}}' {} || true)\"\n          case \"$winget_code\" in 200) winget_state=active-required ;; 404) winget_state=inactive-soft ;; *) winget_state=probe-failed ;; esac\n          if [ \"$IS_PRERELEASE\" = \"true\" ]; then winget_state=skipped-prerelease; fi\n          write_state winget \"$winget_state\" {}",
             shell_quote(&format!(
                 "https://api.github.com/repos/microsoft/winget-pkgs/contents/{}",
                 winget_manifest_dir(&winget.package_id)
-            ))
+            )),
+            shell_quote(&winget.package_id)
         )
         .expect("write");
     } else {
@@ -2567,6 +2570,10 @@ fn push_publish_winget(
         w.push_str(" PUBLISH_WINGET_STATE");
     }
     w.push('\n');
+    if activated_remote {
+        // Outside the heredoc so `publisher_missing` cannot downgrade it to a warning.
+        w.push_str("          case \"${PUBLISH_WINGET_STATE:-}\" in active-required|inactive-soft) ;; *) echo \"::error::winget: winget-pkgs probe was inconclusive (${PUBLISH_WINGET_STATE:-unset}); not guessing between an update and a first submission.\" >&2; exit 1 ;; esac\n");
+    }
     // Under activated-remote a failed submission stays a warning while the
     // channel is inactive (the first submission); once active it is an error.
     w.push_str("          nix shell nixpkgs#curl nixpkgs#jq nixpkgs#unzip nixpkgs#wineWow64Packages.stable nixpkgs#util-linux -c bash <<'SCRIPT'");
@@ -2605,7 +2612,7 @@ fn push_publish_winget(
             push_winget_bootstrap(w, winget, &id, &manifest_dir, license, description);
         }
         _ => {
-            w.push_str("            echo '::error::winget: the package is not in winget-pkgs yet; set [winget].license and [winget].short_description (or Cargo license and description) for the first submission.' >&2; exit 1\n");
+            w.push_str("            echo '::error::winget: the package is not in winget-pkgs yet; set [winget].license and [winget].short_description (3-256 characters; or Cargo license and description) for the first submission.' >&2; exit 1\n");
         }
     }
     w.push_str("          fi\n");
@@ -3707,6 +3714,7 @@ esac"#,
         assert!(workflow.contains("publisher_missing scoop 'SCOOP_BUCKET_TOKEN unset'"));
         assert!(workflow.contains("publisher_missing flathub 'FLATHUB_TOKEN unset'"));
         assert!(workflow.contains("publisher_missing winget 'WINGET_PAT unset'"));
+        assert!(workflow.contains("winget_state=probe-failed"));
         assert!(workflow.contains("staged publisher is not active yet."));
         assert!(!workflow.contains("bootstrap channel is inactive, skipping."));
         assert!(!workflow.contains("require_credential 'repo secret' 'modde_apt_repo_gpg_key'"));
@@ -3941,6 +3949,7 @@ esac"#,
             activated.contains("export ZIP_NAME ZIP_URL VERSION WINGET_PAT PUBLISH_WINGET_STATE")
         );
         assert!(activated.contains("state=\"${PUBLISH_WINGET_STATE:-}\""));
+        assert!(activated.contains("active-required|inactive-soft) ;; *) echo"));
         assert!(
             activated.contains(
                 "<<'SCRIPT' || publisher_missing winget 'wingetcreate submission failed'"
