@@ -1100,13 +1100,17 @@ fn pull(
                 _ if moved => {}
                 "clean" | "unstable" | "has_hooks" => {
                     // Linear history forbids merge commits on the target.
+                    // Reading protection needs admin access; a token without
+                    // it assumes no rule rather than failing every merge.
                     let linear = base["protected"] == true
                         && get(&format!(
                             "{endpoint}/branches/{}/protection",
                             encoded(target)
-                        ))?
-                        .pointer("/required_linear_history/enabled")
-                            == Some(&Value::Bool(true));
+                        ))
+                        .is_ok_and(|p| {
+                            p.pointer("/required_linear_history/enabled")
+                                == Some(&Value::Bool(true))
+                        });
                     let method = [
                         ("merge", "allow_merge_commit"),
                         ("squash", "allow_squash_merge"),
@@ -1471,7 +1475,7 @@ mod tests {
         let writes = RefCell::new(Vec::new());
         let source = "5".repeat(40);
         let target = RefCell::new(source.clone());
-        let linear = RefCell::new(true);
+        let linear = RefCell::new(Some(true));
         let merge_method = RefCell::new("squash");
         let get = |path: &str| -> Result<Value> {
             Ok(match path {
@@ -1485,7 +1489,8 @@ mod tests {
                     json!({"protected":true,"commit":{"sha":*target.borrow()}})
                 }
                 "repos/team/demo/branches/trunk/protection" => {
-                    json!({"required_linear_history":{"enabled":*linear.borrow()}})
+                    let enabled = (*linear.borrow()).context("protection needs admin access")?;
+                    json!({"required_linear_history":{"enabled":enabled}})
                 }
                 _ if path == format!("repos/team/demo/commits/{revision}") => {
                     json!({"parents":[{"sha":source}]})
@@ -1597,8 +1602,12 @@ mod tests {
         );
         assert_eq!(change.merge_commit, Some("c".repeat(40)));
         assert_eq!(writes.take(), ["PUT repos/team/demo/pulls/7/merge"]);
-        *linear.borrow_mut() = false;
+        *linear.borrow_mut() = Some(false);
         *merge_method.borrow_mut() = "merge";
+        replay(&request).unwrap();
+        assert_eq!(writes.take(), ["PUT repos/team/demo/pulls/7/merge"]);
+        // Unreadable protection must not block a merge.
+        *linear.borrow_mut() = None;
         replay(&request).unwrap();
         assert_eq!(writes.take(), ["PUT repos/team/demo/pulls/7/merge"]);
         request.operation = "close".into();

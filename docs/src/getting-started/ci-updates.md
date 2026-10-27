@@ -529,7 +529,8 @@ Each run first re-reads a parked request:
 GitHub merges only while the target is still the candidate's source; a moved
 target leaves the merge pending until the next run closes and regenerates it.
 When the target requires linear history, merge commits are skipped in favour of
-the next allowed method. Previews (`--dry-run`) report a parked request as
+the next allowed method; reading that rule needs `Administration: read`, and
+without it the updater assumes no such rule. Previews (`--dry-run`) report a parked request as
 `proposed` and never close, propose or merge, or delete a ref.
 
 Deselecting or disabling a parked repository revokes the updater's authority
