@@ -50,7 +50,7 @@ fn strict_custody_dedupes_completions_per_commit_but_sealed_keeps_every_run() {
     let value: Value = serde_yaml::from_str(&fs::read_to_string(&workflow).unwrap()).unwrap();
     assert_eq!(
         value["concurrency"]["group"],
-        "producer-custody-${{ github.event.workflow_run.head_repository.id }}-${{ github.event.workflow_run.head_sha }}-${{ github.event.workflow_run.event }}-${{ github.event.workflow_run.head_branch }}-${{ github.event.workflow_run.pull_requests[0].number }}"
+        "producer-custody-${{ github.event.workflow_run.workflow_id }}-${{ github.event.workflow_run.head_repository.id }}-${{ github.event.workflow_run.head_sha }}-${{ github.event.workflow_run.event }}-${{ github.event.workflow_run.head_branch }}-${{ github.event.workflow_run.pull_requests[0].number }}"
     );
     assert_eq!(value["concurrency"]["cancel-in-progress"], false);
 
