@@ -824,12 +824,19 @@ impl Facts {
                 if runtime {
                     merge(found.entry(flake_ref).or_default(), refs);
                 }
+                // A `--git` source decides on its own: a fork's `simit`
+                // package is not simit.
+                let git = words
+                    .iter()
+                    .position(|word| *word == "--git")
+                    .and_then(|index| words.get(index + 1));
                 let install = line.contains("cargo install")
-                    && words.iter().any(|word| {
-                        *word == "simit"
-                            || word.starts_with("simit@")
-                            || word.contains("caniko/simit")
-                    });
+                    && match git {
+                        Some(url) => is_simit_repo_url(url),
+                        None => words
+                            .iter()
+                            .any(|word| *word == "simit" || word.starts_with("simit@")),
+                    };
                 if install {
                     let refs = found.entry(cargo_install).or_default();
                     match words
@@ -992,17 +999,23 @@ fn collect_strings(value: &Value, out: &mut String) {
 /// Whether a Cargo.lock package source is simit from crates.io or the canonical
 /// repository; forks and path sources are other code under the same name.
 fn is_canonical_simit_source(source: &str) -> bool {
-    if source.starts_with("registry+") || source.starts_with("sparse+") {
+    // crates.io's git and sparse index ids; other registries are other code.
+    if matches!(
+        source,
+        "registry+https://github.com/rust-lang/crates.io-index" | "sparse+https://index.crates.io/"
+    ) {
         return true;
     }
-    let Some(url) = source.strip_prefix("git+") else {
-        return false;
-    };
+    source.strip_prefix("git+").is_some_and(is_simit_repo_url)
+}
+
+/// Whether a Git URL names exactly the canonical repository, ignoring the
+/// query, fragment, trailing slash and `.git`; mirrors and forks do not match.
+fn is_simit_repo_url(url: &str) -> bool {
+    let url = url.strip_prefix("git+").unwrap_or(url);
     let url = url.split(['?', '#']).next().unwrap_or(url);
-    let url = url
-        .strip_suffix(".git")
-        .unwrap_or(url)
-        .trim_end_matches('/');
+    let url = url.trim_end_matches('/');
+    let url = url.strip_suffix(".git").unwrap_or(url);
     url.eq_ignore_ascii_case("https://github.com/caniko/simit")
 }
 
@@ -1122,10 +1135,7 @@ fn flake_inputs(lock: &Value) -> Vec<(&'static str, String, Option<String>)> {
                     .is_some_and(|owner| owner.eq_ignore_ascii_case("caniko"))
                     && locked["repo"] == "simit"
             }
-            Some("git") => locked["url"].as_str().is_some_and(|url| {
-                let url = url.strip_suffix(".git").unwrap_or(url);
-                url.ends_with("github.com/caniko/simit")
-            }),
+            Some("git") => locked["url"].as_str().is_some_and(is_simit_repo_url),
             _ => false,
         }
     };
@@ -1939,14 +1949,24 @@ mod tests {
             "git+https://github.com/caniko/simit?rev=abc#abc",
             "git+https://github.com/caniko/simit.git#abc",
             "registry+https://github.com/rust-lang/crates.io-index",
+            "sparse+https://index.crates.io/",
         ] {
             assert!(is_canonical_simit_source(source), "{source}");
         }
         for source in [
             "git+https://github.com/someone/simit?rev=abc#abc",
             "git+https://github.com/caniko/simit-fork#abc",
+            "registry+https://registry.example/index",
+            "sparse+https://cargo.example/index/",
         ] {
             assert!(!is_canonical_simit_source(source), "{source}");
+        }
+        assert!(is_simit_repo_url("https://github.com/caniko/simit.git/"));
+        for url in [
+            "https://github.com/caniko/simit-fork",
+            "https://mirror.example/github.com/caniko/simit",
+        ] {
+            assert!(!is_simit_repo_url(url), "{url}");
         }
         let decoded: Value = toml_edit::de::from_str("run = \"echo \\\"a\\\" \\\\ b\"").unwrap();
         let mut out = String::new();

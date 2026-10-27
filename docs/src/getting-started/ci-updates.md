@@ -671,7 +671,9 @@ plan claims an existing file outside the baseline.
 ## Provider migration
 
 `migrate = { provider; platform; runner; }` regenerates a profile's CI for
-another backend: `actions` on `github` or `forgejo`, or `crow` on `forgejo`.
+another backend: `actions` on `github`, or `crow` on `forgejo`. Forgejo Actions
+is not a migration target, because the Forgejo adapter qualifies only Crow
+pipelines.
 The `init ci` scopes receive `--ci-provider`, `--platform`, `--runner` and
 `--reset-step-runners`, which drops persisted `[ci].step_runners` labels of the
 old runner fleet and Nix-only `[ci].nix_system_runners`; `init release` receives the provider, platform and runner,

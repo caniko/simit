@@ -462,9 +462,9 @@ impl Config {
                 ensure!(
                     matches!(
                         (migration.provider.as_str(), migration.platform.as_str()),
-                        ("actions", "github" | "forgejo") | ("crow", "forgejo")
+                        ("actions", "github") | ("crow", "forgejo")
                     ),
-                    "migration provider/platform must be actions on github or forgejo, or crow on forgejo"
+                    "migration provider/platform must be actions on github or crow on forgejo (the forgejo adapter qualifies Crow pipelines only)"
                 );
                 crate::user_config::validate_runner_label(&migration.runner)?;
                 // The rewritten [ci] table is a ci-extra patch; badges would
@@ -788,6 +788,10 @@ mod tests {
             (
                 &["ci", "ci-extra"],
                 serde_json::json!({"provider":"actions","platform":"gitlab","runner":"ubuntu-24.04"}),
+            ),
+            (
+                &["ci", "ci-extra"],
+                serde_json::json!({"provider":"actions","platform":"forgejo","runner":"docker"}),
             ),
             (
                 &["ci", "ci-extra"],
