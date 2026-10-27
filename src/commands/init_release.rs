@@ -130,7 +130,13 @@ pub fn run(command: InitReleaseCommand) -> Result<()> {
         // Update plans only maintain an existing generated release workflow.
         let generated = std::fs::read_to_string(workspace_root.join(&workflow_path))
             .is_ok_and(|content| crate::render::ci::is_generated_workflow_marker(&content));
-        return if generated || !obsolete.is_empty() {
+        // A hand-written release workflow at the destination is never replaced,
+        // even when a marked one at the old backend is obsolete.
+        let destination_free = match std::fs::read_to_string(workspace_root.join(&workflow_path)) {
+            Ok(content) => crate::render::ci::is_generated_workflow_marker(&content),
+            Err(error) => error.kind() == std::io::ErrorKind::NotFound,
+        };
+        return if destination_free && (generated || !obsolete.is_empty()) {
             project::CiUpdatePlan::new(plan.files, obsolete, vec![])
         } else {
             project::CiUpdatePlan::new(vec![], vec![], vec![])
