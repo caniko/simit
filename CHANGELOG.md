@@ -7,6 +7,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- The generated GitHub `release.yml` can republish selected downstream channels
+  for an existing release: `workflow_dispatch` gains `tag` and `channels`
+  inputs (`gh workflow run release.yml -f tag=0.2.1 -f channels=winget`). A
+  dispatch with `tag` skips the release job and runs a `republish` job that
+  checks out and validates the signed tag, downloads the release assets,
+  verifies `SHA256SUMS.txt` with minisign against the committed key and every
+  used asset with `sha256sum -c`, then runs the probe and only the selected
+  aur, flathub, winget, homebrew, scoop, pypi or chocolatey steps. Unknown,
+  unconfigured or non-republishable channels are rejected up front. It has
+  read-only contents permission, a per-tag concurrency group, and keys the
+  Chocolatey candidate cache by the tag and its commit. A dispatch without
+  `tag` is unchanged; only GitHub releases with signing and a republishable
+  channel get the inputs.
+- winget manifests now match current winget-pkgs tooling: ManifestVersion
+  1.12.0 with the matching `# yaml-language-server: $schema=` header on each
+  file, `NestedInstallerFiles` inside the installer entry (as accepted
+  zip+portable packages such as BurntSushi.ripgrep.MSVC), and `PublisherUrl`
+  (the download repo owner's page) plus `PackageUrl` (`homepage`, else the repo
+  URL) in the locale manifest. An open PR whose head is the same branch on the
+  token user's fork is now refreshed in place: its branch is force-moved to a
+  commit with the regenerated manifests and the PR is kept; unchanged manifests
+  leave it untouched.
 - The trusted crate publisher's `prepare` stage no longer writes cargo-generated
   `Cargo.toml.orig` and `.cargo_vcs_info.json` into the verified source tree
   used for `cargo publish --dry-run`. Cargo rejected them as reserved file names
@@ -23,7 +45,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (`curl` and `jq` as the `WINGET_PAT` user) instead of `wingetcreate` under
   wine, which no longer runs on hosted runners (its release asset needs .NET).
   New packages and new versions share one path: the release step writes the
-  ManifestVersion 1.10.0 version, installer (zip with a nested portable
+  ManifestVersion 1.12.0 version, installer (zip with a nested portable
   executable and uppercase SHA-256) and default-locale manifests, commits them
   to `<id>-<version>` on the token owner's fork and opens a `New package:` or
   `New version:` PR. Reruns reuse an open PR and skip versions already

@@ -70,7 +70,7 @@ pub(crate) fn submit(args: WingetSubmitArgs) -> Result<()> {
     let script = work_dir.join("winget-submit.sh");
     fs::write(
         &script,
-        crate::render::release_workflow::winget_submit_script(&resolved),
+        crate::render::release_workflow::winget_submit_script(&resolved, platform),
     )
     .with_context(|| format!("writing {}", script.display()))?;
     // The token travels in the environment; the script hands it to curl via a header file.

@@ -40,10 +40,19 @@ title="$kind: $ID version $VERSION"
 must GET /user; login="$(val .login)"
 must GET "/repos/$UP"; base="$(val .default_branch)"
 branch="$(printf '%s-%s' "$ID" "$VERSION" | tr -c 'A-Za-z0-9._-' '-')"
-# A rerun with the PR still open is a success.
+# A PR that is still open is a success. When its head is this branch on the
+# token user's own fork, the regenerated manifests are moved onto it below.
 must GET "/repos/$UP/pulls?head=$login:$branch&state=open"
 pr="$(val '.[0].html_url // empty')"
-if [ -n "$pr" ]; then echo "winget: PR already open: $pr"; exit 0; fi
+refresh=
+if [ -n "$pr" ]; then
+  if jq -e --arg b "$branch" --arg f "${login,,}/winget-pkgs" \
+    '.[0] | .head.ref == $b and ((.head.repo.full_name // "") | ascii_downcase) == $f' "$tmpdir/resp" > /dev/null; then
+    refresh=1
+  else
+    echo "winget: PR already open: $pr"; exit 0
+  fi
+fi
 
 # POST /forks is idempotent; the fork can take a while to appear.
 must POST "/repos/$UP/forks" "$tmpdir/empty.json"
@@ -71,10 +80,24 @@ for f in "$dir"/*.yaml; do
   entries="$(jq -c --arg p "$MANIFEST_DIR/$VERSION/${f##*/}" --arg s "$(val .sha)" \
     '. + [{path: $p, mode: "100644", type: "blob", sha: $s}]' <<<"$entries")"
 done
+if [ -n "$refresh" ]; then
+  # Identical blobs on the PR branch mean the PR already carries these manifests.
+  want="$(jq -cS 'map({(.path | split("/") | last): .sha}) | add' <<<"$entries")"
+  if api GET "$fork/contents/$MANIFEST_DIR/$VERSION?ref=$branch" \
+    && [ "$(jq -cS 'map({(.name): .sha}) | add' "$tmpdir/resp")" = "$want" ]; then
+    echo "winget: PR already open and up to date: $pr"; exit 0
+  fi
+fi
 jq -n --arg b "$base_tree" --argjson e "$entries" '{base_tree: $b, tree: $e}' > "$tmpdir/b"
 must POST "$fork/git/trees" "$tmpdir/b"; tree="$(val .sha)"
 jq -n --arg m "$title" --arg t "$tree" --arg p "$head" '{message: $m, tree: $t, parents: [$p]}' > "$tmpdir/b"
 must POST "$fork/git/commits" "$tmpdir/b"; commit="$(val .sha)"
+if [ -n "$refresh" ]; then
+  # Keep the PR: force-move its branch to the commit with the new manifests.
+  jq -n --arg s "$commit" '{sha: $s, force: true}' > "$tmpdir/b"
+  must PATCH "$fork/git/refs/heads/$branch" "$tmpdir/b"
+  echo "winget: refreshed $pr with the regenerated manifests"; exit 0
+fi
 jq -n --arg r "refs/heads/$branch" --arg s "$commit" '{ref: $r, sha: $s}' > "$tmpdir/b"
 api POST "$fork/git/refs" "$tmpdir/b" || {
   [ "$code" != 422 ] && fail
