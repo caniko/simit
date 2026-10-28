@@ -309,13 +309,26 @@ pub(super) fn source_workflow_with_namespace(
             w.push_str(&format!("      - name: Document {name}\n        run: {prefix}cargo doc --locked{manifest} -p {quoted} --no-deps --all-features\n"));
         }
     }
-    // Cargo resolves not-yet-published interdependent members through its
-    // temporary packaging registry when the complete release set is selected.
+    // Verified packaging of the complete release set: every member's tarball is
+    // extracted and compiled before any archive is retained, so a member that
+    // cannot build from its packaged contents (e.g. `include_str!` of a file
+    // outside the package) fails here, not after its dependencies are on
+    // crates.io. Cargo >= 1.89 resolves not-yet-published interdependent
+    // members through its temporary packaging registry. Only plan members are
+    // selected, so `publish = false` members are never packaged.
     let selection = names
         .iter()
         .map(|name| format!(" -p {}", shell_word(name)))
         .collect::<String>();
-    w.push_str(&format!("      - name: Package coordinated release set\n        run: {}cargo package --locked{manifest} --allow-dirty --no-verify{selection} --target-dir \"$RUNNER_TEMP/simit-package-target\"\n", command_prefix(runtime)));
+    let prefix = command_prefix(runtime);
+    let guard = if names.len() > 1 {
+        format!(
+            "          {prefix}cargo --version | awk '{{split($2, v, \".\"); exit !(v[1] > 1 || v[2] >= 89)}}' || {{ echo 'Verifying a coordinated release set needs cargo >= 1.89 (temporary local registry overlay); pin a newer toolchain' >&2; exit 1; }}\n"
+        )
+    } else {
+        String::new()
+    };
+    w.push_str(&format!("      - name: Verify and package coordinated release set\n        run: |\n          set -euo pipefail\n{guard}          {prefix}cargo package --locked{manifest} --allow-dirty{selection} --target-dir \"$RUNNER_TEMP/simit-package-target\"\n"));
     for name in names {
         w.push_str(&archive_steps_with_packaging(
             name,

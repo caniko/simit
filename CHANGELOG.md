@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Fixed: the credential-free crate producer (`publish-workspace.yaml` and
+  `publish-crate-<name>.yaml`) packaged with `--no-verify`, so a member whose
+  tarball does not compile (for example an `include_str!` of a file outside
+  the package) was found only by the trusted publisher after its dependencies
+  were already on crates.io, leaving a half-published release. The producer
+  now runs a single verified `cargo package --locked` over every publishable
+  member (`publish = false` members are never selected) before any archive is
+  retained, so such a failure blocks the release before any upload. Verifying
+  a multi-member set needs cargo 1.89 or newer (temporary local registry
+  overlay); the step fails with a clear message on older cargo. Regenerate
+  workflows with `simit init ci`; the publisher engine
+  (`SIMIT_PUBLISHER_REVISION`) is unchanged.
 - Fixed: the release workflow's downstream publisher probe called
   `api.github.com` (winget-pkgs, Flathub) unauthenticated, so on GitHub
   hosted runners a shared-IP rate limit made the winget probe inconclusive

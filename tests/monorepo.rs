@@ -2347,7 +2347,7 @@ fn independent_publication_qualifies_native_components_and_keeps_version_drift_s
     assert!(text.contains("checkout_sha=\"$(git rev-parse --verify HEAD)\""));
     assert!(text.contains("ref: ${{ github.sha }}"));
     assert!(text.contains("version=\"${GITHUB_REF_NAME#worker/v}\""));
-    assert!(text.contains("cargo package --locked --allow-dirty --no-verify -p worker"));
+    assert!(text.contains("cargo package --locked --allow-dirty -p worker"));
     let publisher_path = temp
         .path()
         .join(".github/workflows/trusted-publish-crate-worker.yaml");
