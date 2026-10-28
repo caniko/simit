@@ -77,10 +77,7 @@ fn publish(args: WindowsPublishArgs) -> Result<()> {
             zip_archive: None,
             url,
             token_env: None,
-            wingetcreate: None,
-            wingetcreate_url: None,
             work_dir: Some(args.work_dir.join("winget")),
-            wine: "wine".to_owned(),
             dry_run: args.dry_run,
         })?;
     }

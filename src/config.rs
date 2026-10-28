@@ -2477,8 +2477,8 @@ pub struct ResolvedChocolatey {
     pub api_key_from_runner: bool,
 }
 
-/// `[winget]` with Cargo-metadata fallbacks applied, for the first-submission
-/// (`wingetcreate submit`) manifests.
+/// `[winget]` with Cargo-metadata fallbacks applied, for the generated
+/// winget-pkgs manifests.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ResolvedWinget {
     pub package_id: String,
@@ -3444,8 +3444,8 @@ impl ProjectConfig {
     }
 
     /// Resolve winget settings for one Cargo package. `license` and
-    /// `short_description` stay optional so update-only projects keep rendering;
-    /// the first-submission step reports them when they are missing.
+    /// `short_description` stay optional so projects keep rendering;
+    /// the release step reports them when they are missing.
     pub fn resolve_winget(&self, package: &crate::cargo::Package) -> Result<ResolvedWinget> {
         let cfg = self
             .winget
