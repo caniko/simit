@@ -29,6 +29,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   token user's fork is now refreshed in place: its branch is force-moved to a
   commit with the regenerated manifests and the PR is kept; unchanged manifests
   leave it untouched.
+- The trusted crate publisher's `prepare` stage no longer writes cargo-generated
+  `Cargo.toml.orig` and `.cargo_vcs_info.json` into the verified source tree
+  used for `cargo publish --dry-run`. Cargo rejected them as reserved file names
+  for crates whose manifest has no `include` list. Both files are still compared
+  against the signed source and covered by the archive checksum. This is an
+  engine change: consumers must move `SIMIT_PUBLISHER_REVISION`; generated
+  workflows are unchanged.
 - New `[[ci.target_smokes]]` renders a build job on the Linux CI runner
   (`nix build`, dereferenced output uploaded as an artifact) and a smoke job on
   a target runner such as `windows-2025` or `macos-15` that downloads it and runs
