@@ -522,10 +522,23 @@ pub fn render(inputs: &ReleaseWorkflowInputs<'_>) -> String {
     // Codeberg's current Gitea 1.22-derived Actions service rejects nested
     // workflow_dispatch input mappings.  Release publication is tag-driven;
     // an operator can dispatch this workflow against the tag ref directly.
-    w.push_str("  workflow_dispatch:\n\n");
+    let republish = republish_enabled(inputs);
+    let not_republish = if republish { NOT_REPUBLISH } else { "" };
+    if republish {
+        // GitHub accepts input mappings; `tag` + `channels` republish selected
+        // downstream channels for an existing release (see the republish job).
+        w.push_str("  workflow_dispatch:\n    inputs:\n      tag:\n        description: Existing release tag to republish channels for (leave empty for a plain dispatch)\n        required: false\n        type: string\n      channels:\n        description: \"Comma-separated channels to republish with tag, e.g. winget,chocolatey\"\n        required: false\n        type: string\n\n");
+    } else {
+        w.push_str("  workflow_dispatch:\n\n");
+    }
 
     w.push_str("concurrency:\n");
-    w.push_str("  group: ${{ github.workflow_ref }}-${{ github.ref }}\n");
+    if republish {
+        // One group per tag: a republish queues behind that tag's own release run.
+        w.push_str("  group: ${{ github.workflow_ref }}-${{ inputs.tag != '' && format('refs/tags/{0}', inputs.tag) || github.ref }}\n");
+    } else {
+        w.push_str("  group: ${{ github.workflow_ref }}-${{ github.ref }}\n");
+    }
     w.push_str("  cancel-in-progress: false\n\n");
 
     w.push_str("jobs:\n");
@@ -541,7 +554,9 @@ pub fn render(inputs: &ReleaseWorkflowInputs<'_>) -> String {
     if separate_validation {
         // No reusable build or Attic credential is admitted before event-bound
         // signed-tag validation. Every job checks out the same immutable SHA.
-        w.push_str("  validate:\n    permissions:\n      contents: read\n");
+        w.push_str("  validate:\n");
+        w.push_str(not_republish);
+        w.push_str("    permissions:\n      contents: read\n");
         writeln!(
             w,
             "    timeout-minutes: {}",
@@ -557,11 +572,17 @@ pub fn render(inputs: &ReleaseWorkflowInputs<'_>) -> String {
             push_preinstalled_nix_env(&mut w, inputs.artifacts);
         }
         w.push_str("    steps:\n");
-        push_checkout(&mut w, inputs.platform, inputs.runner);
+        push_checkout(&mut w, inputs.platform, inputs.runner, "${{ github.sha }}");
         if !inputs.preinstalled_nix {
             push_install_nix(&mut w, inputs.platform, inputs.artifacts);
         }
-        push_validate_tag(&mut w, inputs.artifacts, inputs.tag_prefix, notes_source);
+        push_validate_tag(
+            &mut w,
+            inputs.artifacts,
+            inputs.tag_prefix,
+            notes_source,
+            false,
+        );
         push_required_gates(
             &mut w,
             inputs.required_gates,
@@ -570,7 +591,9 @@ pub fn render(inputs: &ReleaseWorkflowInputs<'_>) -> String {
         );
     }
     if github_prebuild {
-        w.push_str("  prebuild:\n    needs: validate\n    uses: ./.github/workflows/prebuild.yaml\n    with:\n      release: true\n");
+        w.push_str("  prebuild:\n    needs: validate\n");
+        w.push_str(not_republish);
+        w.push_str("    uses: ./.github/workflows/prebuild.yaml\n    with:\n      release: true\n");
         let attic = inputs.attic.filter(|_| prebuild_publishes_attic(inputs));
         if attic.is_some() || inputs.artifacts.netrc_secret.is_some() {
             w.push_str("    secrets:\n");
@@ -587,6 +610,7 @@ pub fn render(inputs: &ReleaseWorkflowInputs<'_>) -> String {
         }
     }
     w.push_str("  release:\n");
+    w.push_str(not_republish);
     if github_prebuild {
         w.push_str("    needs: [validate, prebuild]\n");
     } else if separate_validation {
@@ -611,11 +635,17 @@ pub fn render(inputs: &ReleaseWorkflowInputs<'_>) -> String {
     }
     w.push_str("    steps:\n");
 
-    push_checkout(&mut w, inputs.platform, inputs.runner);
+    push_checkout(&mut w, inputs.platform, inputs.runner, "${{ github.sha }}");
     if !inputs.preinstalled_nix {
         push_install_nix(&mut w, inputs.platform, inputs.artifacts);
     }
-    push_validate_tag(&mut w, inputs.artifacts, inputs.tag_prefix, notes_source);
+    push_validate_tag(
+        &mut w,
+        inputs.artifacts,
+        inputs.tag_prefix,
+        notes_source,
+        false,
+    );
     push_release_notes(&mut w, inputs.tag_prefix, notes_source);
     push_release_credentials_preflight(&mut w, inputs);
     if let Some(copr) = inputs.copr {
@@ -705,10 +735,283 @@ pub fn render(inputs: &ReleaseWorkflowInputs<'_>) -> String {
         push_publish_copr(&mut w, copr, activated_remote);
     }
     if let Some(chocolatey) = inputs.chocolatey {
-        push_publish_chocolatey(&mut w, chocolatey, activated_remote, inputs.platform);
+        push_publish_chocolatey(&mut w, chocolatey, activated_remote, inputs.platform, false);
+    }
+    if republish_enabled(inputs) {
+        push_republish_job(&mut w, inputs, notes_source, activated_remote);
     }
 
     w
+}
+
+/// Channels whose publish steps need nothing but the checked-out tag and the
+/// signed release assets, so a republish can run them. apt and COPR build
+/// their inputs (debs, SRPM) in the release job and are not republishable.
+fn republishable_channels(inputs: &ReleaseWorkflowInputs<'_>) -> Vec<&'static str> {
+    let mut channels = Vec::new();
+    if inputs.aur.is_some() {
+        channels.push("aur");
+    }
+    if inputs.flatpak.is_some() {
+        channels.push("flathub");
+    }
+    if inputs.winget.is_some() {
+        channels.push("winget");
+    }
+    if inputs.homebrew.is_some() {
+        channels.push("homebrew");
+    }
+    if inputs.scoop.is_some() && channel_enabled(inputs, "scoop") {
+        channels.push("scoop");
+    }
+    if inputs.pypi.is_some() && channel_enabled(inputs, "pypi") {
+        channels.push("pypi");
+    }
+    if inputs.chocolatey.is_some() {
+        channels.push("chocolatey");
+    }
+    channels
+}
+
+/// Republishing needs a GitHub release to read the assets from, the minisign
+/// signature to verify them against, and at least one republishable channel.
+/// GitHub only: Forgejo's Actions service rejects `workflow_dispatch` inputs.
+fn republish_enabled(inputs: &ReleaseWorkflowInputs<'_>) -> bool {
+    inputs.platform == Platform::Github
+        && inputs.artifacts.sign
+        && inputs
+            .release
+            .is_some_and(|release| release.provider == ReleaseProvider::Github)
+        && !republishable_channels(inputs).is_empty()
+}
+
+/// The release, prebuild and validate jobs do not run for a republish dispatch.
+const NOT_REPUBLISH: &str =
+    "    if: ${{ github.event_name != 'workflow_dispatch' || inputs.tag == '' }}\n";
+
+/// Release-asset name patterns (shell globs over `${VERSION}`) a channel reads.
+/// AUR reads only `SHA256SUMS.txt`, which is always verified.
+fn republish_assets(inputs: &ReleaseWorkflowInputs<'_>, channel: &str) -> Vec<String> {
+    match channel {
+        "pypi" => vec!["*.whl".to_owned()],
+        "chocolatey" => inputs
+            .chocolatey
+            .map(|c| {
+                vec![
+                    c.archive_pattern
+                        .replace("{name}", &c.name)
+                        .replace("{version}", "${VERSION}")
+                        .replace("{arch}", "x86_64"),
+                ]
+            })
+            .unwrap_or_default(),
+        "winget" => inputs
+            .winget
+            .map(|w| vec![w.zip_archive.replace("{version}", "${VERSION}")])
+            .unwrap_or_default(),
+        "scoop" => inputs
+            .scoop
+            .map(|s| {
+                let mut v = vec![scoop_windows_archive(s, "x86_64")];
+                if s.architectures.arm64 {
+                    v.push(scoop_windows_archive(s, "aarch64"));
+                }
+                v
+            })
+            .unwrap_or_default(),
+        "homebrew" => inputs
+            .homebrew
+            .map(|h| {
+                homebrew_platform_keys(h)
+                    .into_iter()
+                    .filter(|(_, _, _, enabled)| *enabled)
+                    .map(|(_, arch, os, _)| homebrew_archive(h, arch, os))
+                    .collect()
+            })
+            .unwrap_or_default(),
+        "flathub" => inputs
+            .flatpak
+            .map(|f| f.manifest_files.clone())
+            .unwrap_or_default(),
+        _ => Vec::new(),
+    }
+}
+
+/// Gate every step of a rendered channel on the channel being selected.
+fn gate_channel_steps(steps: &str, channel: &str) -> String {
+    let cond = format!("steps.republish.outputs.{channel} == 'true'");
+    let mut out = String::new();
+    for (i, chunk) in steps.split("      - name:").enumerate() {
+        if i == 0 {
+            out.push_str(chunk);
+            continue;
+        }
+        out.push_str("      - name:");
+        match chunk.find("\n        if: ") {
+            Some(at) if !chunk[..at].contains("\n        run:") => {
+                let start = at + "\n        if: ".len();
+                let end = start + chunk[start..].find('\n').expect("if line ends");
+                out.push_str(&chunk[..at]);
+                write!(out, "\n        if: {cond} && ({})", &chunk[start..end]).expect("write");
+                out.push_str(&chunk[end..]);
+            }
+            _ => {
+                let nl = chunk.find('\n').expect("step name line ends");
+                out.push_str(&chunk[..=nl]);
+                writeln!(out, "        if: {cond}").expect("write");
+                out.push_str(&chunk[nl + 1..]);
+            }
+        }
+    }
+    out
+}
+
+/// A dispatch with `tag` set republishes selected channels for that existing
+/// release: validate the signed tag, download and verify the release assets
+/// against the committed minisign key, then run only the selected steps.
+fn push_republish_job(
+    w: &mut String,
+    inputs: &ReleaseWorkflowInputs<'_>,
+    notes_source: ReleaseNotesSource,
+    activated_remote: bool,
+) {
+    let release = inputs.release.expect("republish needs a GitHub release");
+    let channels = republishable_channels(inputs);
+    let pypi_oidc = inputs
+        .pypi
+        .is_some_and(|pypi| pypi.trusted_publishing && channels.contains(&"pypi"));
+    w.push_str("  republish:\n");
+    w.push_str("    if: ${{ github.event_name == 'workflow_dispatch' && inputs.tag != '' }}\n");
+    w.push_str("    timeout-minutes: 60\n");
+    writeln!(w, "    runs-on: {}", inputs.runner).expect("write");
+    w.push_str("    permissions:\n      contents: read\n");
+    if pypi_oidc {
+        w.push_str("      id-token: write\n");
+    }
+    if inputs.preinstalled_nix {
+        push_preinstalled_nix_env(w, inputs.artifacts);
+    }
+    w.push_str("    steps:\n");
+
+    // Reject bad input before anything is checked out or downloaded.
+    let known = channels.join(" ");
+    let tag_check = if inputs.tag_prefix == crate::release_identity::TagPrefix::V {
+        "case \"$INPUT_TAG\" in v*) ;; *) echo '::error::tag must start with v' >&2; exit 1;; esac\n          version=\"${INPUT_TAG#v}\"\n"
+    } else {
+        "version=\"$INPUT_TAG\"\n"
+    };
+    w.push_str("      - name: Select channels to republish\n        id: republish\n        env:\n          INPUT_TAG: ${{ inputs.tag }}\n          INPUT_CHANNELS: ${{ inputs.channels }}\n        run: |\n          set -euo pipefail\n");
+    writeln!(w, "          known=' {known} '").expect("write");
+    writeln!(w, "          {tag_check}          echo \"$version\" | grep -Eq '{TAG_REGEX}' || {{ echo \"::error::tag '$INPUT_TAG' is not a release tag\" >&2; exit 1; }}").expect("write");
+    w.push_str(
+        "          selected=','\n          IFS=',' read -ra requested <<< \"$INPUT_CHANNELS\"\n",
+    );
+    w.push_str("          for raw in \"${requested[@]}\"; do\n            channel=\"$(printf '%s' \"$raw\" | tr -d '[:space:]')\"\n            [ -n \"$channel\" ] || continue\n");
+    w.push_str("            case \"$known\" in *\" $channel \"*) ;; *) echo \"::error::channel '$channel' is unknown, not configured here or not republishable; choose from:$known\" >&2; exit 1;; esac\n");
+    w.push_str("            case \"$selected\" in *\",$channel,\"*) ;; *) selected=\"$selected$channel,\";; esac\n          done\n");
+    w.push_str("          [ \"$selected\" != ',' ] || { echo '::error::channels is empty; choose from:'\"$known\" >&2; exit 1; }\n");
+    w.push_str("          for channel in $known; do\n            case \"$selected\" in *\",$channel,\"*) echo \"$channel=true\" >> \"$GITHUB_OUTPUT\";; esac\n          done\n");
+    w.push_str("          echo \"channels=${selected#,}\" >> \"$GITHUB_OUTPUT\"\n");
+
+    push_checkout(
+        w,
+        inputs.platform,
+        inputs.runner,
+        "refs/tags/${{ inputs.tag }}",
+    );
+    if !inputs.preinstalled_nix {
+        push_install_nix(w, inputs.platform, inputs.artifacts);
+    }
+    push_validate_tag(w, inputs.artifacts, inputs.tag_prefix, notes_source, true);
+
+    // Download only what the selected channels read, then fail closed unless
+    // the signed checksum list verifies and covers every downloaded file.
+    w.push_str("      - name: Download and verify release assets\n        env:\n          GITHUB_TOKEN: ${{ github.token }}\n");
+    writeln!(w, "          GITHUB_API: {}", release.api_base).expect("write");
+    writeln!(w, "          GITHUB_REPO: {}", release.repo).expect("write");
+    w.push_str("          REPUBLISH_CHANNELS: ${{ steps.republish.outputs.channels }}\n");
+    w.push_str("        run: |\n          set -euo pipefail\n          nix shell nixpkgs#curl nixpkgs#jq nixpkgs#minisign -c bash <<'SCRIPT'\n");
+    w.push_str(
+        "          set -euo pipefail\n          . ./release-env\n          mkdir -p release\n",
+    );
+    w.push_str("          curl -sS --fail -H \"Authorization: Bearer $GITHUB_TOKEN\" -H 'Accept: application/vnd.github+json' -H 'X-GitHub-Api-Version: 2022-11-28' \"$GITHUB_API/repos/$GITHUB_REPO/releases/tags/$TAG\" > release.json\n");
+    w.push_str("          fetch() {\n            id=\"$(jq -r --arg n \"$1\" '[.assets[] | select(.name == $n)][0].id // empty' release.json)\"\n            [ -n \"$id\" ] || { echo \"::error::release $TAG has no asset $1\" >&2; exit 1; }\n");
+    w.push_str("            curl -sS --fail -L -H \"Authorization: Bearer $GITHUB_TOKEN\" -H 'Accept: application/octet-stream' -o \"release/$1\" \"$GITHUB_API/repos/$GITHUB_REPO/releases/assets/$id\"\n          }\n");
+    w.push_str("          fetch SHA256SUMS.txt\n          fetch SHA256SUMS.txt.minisig\n");
+    writeln!(
+        w,
+        "          test -s {pub_key}\n          minisign -V -m release/SHA256SUMS.txt -x release/SHA256SUMS.txt.minisig -p {pub_key}",
+        pub_key = inputs.artifacts.minisign_pub
+    )
+    .expect("write");
+    w.push_str("          need=()\n");
+    for channel in &channels {
+        let patterns = republish_assets(inputs, channel);
+        if patterns.is_empty() {
+            continue;
+        }
+        write!(
+            w,
+            "          case \",$REPUBLISH_CHANNELS,\" in *,{channel},*)"
+        )
+        .expect("write");
+        for pattern in patterns {
+            write!(w, " need+=(\"{pattern}\");").expect("write");
+        }
+        w.push_str(" ;; esac\n");
+    }
+    w.push_str("          mapfile -t listed < <(awk '{print $2}' release/SHA256SUMS.txt)\n          : > release-selected.sums\n");
+    w.push_str("          for pattern in \"${need[@]}\"; do\n            found=0\n            for name in \"${listed[@]}\"; do\n");
+    w.push_str("              case \"$name\" in */* | '') echo \"::error::unsafe name in SHA256SUMS.txt: $name\" >&2; exit 1;; esac\n");
+    w.push_str("              # shellcheck disable=SC2254\n              case \"$name\" in $pattern) fetch \"$name\"; awk -v n=\"$name\" '$2 == n' release/SHA256SUMS.txt >> release-selected.sums; found=1;; esac\n            done\n");
+    w.push_str("            [ \"$found\" = 1 ] || { echo \"::error::SHA256SUMS.txt lists no asset matching $pattern\" >&2; exit 1; }\n          done\n");
+    w.push_str("          if [ \"${#need[@]}\" -gt 0 ]; then (cd release && sha256sum -c --strict ../release-selected.sums); fi\n          SCRIPT\n");
+
+    if activated_remote {
+        push_publisher_state_probe(w, inputs);
+    }
+    let mut channel_steps = |channel: &str, f: &dyn Fn(&mut String)| {
+        let mut steps = String::new();
+        f(&mut steps);
+        w.push_str(&gate_channel_steps(&steps, channel));
+    };
+    if let Some(aur) = inputs.aur {
+        channel_steps("aur", &|s| push_publish_aur(s, aur, activated_remote));
+    }
+    if let Some(flatpak) = inputs.flatpak {
+        channel_steps("flathub", &|s| {
+            push_publish_flathub(s, flatpak, activated_remote);
+        });
+    }
+    if let Some(winget) = inputs.winget {
+        channel_steps("winget", &|s| {
+            push_publish_winget(s, winget, activated_remote, inputs.platform);
+        });
+    }
+    if let Some(homebrew) = inputs.homebrew {
+        channel_steps("homebrew", &|s| {
+            push_publish_homebrew(s, homebrew, activated_remote, inputs.platform);
+        });
+    }
+    if let Some(scoop) = inputs.scoop.filter(|_| channel_enabled(inputs, "scoop")) {
+        channel_steps("scoop", &|s| {
+            push_publish_scoop(
+                s,
+                scoop,
+                channel_soft_skip(inputs, "scoop", activated_remote),
+            );
+        });
+    }
+    if let Some(pypi) = inputs.pypi.filter(|_| channel_enabled(inputs, "pypi")) {
+        channel_steps("pypi", &|s| {
+            push_publish_pypi(s, pypi, channel_soft_skip(inputs, "pypi", activated_remote));
+        });
+    }
+    if let Some(chocolatey) = inputs.chocolatey {
+        channel_steps("chocolatey", &|s| {
+            push_publish_chocolatey(s, chocolatey, activated_remote, inputs.platform, true);
+        });
+    }
 }
 
 fn push_secrets_header(w: &mut String, inputs: &ReleaseWorkflowInputs<'_>) {
@@ -879,7 +1182,7 @@ fn push_secrets_header(w: &mut String, inputs: &ReleaseWorkflowInputs<'_>) {
     w.push('\n');
 }
 
-fn push_checkout(w: &mut String, platform: Platform, runner: &str) {
+fn push_checkout(w: &mut String, platform: Platform, runner: &str, ref_expr: &str) {
     w.push_str("      - uses: ");
     if platform == Platform::Forgejo {
         w.push_str(&forgejo_action_ref("checkout", "v4.3.1"));
@@ -892,7 +1195,11 @@ fn push_checkout(w: &mut String, platform: Platform, runner: &str) {
         w.push_str(&github_action_ref("actions/checkout", version));
     }
     w.push('\n');
-    w.push_str("        with:\n          fetch-depth: 0\n          ref: ${{ github.sha }}\n          persist-credentials: false\n");
+    writeln!(
+        w,
+        "        with:\n          fetch-depth: 0\n          ref: {ref_expr}\n          persist-credentials: false"
+    )
+    .expect("write");
 }
 
 fn push_install_nix(w: &mut String, platform: Platform, artifacts: &ArtifactsConfig) {
@@ -975,7 +1282,7 @@ pub(crate) fn tag_validation_step(
     notes: ReleaseNotesSource,
 ) -> String {
     let mut step = String::new();
-    push_validate_tag(&mut step, artifacts, prefix, notes);
+    push_validate_tag(&mut step, artifacts, prefix, notes, false);
     step
 }
 
@@ -984,9 +1291,15 @@ fn push_validate_tag(
     artifacts: &ArtifactsConfig,
     prefix: crate::release_identity::TagPrefix,
     notes: ReleaseNotesSource,
+    republish: bool,
 ) {
-    w.push_str("      - name: Validate tag\n        env:\n          GITHUB_TOKEN: ${{ github.token }}\n        run: |\n          set -euo pipefail\n");
-    writeln!(w, "          {VERSION_FROM_REF}").expect("write");
+    // A republish validates the dispatched `tag` input instead of the event ref.
+    if republish {
+        w.push_str("      - name: Validate tag\n        id: validate\n        env:\n          GITHUB_TOKEN: ${{ github.token }}\n          INPUT_TAG: ${{ inputs.tag }}\n        run: |\n          set -euo pipefail\n          VERSION=\"$INPUT_TAG\"\n");
+    } else {
+        w.push_str("      - name: Validate tag\n        env:\n          GITHUB_TOKEN: ${{ github.token }}\n        run: |\n          set -euo pipefail\n");
+        writeln!(w, "          {VERSION_FROM_REF}").expect("write");
+    }
     w.push_str("          TAG=\"$VERSION\"\n");
     if prefix == crate::release_identity::TagPrefix::V {
         w.push_str("          case \"$TAG\" in v*) ;; *) echo 'release tag must start with v' >&2; exit 1;; esac\n          VERSION=\"${TAG#v}\"\n");
@@ -1016,8 +1329,14 @@ fn push_validate_tag(
         "          validated_sha=\"$(git rev-parse --verify \"refs/tags/${TAG}^{commit}\")\"\n",
     );
     w.push_str("          checkout_sha=\"$(git rev-parse --verify HEAD)\"\n");
-    w.push_str("          event_sha=\"${GITHUB_SHA:-${FORGE_SHA:-${FORGEJO_SHA:-}}}\"\n");
-    w.push_str("          test -n \"$event_sha\" && test \"$validated_sha\" = \"$event_sha\" && test \"$checkout_sha\" = \"$event_sha\" || { echo \"Signed tag commit does not match the immutable event checkout\" >&2; exit 1; }\n");
+    if republish {
+        // No push event pins the commit: the checkout of the tag ref must be the signed tag's commit.
+        w.push_str("          test \"$validated_sha\" = \"$checkout_sha\" || { echo \"Signed tag commit does not match the checked-out tag\" >&2; exit 1; }\n");
+        w.push_str("          printf 'sha=%s\\n' \"$validated_sha\" >> \"$GITHUB_OUTPUT\"\n");
+    } else {
+        w.push_str("          event_sha=\"${GITHUB_SHA:-${FORGE_SHA:-${FORGEJO_SHA:-}}}\"\n");
+        w.push_str("          test -n \"$event_sha\" && test \"$validated_sha\" = \"$event_sha\" && test \"$checkout_sha\" = \"$event_sha\" || { echo \"Signed tag commit does not match the immutable event checkout\" >&2; exit 1; }\n");
+    }
     w.push_str("          git worktree add --detach \"$tag_worktree\" \"$validated_sha\"\n");
     if let Some(attr) = &artifacts.version_attr {
         writeln!(
@@ -2695,6 +3014,7 @@ fn push_publish_chocolatey(
     chocolatey: &ResolvedChocolatey,
     activated_remote: bool,
     platform: Platform,
+    republish: bool,
 ) {
     let zip = chocolatey
         .archive_pattern
@@ -2724,7 +3044,20 @@ fn push_publish_chocolatey(
         };
         let restore = cache.replacen('@', "/restore@", 1);
         let save = cache.replacen('@', "/save@", 1);
-        let key = "chocolatey-${{ github.repository }}-${{ github.ref }}-${{ github.sha }}-${{ hashFiles('chocolatey-package/*.nuspec', 'chocolatey-package/tools/*.ps1') }}";
+        // A republish keys the candidate exactly as the tag's push run did
+        // (`refs/tags/<tag>` and the tag's commit), not by the dispatch ref and
+        // commit, so repeated republishes of one tag share one candidate.
+        let (key_ref, key_sha) = if republish {
+            (
+                "refs/tags/${{ inputs.tag }}",
+                "${{ steps.validate.outputs.sha }}",
+            )
+        } else {
+            ("${{ github.ref }}", "${{ github.sha }}")
+        };
+        let key = format!(
+            "chocolatey-${{{{ github.repository }}}}-{key_ref}-{key_sha}-${{{{ hashFiles('chocolatey-package/*.nuspec', 'chocolatey-package/tools/*.ps1') }}}}"
+        );
         writeln!(w, "      - name: Restore exact Chocolatey candidate\n        if: steps.chocolatey-source.outputs.prepared == 'true'\n        id: chocolatey-cache\n        uses: {restore}\n        with:\n          path: chocolatey-package/.simit-candidates\n          key: {key}").expect("write");
         w.push_str("      - name: Pack Chocolatey candidate without publication credentials\n        if: steps.chocolatey-source.outputs.prepared == 'true'\n        run: |\n          set -euo pipefail\n          . ./release-env\n");
         writeln!(w, "          ZIP=\"release/{zip}\"").expect("write");
@@ -3429,6 +3762,7 @@ esac"#,
             &config,
             crate::release_identity::TagPrefix::None,
             ReleaseNotesSource::Changelog,
+            false,
         );
         let script = step
             .split_once("        run: |\n")
@@ -4450,6 +4784,419 @@ cat "$FAKE/code"
         fake.assert_token_hygiene(&out);
     }
 
+    fn republish_doc(
+        activated: bool,
+        sign: bool,
+        f: impl FnOnce(&mut ReleaseWorkflowInputs<'_>),
+    ) -> (String, serde_yaml::Value) {
+        let (winget, chocolatey, apt) = (sorrel_winget(), chocolatey(), apt());
+        let mut release = codeberg();
+        release.provider = ReleaseProvider::Github;
+        release.api_base = "https://api.github.com".to_owned();
+        let pypi = PypiReleaseConfig {
+            trusted_publishing: true,
+            token_secret: "PYPI_TOKEN".to_owned(),
+        };
+        let artifacts = ArtifactsConfig {
+            sign,
+            ..artifacts()
+        };
+        let mut inputs = ReleaseWorkflowInputs {
+            platform: Platform::Github,
+            runner: "ubuntu-24.04",
+            preinstalled_nix: false,
+            publish_enforcement: if activated {
+                ReleasePublisherEnforcement::ActivatedRemote
+            } else {
+                ReleasePublisherEnforcement::default()
+            },
+            publish: &ReleasePublishConfig::default(),
+            artifacts: &artifacts,
+            prebuild: None,
+            smoke_command: None,
+            tag_prefix: crate::release_identity::TagPrefix::None,
+            notes_source: None,
+            required_gates: &[],
+            release: Some(&release),
+            attic: None,
+            aur: None,
+            copr: None,
+            apt: Some(&apt),
+            homebrew: None,
+            scoop: None,
+            chocolatey: Some(&chocolatey),
+            windows_signing: None,
+            flatpak: None,
+            winget: Some(&winget),
+            announce: None,
+            pypi: Some(&pypi),
+        };
+        f(&mut inputs);
+        let workflow = render(&inputs);
+        let doc = serde_yaml::from_str(&workflow).unwrap();
+        (workflow, doc)
+    }
+
+    fn step<'a>(doc: &'a serde_yaml::Value, name: &str) -> &'a serde_yaml::Value {
+        doc["jobs"]["republish"]["steps"]
+            .as_sequence()
+            .unwrap()
+            .iter()
+            .find(|s| s["name"].as_str() == Some(name))
+            .unwrap_or_else(|| panic!("no step {name}"))
+    }
+
+    #[test]
+    fn republish_job_runs_only_selected_channels_against_the_signed_tag() {
+        let (workflow, doc) = republish_doc(true, true, |_| {});
+        let dispatch = &doc["on"]["workflow_dispatch"]["inputs"];
+        assert_eq!(dispatch["tag"]["type"].as_str(), Some("string"));
+        assert_eq!(dispatch["channels"]["type"].as_str(), Some("string"));
+        assert!(workflow.contains("format('refs/tags/{0}', inputs.tag)"));
+
+        // The release job (and only it) is skipped for a republish dispatch.
+        let skip = "${{ github.event_name != 'workflow_dispatch' || inputs.tag == '' }}";
+        assert_eq!(doc["jobs"]["release"]["if"].as_str(), Some(skip));
+        assert!(
+            doc["jobs"]["republish"]["if"]
+                .as_str()
+                .unwrap()
+                .contains("inputs.tag != ''")
+        );
+
+        let job = &doc["jobs"]["republish"];
+        assert_eq!(job["permissions"]["contents"].as_str(), Some("read"));
+        assert_eq!(job["permissions"]["id-token"].as_str(), Some("write"));
+        let names: Vec<_> = job["steps"]
+            .as_sequence()
+            .unwrap()
+            .iter()
+            .filter_map(|s| s["name"].as_str())
+            .collect();
+        for gone in [
+            "Build release artifacts",
+            "Sign checksums and attest release artifacts",
+            "Publish GitHub release",
+            "Run release smoke checks",
+            "Generate release notes",
+        ] {
+            assert!(!names.contains(&gone), "{gone} must not run in a republish");
+        }
+        let pos = |n: &str| {
+            names
+                .iter()
+                .position(|x| *x == n)
+                .unwrap_or_else(|| panic!("{n}"))
+        };
+        assert!(pos("Select channels to republish") < pos("Validate tag"));
+        assert!(pos("Validate tag") < pos("Download and verify release assets"));
+        assert!(
+            pos("Download and verify release assets") < pos("Probe downstream publisher state")
+        );
+        assert!(pos("Probe downstream publisher state") < pos("Publish winget manifest PR"));
+
+        // Same tag validation, against the dispatched tag.
+        let validate = step(&doc, "Validate tag");
+        let run = validate["run"].as_str().unwrap();
+        assert!(run.contains("VERSION=\"$INPUT_TAG\"") && run.contains("git verify-tag \"$TAG\""));
+        assert!(run.contains("keys/maintainers.gpg"));
+        assert!(run.contains("Signed tag commit does not match the checked-out tag"));
+        assert!(!run.contains("event_sha"));
+        let checkout = job["steps"][0]["with"]["ref"].as_str().unwrap_or_default();
+        let checkout = if checkout.is_empty() {
+            job["steps"][1]["with"]["ref"].as_str().unwrap()
+        } else {
+            checkout
+        };
+        assert_eq!(checkout, "refs/tags/${{ inputs.tag }}");
+
+        // Every channel step (and each Chocolatey stage) is gated on the selection.
+        for (name, channel) in [
+            ("Publish winget manifest PR", "winget"),
+            ("Publish wheels to PyPI", "pypi"),
+            ("Prepare Chocolatey package", "chocolatey"),
+            ("Publish Chocolatey package", "chocolatey"),
+        ] {
+            let cond = step(&doc, name)["if"].as_str().unwrap();
+            assert!(
+                cond.contains(&format!("steps.republish.outputs.{channel} == 'true'")),
+                "{name}: {cond}"
+            );
+        }
+        let cond = step(
+            &doc,
+            "Pack Chocolatey candidate without publication credentials",
+        )["if"]
+            .as_str()
+            .unwrap();
+        assert!(cond.contains(
+            "outputs.chocolatey == 'true' && (steps.chocolatey-source.outputs.prepared == 'true')"
+        ));
+
+        // Chocolatey keys the candidate by the tag and its commit, as the push run does.
+        let key = step(&doc, "Restore exact Chocolatey candidate")["with"]["key"]
+            .as_str()
+            .unwrap();
+        assert!(
+            key.contains("-refs/tags/${{ inputs.tag }}-${{ steps.validate.outputs.sha }}-"),
+            "{key}"
+        );
+        assert!(!key.contains("github.sha"));
+        let original = doc["jobs"]["release"]["steps"]
+            .as_sequence()
+            .unwrap()
+            .iter()
+            .find(|s| s["name"].as_str() == Some("Restore exact Chocolatey candidate"))
+            .unwrap();
+        assert!(
+            original["with"]["key"]
+                .as_str()
+                .unwrap()
+                .contains("${{ github.ref }}-${{ github.sha }}")
+        );
+
+        // The asset script verifies the signature, then only the selected files.
+        let script = step(&doc, "Download and verify release assets")["run"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        assert!(script.contains("minisign -V -m release/SHA256SUMS.txt -x release/SHA256SUMS.txt.minisig -p keys/minisign.pub"));
+        assert!(script.contains("sha256sum -c --strict ../release-selected.sums"));
+        assert!(script.contains("*,winget,*) need+=(\"sorrel-${VERSION}-x86_64-windows.zip\")"));
+        assert!(script.contains("need+=(\"*.whl\")"));
+    }
+
+    #[test]
+    fn republish_is_absent_without_a_signed_github_release() {
+        for tweak in [0, 1, 2] {
+            let (workflow, doc) = republish_doc(false, true, |i| match tweak {
+                0 => i.platform = Platform::Forgejo,
+                1 => i.release = None,
+                _ => i.chocolatey = None,
+            });
+            if tweak == 2 {
+                assert!(
+                    doc["jobs"].get("republish").is_some(),
+                    "winget alone still qualifies"
+                );
+                continue;
+            }
+            assert!(doc["jobs"].get("republish").is_none());
+            assert!(!workflow.contains("inputs.tag"));
+            assert!(workflow.contains("  workflow_dispatch:\n\n"));
+        }
+        let (_, doc) = republish_doc(false, true, |i| i.winget = None);
+        assert!(doc["jobs"]["republish"]["steps"].as_sequence().is_some());
+        let (workflow, _) = republish_doc(false, false, |_| {});
+        assert!(!workflow.contains("republish"));
+    }
+
+    #[cfg(unix)]
+    fn run_script(
+        script: &str,
+        dir: &std::path::Path,
+        env: &[(&str, &str)],
+    ) -> std::process::Output {
+        let mut cmd = std::process::Command::new("bash");
+        cmd.arg("-c").arg(script).current_dir(dir);
+        for (k, v) in env {
+            cmd.env(k, v);
+        }
+        cmd.output().unwrap()
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn republish_rejects_unknown_or_unconfigured_channels_up_front() {
+        let (_, doc) = republish_doc(false, true, |_| {});
+        let run = step(&doc, "Select channels to republish")["run"]
+            .as_str()
+            .unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let out_file = dir.path().join("out");
+        let go = |tag: &str, channels: &str| {
+            std::fs::write(&out_file, "").unwrap();
+            let out = run_script(
+                run,
+                dir.path(),
+                &[
+                    ("INPUT_TAG", tag),
+                    ("INPUT_CHANNELS", channels),
+                    ("GITHUB_OUTPUT", out_file.to_str().unwrap()),
+                ],
+            );
+            (
+                out.status.success(),
+                String::from_utf8_lossy(&out.stderr).into_owned(),
+                std::fs::read_to_string(&out_file).unwrap(),
+            )
+        };
+        let (ok, _, out) = go("0.2.1", "winget, chocolatey,winget");
+        assert!(ok);
+        assert!(
+            out.contains("winget=true")
+                && out.contains("chocolatey=true")
+                && !out.contains("pypi=true")
+        );
+        assert!(out.contains("channels=winget,chocolatey"));
+        // Unknown, unconfigured (aur), configured-but-not-republishable (apt) and empty all fail.
+        for bad in ["winget,nope", "aur", "apt", "", " , "] {
+            let (ok, err, _) = go("0.2.1", bad);
+            assert!(!ok, "{bad:?} must be rejected");
+            assert!(err.contains("::error::"), "{err}");
+        }
+        assert!(!go("v0.2.1x", "winget").0 && !go("main", "winget").0);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn republish_download_fails_closed_on_signature_or_checksum_mismatch() {
+        use std::os::unix::fs::PermissionsExt;
+        let (_, doc) = republish_doc(false, true, |_| {});
+        let step = step(&doc, "Download and verify release assets")["run"]
+            .as_str()
+            .unwrap();
+        let body = step
+            .split_once("<<'SCRIPT'\n")
+            .unwrap()
+            .1
+            .split_once("SCRIPT\n")
+            .unwrap()
+            .0;
+        let body = body.to_owned();
+        let run = |tamper: bool, bad_sig: bool| {
+            let dir = tempfile::tempdir().unwrap();
+            let p = dir.path();
+            let zip = "sorrel-1.2.3-x86_64-windows.zip";
+            std::fs::create_dir_all(p.join("assets")).unwrap();
+            std::fs::create_dir_all(p.join("bin")).unwrap();
+            std::fs::create_dir_all(p.join("keys")).unwrap();
+            std::fs::write(p.join("keys/minisign.pub"), "pub").unwrap();
+            std::fs::write(
+                p.join("release-env"),
+                "TAG=1.2.3\nVERSION=1.2.3\nIS_PRERELEASE=false\n",
+            )
+            .unwrap();
+            std::fs::write(p.join("assets/1"), "zip bytes").unwrap();
+            let sum = String::from_utf8(
+                std::process::Command::new("sha256sum")
+                    .arg(p.join("assets/1"))
+                    .output()
+                    .unwrap()
+                    .stdout,
+            )
+            .unwrap();
+            let hash = sum.split_whitespace().next().unwrap();
+            std::fs::write(p.join("assets/2"), format!("{hash}  {zip}\n")).unwrap();
+            std::fs::write(p.join("assets/3"), "sig").unwrap();
+            if tamper {
+                std::fs::write(p.join("assets/1"), "evil bytes").unwrap();
+            }
+            std::fs::write(p.join("release.fixture"), r#"{"assets":[{"name":"sorrel-1.2.3-x86_64-windows.zip","id":1},{"name":"SHA256SUMS.txt","id":2},{"name":"SHA256SUMS.txt.minisig","id":3}]}"#).unwrap();
+            let curl = "#!/bin/sh\nout=; for a in \"$@\"; do if [ \"$p\" = -o ]; then out=$a; fi; p=$a; url=$a; done\ncase \"$url\" in */releases/tags/*) cat \"$FAKE/release.fixture\" ;; */releases/assets/*) cat \"$FAKE/assets/${url##*/}\" > \"$out\" ;; esac\n";
+            let minisign = format!(
+                "#!/bin/sh\n{}\n",
+                if bad_sig {
+                    "echo bad signature >&2; exit 1"
+                } else {
+                    "exit 0"
+                }
+            );
+            for (name, text) in [("curl", curl.to_owned()), ("minisign", minisign)] {
+                std::fs::write(p.join("bin").join(name), text).unwrap();
+                std::fs::set_permissions(
+                    p.join("bin").join(name),
+                    std::fs::Permissions::from_mode(0o755),
+                )
+                .unwrap();
+            }
+            let path = format!(
+                "{}:{}",
+                p.join("bin").display(),
+                std::env::var("PATH").unwrap()
+            );
+            let out = run_script(
+                &body,
+                p,
+                &[
+                    ("PATH", &path),
+                    ("FAKE", p.to_str().unwrap()),
+                    ("GITHUB_TOKEN", "t"),
+                    ("GITHUB_API", "https://api.github.com"),
+                    ("GITHUB_REPO", "o/r"),
+                    ("REPUBLISH_CHANNELS", "winget"),
+                ],
+            );
+            (
+                out.status.success(),
+                String::from_utf8_lossy(&out.stderr).into_owned(),
+                p.join("release").join(zip).exists(),
+            )
+        };
+        if !["bash", "jq", "sha256sum"].iter().all(|t| {
+            std::process::Command::new(t)
+                .arg("--version")
+                .output()
+                .is_ok_and(|o| o.status.success())
+        }) {
+            return;
+        }
+        let (ok, err, has) = run(false, false);
+        assert!(ok && has, "{err}");
+        let (ok, _, _) = run(true, false);
+        assert!(!ok, "a tampered asset must fail the checksum");
+        let (ok, _, has) = run(false, true);
+        assert!(
+            !ok && !has,
+            "a bad signature stops before any asset is fetched"
+        );
+    }
+
+    #[test]
+    fn republish_shell_passes_shellcheck() {
+        use std::process::Command;
+        if Command::new("shellcheck")
+            .arg("--version")
+            .output()
+            .is_err()
+        {
+            return;
+        }
+        let (_, doc) = republish_doc(true, true, |_| {});
+        let dir = tempfile::tempdir().unwrap();
+        let download = step(&doc, "Download and verify release assets")["run"]
+            .as_str()
+            .unwrap();
+        let heredoc = download
+            .split_once("<<'SCRIPT'\n")
+            .unwrap()
+            .1
+            .split_once("SCRIPT\n")
+            .unwrap()
+            .0;
+        for (i, script) in [
+            step(&doc, "Select channels to republish")["run"]
+                .as_str()
+                .unwrap(),
+            heredoc,
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let path = dir.path().join(format!("s{i}.sh"));
+            std::fs::write(&path, script).unwrap();
+            let out = Command::new("shellcheck")
+                .args(["--shell=bash", "--severity=info", "--exclude=SC1091"])
+                .arg(&path)
+                .output()
+                .unwrap();
+            assert!(
+                out.status.success(),
+                "{}",
+                String::from_utf8_lossy(&out.stdout)
+            );
+        }
+    }
     #[test]
     fn pypi_follows_activated_remote_and_channel_policies() {
         let artifacts = artifacts();

@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- The generated GitHub `release.yml` can republish selected downstream channels
+  for an existing release: `workflow_dispatch` gains `tag` and `channels`
+  inputs (`gh workflow run release.yml -f tag=0.2.1 -f channels=winget`). A
+  dispatch with `tag` skips the release job and runs a `republish` job that
+  checks out and validates the signed tag, downloads the release assets,
+  verifies `SHA256SUMS.txt` with minisign against the committed key and every
+  used asset with `sha256sum -c`, then runs the probe and only the selected
+  aur, flathub, winget, homebrew, scoop, pypi or chocolatey steps. Unknown,
+  unconfigured or non-republishable channels are rejected up front. It has
+  read-only contents permission, a per-tag concurrency group, and keys the
+  Chocolatey candidate cache by the tag and its commit. A dispatch without
+  `tag` is unchanged; only GitHub releases with signing and a republishable
+  channel get the inputs.
 - winget manifests now match current winget-pkgs tooling: ManifestVersion
   1.12.0 with the matching `# yaml-language-server: $schema=` header on each
   file, `NestedInstallerFiles` inside the installer entry (as accepted

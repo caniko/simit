@@ -277,6 +277,61 @@ apt, Homebrew, Scoop, Chocolatey, Flatpak, and winget are stable-release-only
 publish steps; COPR switches to its testing project for prerelease tags when
 configured.
 
+### Republishing channels for an existing release
+
+A downstream channel can fail after the GitHub release is out (a Chocolatey
+push rejected while an earlier version sits in moderation, a winget PR that
+failed validation). Fix the cause, then rerun just those channels against the
+existing release instead of cutting a new tag:
+
+```sh
+gh workflow run release.yml -f tag=0.2.1 -f channels=winget
+gh workflow run release.yml -f tag=0.2.1 -f channels=winget,chocolatey
+```
+
+Run it from the default branch so the generated `republish` job (and any fixed
+manifests or scripts) comes from current code. Without `tag` a dispatch
+behaves as before. The `tag` and `channels` inputs and the `republish` job
+exist only for GitHub releases with `sign = true` and at least one
+republishable channel: `aur`, `flathub`, `winget`, `homebrew`, `scoop`,
+`pypi` and `chocolatey`. `apt` and `copr` build their inputs in the release
+job and cannot be republished. `channels` is a comma-separated subset of
+those that are configured; an empty, unknown, unconfigured or
+non-republishable name fails before anything is checked out.
+
+The job:
+
+- checks out `refs/tags/<tag>` and runs the same tag validation as a push
+  run (signed tag against the default branch's `keys/maintainers.gpg`, tag
+  label, version and changelog checks), requiring the checkout to be the
+  signed tag's commit;
+- skips the build, signing, attestation, smoke checks, release publication,
+  Attic push and announcements; instead it downloads `SHA256SUMS.txt` and its
+  `.minisig` from the existing release, verifies them with minisign against the
+  committed `keys/minisign.pub`, downloads only the assets the selected
+  channels read, and runs `sha256sum -c --strict` on them. Any missing asset,
+  bad signature or checksum mismatch fails the job before a channel step runs;
+- runs the publisher probe (under `activated-remote`) and then only the selected
+  channel steps, with the same soft-skip semantics as a release run.
+
+It has `contents: read` (plus `id-token: write` only for PyPI trusted
+publishing), and shares a per-tag concurrency group with that tag's release
+run, so it queues behind a release still in progress.
+
+The channel steps are idempotent. winget reuses an open PR and, when the PR
+head is `<id>-<version>` on the token user's own fork, force-moves that branch
+to a commit with the regenerated manifests and keeps the PR (nothing changes
+if the blobs already match); a version already in winget-pkgs is skipped.
+Chocolatey compares the registry's package bytes with the packed candidate,
+and the candidate cache is keyed by the tag and its commit, as in the push run,
+so repeated republishes of one tag reuse one candidate. A cache written by the
+tag's push run is scoped to the tag ref and is only reachable when the
+republish is dispatched on that ref (`--ref <tag>`, possible once the tag's
+own `release.yml` has the inputs); from the default branch the first republish
+packs a fresh candidate, and if the registry already holds different bytes for
+that version the step fails closed. PyPI uses `uv publish --check-url`, and the
+Homebrew, Scoop, AUR and Flathub steps already skip an unchanged tree.
+
 Hosted release assets are the primary release product. The generated workflow
 therefore fails early for missing hosted-release and signing credentials, but treats
 runner-side cache and downstream packaging as secondary. Attic cache pushes skip
