@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Fixed: the release workflow's downstream publisher probe called
+  `api.github.com` (winget-pkgs, Flathub) unauthenticated, so on GitHub
+  hosted runners a shared-IP rate limit made the winget probe inconclusive
+  and failed the winget step. On GitHub it now sends the job's
+  `GITHUB_TOKEN`.
+
 - The generated GitHub `release.yml` can republish selected downstream channels
   for an existing release: `workflow_dispatch` gains `tag` and `channels`
   inputs (`gh workflow run release.yml -f tag=0.2.1 -f channels=winget`). A

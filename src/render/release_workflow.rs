@@ -2074,8 +2074,14 @@ fn push_stable_guard(w: &mut String, channel: &str) {
 
 fn push_publisher_state_probe(w: &mut String, inputs: &ReleaseWorkflowInputs<'_>) {
     w.push_str("      - name: Probe downstream publisher state\n");
+    // Unauthenticated api.github.com calls share the hosted runner's 60/hour
+    // IP budget; a rate-limited 403 would read as an inconclusive probe.
+    if inputs.platform == Platform::Github {
+        w.push_str("        env:\n          GITHUB_TOKEN: ${{ github.token }}\n");
+    }
     w.push_str("        run: |\n          set -euo pipefail\n          . ./release-env\n");
     w.push_str("          : > release-publisher-state.env\n");
+    w.push_str("          gh_auth=(); if [ -n \"${GITHUB_TOKEN:-}\" ]; then gh_auth=(-H \"Authorization: Bearer $GITHUB_TOKEN\"); fi\n");
     w.push_str("          write_state() {\n");
     w.push_str("            channel=\"$1\"; state=\"$2\"; detail=\"$3\"\n");
     w.push_str("            var=\"PUBLISH_$(printf '%s' \"$channel\" | tr '[:lower:]-' '[:upper:]_')_STATE\"\n");
@@ -2235,7 +2241,7 @@ fn push_publisher_state_probe(w: &mut String, inputs: &ReleaseWorkflowInputs<'_>
     if let Some(flatpak) = inputs.flatpak {
         writeln!(
             w,
-            "          stable_or_state flathub {} curl -fsSL {}",
+            "          stable_or_state flathub {} curl -fsSL \"${{gh_auth[@]}}\" {}",
             shell_quote(&flatpak.repo),
             shell_quote(&format!("https://api.github.com/repos/{}", flatpak.repo))
         )
@@ -2249,7 +2255,7 @@ fn push_publisher_state_probe(w: &mut String, inputs: &ReleaseWorkflowInputs<'_>
         // package, so it records `probe-failed` and the publish step fails.
         writeln!(
             w,
-            "          winget_code=\"$(curl -sS -o /dev/null -w '%{{http_code}}' {} || true)\"\n          case \"$winget_code\" in 200) winget_state=active-required ;; 404) winget_state=inactive-soft ;; *) winget_state=probe-failed ;; esac\n          if [ \"$IS_PRERELEASE\" = \"true\" ]; then winget_state=skipped-prerelease; fi\n          write_state winget \"$winget_state\" {}",
+            "          winget_code=\"$(curl -sS -o /dev/null -w '%{{http_code}}' \"${{gh_auth[@]}}\" {} || true)\"\n          case \"$winget_code\" in 200) winget_state=active-required ;; 404) winget_state=inactive-soft ;; *) winget_state=probe-failed ;; esac\n          if [ \"$IS_PRERELEASE\" = \"true\" ]; then winget_state=skipped-prerelease; fi\n          write_state winget \"$winget_state\" {}",
             shell_quote(&format!(
                 "https://api.github.com/repos/microsoft/winget-pkgs/contents/{}",
                 winget_manifest_dir(&winget.package_id)
@@ -4069,6 +4075,11 @@ esac"#,
         assert!(workflow.contains("stable_or_state scoop"));
         assert!(workflow.contains("stable_or_state flathub"));
         assert!(workflow.contains("manifests/c/Caniko/Modde"));
+        // GitHub API probes carry the job token only where one exists.
+        assert!(workflow.contains("curl -sS -o /dev/null -w '%{http_code}' \"${gh_auth[@]}\""));
+        assert!(
+            workflow.contains("      - name: Probe downstream publisher state\n        run: |\n")
+        );
         assert!(workflow.contains("publisher_missing apt 'apt secrets unset'"));
         assert!(workflow.contains("publisher_missing aur 'AUR_SSH_KEY unset'"));
         assert!(workflow.contains("publisher_missing copr 'COPR credentials unset'"));
@@ -4849,6 +4860,11 @@ cat "$FAKE/code"
     #[test]
     fn republish_job_runs_only_selected_channels_against_the_signed_tag() {
         let (workflow, doc) = republish_doc(true, true, |_| {});
+        // The probe authenticates its api.github.com calls on GitHub, so a
+        // hosted runner's shared IP rate limit cannot make it inconclusive.
+        assert!(workflow.contains(
+            "      - name: Probe downstream publisher state\n        env:\n          GITHUB_TOKEN: ${{ github.token }}\n"
+        ));
         let dispatch = &doc["on"]["workflow_dispatch"]["inputs"];
         assert_eq!(dispatch["tag"]["type"].as_str(), Some("string"));
         assert_eq!(dispatch["channels"]["type"].as_str(), Some("string"));
