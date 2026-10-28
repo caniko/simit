@@ -326,12 +326,65 @@ paths = ["target/evidence/"]
     assert!(d_needs.contains("publish-c"));
     // Archive construction stays unprivileged; packaged-content verification
     // precedes fresh-runner API upload and the engine's exact registry wait.
-    assert!(publish.contains("cargo package --locked --allow-dirty --no-verify -p"));
+    assert!(
+        publish.contains("cargo package --locked --allow-dirty -p a -p b -p c -p d --target-dir")
+    );
+    assert!(!publish.contains("--no-verify"));
     assert!(trusted.contains("cargo publish --dry-run --locked --manifest-path"));
     assert!(trusted.contains("--publisher-stage publish"));
     // Auditable non-publishing summary.
     assert!(trusted.contains("publish-report"));
     assert!(trusted.contains("if: always()"));
+}
+
+/// The producer must compile every member's packaged tarball before it retains
+/// any archive (the trusted publisher uploads crates one by one, irreversibly).
+#[test]
+fn coordinated_producer_verifies_every_member_tarball_before_archiving() {
+    let temp = fixture_dir("release-plan-advanced");
+    fs::write(
+        temp.path().join("flake.nix"),
+        "{ outputs = { self }: {}; }\n",
+    )
+    .unwrap();
+    write_workspace_simit_toml(temp.path(), "");
+    let status = simit()
+        .current_dir(temp.path())
+        .args([
+            "init",
+            "ci",
+            "--platform",
+            "github",
+            "--runtime",
+            "nix",
+            "--workspace",
+            "--workspace-strategy",
+            "aggregate",
+            "--publish-crates",
+            "--coordinated-publish",
+        ])
+        .status()
+        .unwrap();
+    assert!(status.success());
+    let publish = read(&temp.path().join(".github/workflows/publish-workspace.yaml"));
+    let parsed: serde_yaml::Value = serde_yaml::from_str(&publish).unwrap();
+    let steps = parsed["jobs"]["build"]["steps"].as_sequence().unwrap();
+    let position = |name: &str| {
+        steps
+            .iter()
+            .position(|step| step["name"].as_str().is_some_and(|n| n.starts_with(name)))
+            .unwrap_or_else(|| panic!("missing step {name}"))
+    };
+    let verify = position("Verify and package coordinated release set");
+    let run = steps[verify]["run"].as_str().unwrap();
+    // Publishable members only (`helper` is publish = false), verified (no --no-verify).
+    assert!(run.contains(
+        "nix develop -c cargo package --locked --allow-dirty -p liba -p libb -p app --target-dir \"$RUNNER_TEMP/simit-package-target\""
+    ));
+    assert!(!run.contains("--no-verify") && !run.contains("helper"));
+    assert!(run.contains("cargo >= 1.89"));
+    assert!(verify < position("Build immutable archive liba"));
+    assert!(verify < position("Retain original-run archive liba"));
 }
 
 #[test]
