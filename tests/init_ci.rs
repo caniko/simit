@@ -7727,3 +7727,164 @@ fn target_smokes_render_for_nix_only_ci() {
             .is_file()
     );
 }
+
+const QUALIFIED_CONFIG: &str = r#"[ci]
+platform = "github"
+provider = "actions"
+runtime = "nix"
+qualified_by = "caniko/fleet"
+
+[ci.pages]
+repo = "caniko/demo"
+canonical_domain = "demo.example.com"
+"#;
+
+fn qualified_package(config: &str) -> TempDir {
+    let temp = init_package(true);
+    fs::write(temp.path().join("simit.toml"), config).unwrap();
+    temp
+}
+
+#[test]
+fn qualified_by_emits_only_publication_workflows_and_round_trips() {
+    let temp = qualified_package(QUALIFIED_CONFIG);
+    let output = simit()
+        .current_dir(temp.path())
+        .args(["init", "ci"])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let workflows = temp.path().join(".github/workflows");
+    let names: Vec<_> = fs::read_dir(&workflows)
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name().into_string().unwrap())
+        .collect();
+    assert_eq!(names, ["pages.yaml"]);
+    assert_yaml_parses(&read(&workflows.join("pages.yaml")));
+    assert!(read(&temp.path().join("simit.toml")).contains("qualified_by = \"caniko/fleet\""));
+    let check = simit()
+        .current_dir(temp.path())
+        .args(["init", "ci", "--check", "--diff"])
+        .output()
+        .unwrap();
+    assert!(
+        check.status.success(),
+        "{}",
+        String::from_utf8_lossy(&check.stderr)
+    );
+}
+
+#[test]
+fn qualified_by_removes_only_simit_owned_qualification_workflows() {
+    let temp = qualified_package(QUALIFIED_CONFIG);
+    assert!(
+        simit()
+            .current_dir(temp.path())
+            .args(["init", "ci"])
+            .status()
+            .unwrap()
+            .success()
+    );
+    let workflows = temp.path().join(".github/workflows");
+    let generated = workflows.join("ci-foo.yaml");
+    let handwritten = workflows.join("ci-handwritten.yaml");
+    fs::write(
+        &generated,
+        format!(
+            "{}\nname: leftover\n",
+            simit::render::ci::GENERATED_WORKFLOW_MARKER
+        ),
+    )
+    .unwrap();
+    fs::write(&handwritten, "name: handwritten\n").unwrap();
+
+    let check = simit()
+        .current_dir(temp.path())
+        .args(["init", "ci", "--check"])
+        .output()
+        .unwrap();
+    assert!(!check.status.success());
+    assert!(String::from_utf8_lossy(&check.stderr).contains("ci-foo.yaml"));
+    assert!(generated.exists());
+
+    assert!(
+        simit()
+            .current_dir(temp.path())
+            .args(["init", "ci"])
+            .status()
+            .unwrap()
+            .success()
+    );
+    assert!(!generated.exists());
+    assert!(handwritten.exists());
+    assert!(workflows.join("pages.yaml").exists());
+}
+
+#[test]
+fn qualified_by_rejects_invalid_slugs_and_conflicting_policy() {
+    for (config, expected) in [
+        ("[ci]\nqualified_by = \"fleet\"\n", "owner/repo"),
+        ("[ci]\nqualified_by = \"a/b/c\"\n", "owner/repo"),
+        ("[ci]\nqualified_by = \"caniko/\"\n", "owner/repo"),
+        ("[ci]\nqualified_by = \"ca niko/fleet\"\n", "owner/repo"),
+        (
+            "[ci]\nqualified_by = \"caniko/fleet\"\nnix_builds = [\".#demo\"]\n",
+            "nix_builds",
+        ),
+        (
+            "[ci]\nqualified_by = \"caniko/fleet\"\npublish_crates = true\n",
+            "publish_crates",
+        ),
+        (
+            "[ci]\nqualified_by = \"caniko/fleet\"\n\n[monorepo]\nsubmodules = true\n",
+            "monorepo",
+        ),
+    ] {
+        let temp = qualified_package(config);
+        let output = simit()
+            .current_dir(temp.path())
+            .args(["init", "ci", "--check"])
+            .output()
+            .unwrap();
+        assert!(!output.status.success(), "{config}");
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(stderr.contains(expected), "{config}: {stderr}");
+    }
+}
+
+#[test]
+fn qualified_by_persists_and_links_the_ci_badge_to_the_qualifier() {
+    let temp = qualified_package(QUALIFIED_CONFIG);
+    fs::write(
+        temp.path().join("README.md"),
+        "# demo\n\n<!-- simit:badges:start -->\nstale\n<!-- simit:badges:end -->\n",
+    )
+    .unwrap();
+    // Rewriting `[ci]` (here via --with-codeberg-pages) must keep the key.
+    for _ in 0..2 {
+        let output = simit()
+            .current_dir(temp.path())
+            .args([
+                "init",
+                "ci",
+                "--pages-repo",
+                "caniko/demo",
+                "--with-codeberg-pages",
+            ])
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+    assert!(read(&temp.path().join("simit.toml")).contains("qualified_by = \"caniko/fleet\""));
+    assert!(
+        read(&temp.path().join("README.md")).contains("](https://github.com/caniko/fleet/actions)")
+    );
+}

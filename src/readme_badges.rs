@@ -74,10 +74,13 @@ fn badges(
     let mut badges = Vec::new();
 
     if has_simit_feature(features, "ci") {
-        let target = workflow_link(
-            workspace_root,
-            &[".forgejo/workflows/ci.yaml", ".github/workflows/ci.yaml"],
-        );
+        let target = match &config.ci.qualified_by {
+            Some(slug) => Some(format!("https://github.com/{slug}/actions")),
+            None => workflow_link(
+                workspace_root,
+                &[".forgejo/workflows/ci.yaml", ".github/workflows/ci.yaml"],
+            ),
+        };
         badges.push(static_badge(
             "CI",
             status_word(features, "ci"),
