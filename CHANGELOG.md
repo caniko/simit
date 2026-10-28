@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- winget manifests now match current winget-pkgs tooling: ManifestVersion
+  1.12.0 with the matching `# yaml-language-server: $schema=` header on each
+  file, `NestedInstallerFiles` inside the installer entry (as accepted
+  zip+portable packages such as BurntSushi.ripgrep.MSVC), and `PublisherUrl`
+  (the download repo owner's page) plus `PackageUrl` (`homepage`, else the repo
+  URL) in the locale manifest. An open PR whose head is the same branch on the
+  token user's fork is now refreshed in place: its branch is force-moved to a
+  commit with the regenerated manifests and the PR is kept; unchanged manifests
+  leave it untouched.
 - New `[[ci.target_smokes]]` renders a build job on the Linux CI runner
   (`nix build`, dereferenced output uploaded as an artifact) and a smoke job on
   a target runner such as `windows-2025` or `macos-15` that downloads it and runs
@@ -16,7 +25,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (`curl` and `jq` as the `WINGET_PAT` user) instead of `wingetcreate` under
   wine, which no longer runs on hosted runners (its release asset needs .NET).
   New packages and new versions share one path: the release step writes the
-  ManifestVersion 1.10.0 version, installer (zip with a nested portable
+  ManifestVersion 1.12.0 version, installer (zip with a nested portable
   executable and uppercase SHA-256) and default-locale manifests, commits them
   to `<id>-<version>` on the token owner's fork and opens a `New package:` or
   `New version:` PR. Reruns reuse an open PR and skip versions already

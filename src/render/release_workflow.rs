@@ -2580,7 +2580,7 @@ fn push_publish_winget(
         w.push_str(" || publisher_missing winget 'GitHub API submission failed'");
     }
     w.push('\n');
-    for line in winget_submit_script(winget).lines() {
+    for line in winget_submit_script(winget, platform).lines() {
         if line.is_empty() {
             w.push('\n');
         } else {
@@ -2595,7 +2595,7 @@ fn push_publish_winget(
 /// package and new version alike). Reads `VERSION`, `ZIP_NAME`, `ZIP_URL` and
 /// `WINGET_PAT` from the environment, the zip from `release/$ZIP_NAME` and an
 /// optional `PUBLISH_WINGET_STATE`. Shared with `simit dist winget submit`.
-pub(crate) fn winget_submit_script(winget: &ResolvedWinget) -> String {
+pub(crate) fn winget_submit_script(winget: &ResolvedWinget, platform: Platform) -> String {
     let manifest_dir = winget_manifest_dir(&winget.package_id);
     let id = shell_quote(&winget.package_id);
     let mut w = String::new();
@@ -2610,27 +2610,53 @@ pub(crate) fn winget_submit_script(winget: &ResolvedWinget) -> String {
         w.push_str("echo '::error::winget: set [winget].license and [winget].short_description (3-256 characters; or Cargo license and description) to write the manifests.' >&2; exit 1\n");
         return w;
     };
-    push_winget_manifests(&mut w, winget, &id, &manifest_dir, license, description);
+    push_winget_manifests(
+        &mut w,
+        winget,
+        platform,
+        &id,
+        &manifest_dir,
+        license,
+        description,
+    );
     w.push_str(include_str!("winget_submit.sh"));
     w
 }
 
-/// Writes the three ManifestVersion 1.10.0 files into `$dir`.
+/// The ManifestVersion the generated winget manifests (and their schema URLs) use.
+const WINGET_MANIFEST_VERSION: &str = "1.12.0";
+
+/// Writes the three ManifestVersion 1.12.0 files into `$dir`, each starting
+/// with the `yaml-language-server` schema header winget-pkgs tooling emits.
 fn push_winget_manifests(
     w: &mut String,
     winget: &ResolvedWinget,
+    platform: Platform,
     id: &str,
     manifest_dir: &str,
     license: &str,
     description: &str,
 ) {
     let q = shell_quote;
+    let mv = WINGET_MANIFEST_VERSION;
     let file = |name: &str| format!("\"$dir\"/{id}.{name}yaml");
-    w.push_str("# yaml(): double-quoted YAML scalar; f KEY VALUE writes one field.\n");
+    let web = format!("{}/{}", platform.web_base_url(), winget.download_repo);
+    let owner = winget
+        .download_repo
+        .split('/')
+        .next()
+        .unwrap_or(&winget.download_repo);
+    w.push_str("# yaml(): double-quoted YAML scalar; f KEY VALUE writes one field; hdr TYPE the schema header.\n");
     w.push_str(
         "yaml() { local s=\"${1//\\\\/\\\\\\\\}\"; printf '\"%s\"' \"${s//\\\"/\\\\\\\"}\"; }\n",
     );
     w.push_str("f() { printf '%s: %s\\n' \"$1\" \"$(yaml \"$2\")\"; }\n");
+    w.push_str("# shellcheck disable=SC2016\n");
+    writeln!(
+        w,
+        "hdr() {{ printf '# yaml-language-server: $schema=https://aka.ms/winget-manifest.%s.{mv}.schema.json\\n# Created with simit\\n\\n' \"$1\"; }}"
+    )
+    .expect("write");
     writeln!(
         w,
         "dir=\"$tmpdir/\"{}\"/$VERSION\"; mkdir -p \"$dir\"",
@@ -2639,26 +2665,26 @@ fn push_winget_manifests(
     .expect("write");
     w.push_str("sha=\"$(sha256sum \"release/${ZIP_NAME}\" | cut -d' ' -f1 | tr '[:lower:]' '[:upper:]')\"\n");
     // version manifest
-    writeln!(w, "{{ f PackageIdentifier {id}; f PackageVersion \"$VERSION\"; echo 'DefaultLocale: en-US'; echo 'ManifestType: version'; echo 'ManifestVersion: 1.10.0'; }} > {}", file("")).expect("write");
-    // installer manifest
-    writeln!(w, "{{ f PackageIdentifier {id}; f PackageVersion \"$VERSION\"; echo 'InstallerType: zip'; echo 'NestedInstallerType: portable'; echo 'NestedInstallerFiles:'; printf '%s\\n' \"- RelativeFilePath: $(yaml {})\" \"  PortableCommandAlias: $(yaml {})\"; echo 'Installers:'; echo '- Architecture: x64'; printf '%s\\n' \"  InstallerUrl: $(yaml \"$ZIP_URL\")\" \"  InstallerSha256: $sha\"; echo 'ManifestType: installer'; echo 'ManifestVersion: 1.10.0'; }} > {}", q(&winget.binary), q(&winget.command), file("installer.")).expect("write");
+    writeln!(w, "{{ hdr version; f PackageIdentifier {id}; f PackageVersion \"$VERSION\"; echo 'DefaultLocale: en-US'; echo 'ManifestType: version'; echo 'ManifestVersion: {mv}'; }} > {}", file("")).expect("write");
+    // installer manifest: InstallerType/NestedInstallerType stay at the root,
+    // NestedInstallerFiles sits in the installer entry (as in accepted zip+portable packages).
+    writeln!(w, "{{ hdr installer; f PackageIdentifier {id}; f PackageVersion \"$VERSION\"; echo 'InstallerType: zip'; echo 'NestedInstallerType: portable'; echo 'Installers:'; echo '- Architecture: x64'; echo '  NestedInstallerFiles:'; printf '%s\\n' \"  - RelativeFilePath: $(yaml {})\" \"    PortableCommandAlias: $(yaml {})\"; printf '%s\\n' \"  InstallerUrl: $(yaml \"$ZIP_URL\")\" \"  InstallerSha256: $sha\"; echo 'ManifestType: installer'; echo 'ManifestVersion: {mv}'; }} > {}", q(&winget.binary), q(&winget.command), file("installer.")).expect("write");
     // default-locale manifest
     let mut locale = format!(
-        "f PackageIdentifier {id}; f PackageVersion \"$VERSION\"; echo 'PackageLocale: en-US'; f Publisher {}; f PackageName {}; f License {};",
+        "hdr defaultLocale; f PackageIdentifier {id}; f PackageVersion \"$VERSION\"; echo 'PackageLocale: en-US'; f Publisher {}; f PublisherUrl {}; f PackageName {}; f PackageUrl {}; f License {};",
         q(&winget.publisher),
+        q(&format!("{}/{owner}", platform.web_base_url())),
         q(&winget.package_name),
+        q(winget.homepage.as_deref().unwrap_or(&web)),
         q(license)
     );
     if let Some(url) = &winget.license_url {
         write!(locale, " f LicenseUrl {};", q(url)).expect("write");
     }
     write!(locale, " f ShortDescription {};", q(description)).expect("write");
-    if let Some(url) = &winget.homepage {
-        write!(locale, " f PackageUrl {};", q(url)).expect("write");
-    }
     writeln!(
         w,
-        "{{ {locale} echo 'ManifestType: defaultLocale'; echo 'ManifestVersion: 1.10.0'; }} > {}",
+        "{{ {locale} echo 'ManifestType: defaultLocale'; echo 'ManifestVersion: {mv}'; }} > {}",
         file("locale.en-US.")
     )
     .expect("write");
@@ -3973,15 +3999,22 @@ esac"#,
             assert!(
                 step.contains("echo 'InstallerType: zip'; echo 'NestedInstallerType: portable'")
             );
-            assert!(step.contains("\"- RelativeFilePath: $(yaml 'sorrel.exe')\" \"  PortableCommandAlias: $(yaml 'sorrel')\""));
-            assert!(step.contains("echo '- Architecture: x64'"));
+            // NestedInstallerFiles lives inside the installer entry, after Architecture.
+            assert!(step.contains("echo '- Architecture: x64'; echo '  NestedInstallerFiles:'; printf '%s\\n' \"  - RelativeFilePath: $(yaml 'sorrel.exe')\" \"    PortableCommandAlias: $(yaml 'sorrel')\""));
+            assert!(!step.contains("echo 'NestedInstallerFiles:'"));
+            assert!(
+                step.contains("hdr version;")
+                    && step.contains("hdr installer;")
+                    && step.contains("hdr defaultLocale;")
+            );
+            assert!(step.contains("# yaml-language-server: $schema=https://aka.ms/winget-manifest.%s.1.12.0.schema.json"));
             assert!(step.contains("InstallerUrl: $(yaml \"$ZIP_URL\")"));
             assert!(step.contains("InstallerSha256: $sha"));
-            assert!(step.contains("f Publisher 'Caniko'; f PackageName 'Sorrel'; f License 'MIT OR Apache-2.0'; f LicenseUrl 'https://github.com/caniko/sorrel/blob/trunk/LICENSE-MIT'; f ShortDescription 'Native GUI for curating spike-sorted electrophysiology data';"));
+            assert!(step.contains("f Publisher 'Caniko'; f PublisherUrl 'https://github.com/caniko'; f PackageName 'Sorrel'; f PackageUrl 'https://github.com/caniko/sorrel'; f License 'MIT OR Apache-2.0'; f LicenseUrl 'https://github.com/caniko/sorrel/blob/trunk/LICENSE-MIT'; f ShortDescription 'Native GUI for curating spike-sorted electrophysiology data';"));
             assert!(step.contains("> \"$dir\"/'Caniko.Sorrel'.yaml"));
             assert!(step.contains("> \"$dir\"/'Caniko.Sorrel'.installer.yaml"));
             assert!(step.contains("> \"$dir\"/'Caniko.Sorrel'.locale.en-US.yaml"));
-            assert!(step.contains("ManifestVersion: 1.10.0"));
+            assert!(step.contains("ManifestVersion: 1.12.0") && !step.contains("1.10.0"));
             // API flow.
             assert!(step.contains("api GET \"/repos/$UP/contents/$MANIFEST_DIR/$VERSION\""));
             assert!(step.contains("must GET /user"));
@@ -4302,6 +4335,97 @@ cat "$FAKE/code"
         assert!(String::from_utf8_lossy(&out.stdout).contains("already published"));
         assert!(!fake.log("argv.log").contains("POST "));
         assert!(!fake.log("argv.log").contains("/user"));
+    }
+
+    #[cfg(unix)]
+    const OWN_PR: &str = r#"[{"html_url":"https://github.com/microsoft/winget-pkgs/pull/9","head":{"ref":"Caniko.Sorrel-1.2.3","repo":{"full_name":"Bot/winget-pkgs"}}}]"#;
+
+    #[cfg(unix)]
+    fn own_pr_fake(branch_files: &str) -> Fake {
+        let fake = Fake::new();
+        fake.route(
+            "GET",
+            "/repos/microsoft/winget-pkgs/pulls?head=bot:Caniko.Sorrel-1.2.3&state=open",
+            200,
+            OWN_PR,
+        );
+        fake.route(
+            "GET",
+            "/repos/bot/winget-pkgs/contents/manifests/c/Caniko/Sorrel/1.2.3?ref=Caniko.Sorrel-1.2.3",
+            200,
+            branch_files,
+        );
+        fake.route(
+            "PATCH",
+            "/repos/bot/winget-pkgs/git/refs/heads/Caniko.Sorrel-1.2.3",
+            200,
+            "{}",
+        );
+        fake
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn winget_script_refreshes_an_open_pr_from_its_own_fork() {
+        // Stale manifests on the PR branch: the branch moves, the PR stays.
+        let fake = own_pr_fake(r#"[{"name":"Caniko.Sorrel.yaml","sha":"stale"}]"#);
+        let Some(out) = fake.run(None) else { return };
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(out.status.success(), "{stderr}");
+        assert!(
+            String::from_utf8_lossy(&out.stdout)
+                .contains("refreshed https://github.com/microsoft/winget-pkgs/pull/9")
+        );
+        let body = fake.log("body.log");
+        assert!(body.contains(
+            "PATCH /repos/bot/winget-pkgs/git/refs/heads/Caniko.Sorrel-1.2.3 BODY {\"sha\":\"newcommit\",\"force\":true}"
+        ));
+        assert!(!body.contains("/pulls BODY"), "no second PR: {body}");
+        assert!(!body.contains("/git/refs BODY"), "no new ref: {body}");
+        fake.assert_token_hygiene(&out);
+
+        // The branch already carries these exact blobs: nothing is rewritten.
+        let same = r#"[{"name":"Caniko.Sorrel.yaml","sha":"blobsha"},{"name":"Caniko.Sorrel.installer.yaml","sha":"blobsha"},{"name":"Caniko.Sorrel.locale.en-US.yaml","sha":"blobsha"}]"#;
+        let fake = own_pr_fake(same);
+        let Some(out) = fake.run(None) else { return };
+        assert!(out.status.success());
+        assert!(String::from_utf8_lossy(&out.stdout).contains("already open and up to date"));
+        let body = fake.log("body.log");
+        assert!(!body.contains("PATCH ") && !body.contains("/git/commits BODY"));
+
+        // A PR whose head is another fork is left alone.
+        let fake = Fake::new();
+        fake.route(
+            "GET",
+            "/repos/microsoft/winget-pkgs/pulls?head=bot:Caniko.Sorrel-1.2.3&state=open",
+            200,
+            r#"[{"html_url":"https://github.com/microsoft/winget-pkgs/pull/9","head":{"ref":"Caniko.Sorrel-1.2.3","repo":{"full_name":"other/winget-pkgs"}}}]"#,
+        );
+        let Some(out) = fake.run(None) else { return };
+        assert!(String::from_utf8_lossy(&out.stdout).contains("PR already open"));
+        assert!(!fake.log("argv.log").contains("POST "));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn winget_script_writes_1_12_0_manifests_that_match_accepted_packages() {
+        let fake = Fake::new();
+        let Some(out) = fake.run(None) else { return };
+        assert!(out.status.success());
+        let body = fake.log("body.log");
+        for kind in ["version", "installer", "defaultLocale"] {
+            assert!(
+                body.contains(&format!(
+                    "# yaml-language-server: $schema=https://aka.ms/winget-manifest.{kind}.1.12.0.schema.json\\n# Created with simit\\n\\n"
+                )),
+                "{kind} header"
+            );
+        }
+        assert!(body.contains("ManifestVersion: 1.12.0") && !body.contains("1.10.0"));
+        assert!(body.contains("InstallerType: \\\"zip\\\"") || body.contains("InstallerType: zip"));
+        assert!(body.contains("Architecture: x64\\n  NestedInstallerFiles:\\n  - RelativeFilePath: \\\"sorrel.exe\\\"\\n    PortableCommandAlias: \\\"sorrel\\\"\\n  InstallerUrl:"));
+        assert!(body.contains("PublisherUrl: \\\"https://github.com/caniko\\\""));
+        assert!(body.contains("PackageUrl: \\\"https://github.com/caniko/sorrel\\\""));
     }
 
     #[cfg(unix)]

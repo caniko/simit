@@ -113,13 +113,13 @@ Optional fields used for the first submission, with their defaults:
 | `license`           | Cargo `license`                                               |
 | `license_url`       | none (omitted)                                                |
 | `short_description` | Cargo `description`                                           |
-| `homepage`          | Cargo `homepage` (becomes `PackageUrl`; omitted if unset)     |
+| `homepage`          | Cargo `homepage` (becomes `PackageUrl`; else the repo URL)    |
 | `binary`            | `<cargo name>.exe`, the path of the executable inside the zip |
 | `command`           | Cargo package name, the portable command alias                |
 
 The release step submits through the GitHub REST API as the `WINGET_PAT` user
 (`curl` and `jq`; no wine, no `wingetcreate`). New packages and new versions
-take one path: it writes the three ManifestVersion 1.10.0 files
+take one path: it writes the three ManifestVersion 1.12.0 files
 (`<id>.yaml`, `<id>.installer.yaml`, `<id>.locale.en-US.yaml`) with an
 `InstallerType: zip` / `NestedInstallerType: portable` installer and the
 uppercase SHA-256 of the released zip under
@@ -127,9 +127,11 @@ uppercase SHA-256 of the released zip under
 of `microsoft/winget-pkgs` exists, commits the files to a branch
 `<id>-<version>` on it (blobs, tree on the upstream head, commit, ref) and opens
 the PR with the winget-pkgs title `New package: <id> version <v>` or
-`New version: <id> version <v>`. Reruns are safe: an open PR from the branch is
-printed and the step succeeds, and so does a version that already exists
-upstream ("already published"). The token is passed to curl through a 0600
+`New version: <id> version <v>`. Reruns are safe: when a PR from the branch is open on the token
+user's fork, its branch is force-moved to a fresh commit with the regenerated
+manifests and the same PR is kept (nothing changes when the blobs already
+match); an open PR from anywhere else is only printed. A version that already
+exists upstream is "already published". The token is passed to curl through a 0600
 header file, never on the command line, and API failures print the HTTP status
 and GitHub's message.
 
