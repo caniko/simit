@@ -4029,7 +4029,7 @@ esac"#,
         dir: tempfile::TempDir,
     }
 
-    const FAKE_CURL: &str = r#"#!/usr/bin/env bash
+    const FAKE_CURL: &str = r#"
 m=GET out=/dev/null data=; a=("$@")
 for ((i = 0; i < ${#a[@]}; i++)); do
   case "${a[i]}" in
@@ -4054,7 +4054,9 @@ cat "$FAKE/code"
             std::fs::create_dir_all(dir.path().join("routes")).unwrap();
             std::fs::create_dir_all(dir.path().join("bin")).unwrap();
             let curl = dir.path().join("bin/curl");
-            std::fs::write(&curl, FAKE_CURL).unwrap();
+            std::fs::write(dir.path().join("bin/curl.bash"), FAKE_CURL).unwrap();
+            // /usr/bin/env is absent in the Nix sandbox, so hand off through /bin/sh.
+            std::fs::write(&curl, "#!/bin/sh\nexec bash \"${0%/*}/curl.bash\" \"$@\"\n").unwrap();
             std::fs::set_permissions(&curl, std::fs::Permissions::from_mode(0o755)).unwrap();
             let fake = Fake { dir };
             let fork = "/repos/bot/winget-pkgs";
