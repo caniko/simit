@@ -453,6 +453,49 @@ pub struct RequiredGateArtifacts {
     pub retention_days: u64,
 }
 
+/// Shell for a `[[ci.target_smokes]]` command.
+#[derive(Debug, Clone, Copy, Default, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum TargetSmokeShell {
+    #[default]
+    Bash,
+    Pwsh,
+}
+
+impl TargetSmokeShell {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Bash => "bash",
+            Self::Pwsh => "pwsh",
+        }
+    }
+}
+
+/// `[[ci.target_smokes]]`: build a Nix installable on the Linux CI runner,
+/// then run a command against the built output on a real target-OS runner
+/// (Windows, macOS). Renders a build job and a required smoke job per entry
+/// in `target-smokes.yaml` (GitHub Actions only).
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct TargetSmoke {
+    pub id: String,
+    /// Installable built with `nix build` on the Linux CI runner.
+    pub nix_build: String,
+    /// Runner label the smoke command runs on.
+    pub runner: String,
+    #[serde(default)]
+    pub shell: TargetSmokeShell,
+    /// Single-line command run from the checked-out repository.
+    pub run: String,
+    #[serde(default = "default_gate_timeout_minutes")]
+    pub timeout_minutes: u64,
+    #[serde(default)]
+    pub env: BTreeMap<String, String>,
+    /// Evidence uploaded even when the smoke fails.
+    #[serde(default)]
+    pub artifacts: Option<RequiredGateArtifacts>,
+}
+
 fn default_gate_artifact_retention_days() -> u64 {
     7
 }
@@ -652,6 +695,9 @@ pub struct CiConfig {
     /// push/PR and never prerequisites of publication.
     #[serde(default)]
     pub manual_gates: Vec<RequiredGate>,
+    /// Nix-cross-built artifacts smoke-tested on real target-OS runners.
+    #[serde(default)]
+    pub target_smokes: Vec<TargetSmoke>,
     /// Whether generated Rust checks should pass `--all-features`.
     #[serde(default)]
     pub all_features: Option<bool>,
@@ -731,6 +777,11 @@ impl CiConfig {
             && (provider != CiProvider::Actions || platform != Platform::Github)
         {
             bail!("[[ci.manual_gates]] requires the effective GitHub Actions backend");
+        }
+        if !self.target_smokes.is_empty()
+            && (provider != CiProvider::Actions || platform != Platform::Github)
+        {
+            bail!("[[ci.target_smokes]] requires the effective GitHub Actions backend");
         }
         if self.separate_events && !self.push_branches.is_empty() {
             bail!(
@@ -2927,6 +2978,7 @@ impl ProjectConfig {
             );
         }
         validate_required_gates(&self.ci)?;
+        validate_target_smokes(&self.ci)?;
         validate_local_gate_steps(&self.ci)?;
         if self
             .ci
@@ -4431,40 +4483,12 @@ fn validate_required_gates(ci: &CiConfig) -> Result<()> {
                     "simit project config: required gate artifacts need 15 minutes of job overhead; timeout_minutes must be at most 345"
                 );
             }
-            // @actions/core trims ECMAScript whitespace, including the BOM.
-            if artifacts.name.trim().is_empty()
-                || artifacts
-                    .name
-                    .trim_matches(|ch: char| ch.is_whitespace() || ch == '\u{feff}')
-                    != artifacts.name
-                || artifacts.name.chars().any(char::is_control)
-                || artifacts
-                    .name
-                    .contains(['/', '\\', ':', '"', '<', '>', '|', '*', '?'])
-                // Each list renders its own workflow, so artifact names only
-                // need to be unique within it.
-                || !artifact_names.insert((manual, &artifacts.name))
-            {
-                bail!(
-                    "simit project config: required gate artifact names must be valid and unique without surrounding whitespace"
-                );
-            }
-            if artifacts.paths.is_empty()
-                || artifacts.paths.iter().any(|path| {
-                    path.trim().is_empty()
-                        || path.trim_matches(|ch: char| ch.is_whitespace() || ch == '\u{feff}')
-                            != path
-                        || path.chars().any(char::is_control)
-                })
-            {
-                bail!(
-                    "simit project config: required gate artifact paths must be non-empty single-line paths without surrounding whitespace"
-                );
-            }
-            if !(1..=90).contains(&artifacts.retention_days) {
-                bail!("simit project config: required gate artifact retention_days must be 1..=90");
-            }
-            validate_required_gate_artifact_expressions(artifacts)?;
+            // Each list renders its own workflow, so artifact names only
+            // need to be unique within it.
+            validate_gate_artifact_fields(
+                artifacts,
+                !artifact_names.insert((manual, &artifacts.name)),
+            )?;
         }
         for (key, value) in &gate.env {
             if key.trim().is_empty() || key.contains(['\n', '\r', ' ', '=']) {
@@ -4480,6 +4504,154 @@ fn validate_required_gates(ci: &CiConfig) -> Result<()> {
         }
     }
     Ok(())
+}
+
+/// Shared by gates and target smokes; `name_taken` is the caller's uniqueness
+/// verdict within the workflow that uploads the artifact.
+fn validate_gate_artifact_fields(
+    artifacts: &RequiredGateArtifacts,
+    name_taken: bool,
+) -> Result<()> {
+    // @actions/core trims ECMAScript whitespace, including the BOM.
+    if artifacts.name.trim().is_empty()
+        || artifacts
+            .name
+            .trim_matches(|ch: char| ch.is_whitespace() || ch == '\u{feff}')
+            != artifacts.name
+        || artifacts.name.chars().any(char::is_control)
+        || artifacts
+            .name
+            .contains(['/', '\\', ':', '"', '<', '>', '|', '*', '?'])
+        || name_taken
+    {
+        bail!(
+            "simit project config: required gate artifact names must be valid and unique without surrounding whitespace"
+        );
+    }
+    if artifacts.paths.is_empty()
+        || artifacts.paths.iter().any(|path| {
+            path.trim().is_empty()
+                || path.trim_matches(|ch: char| ch.is_whitespace() || ch == '\u{feff}') != path
+                || path.chars().any(char::is_control)
+        })
+    {
+        bail!(
+            "simit project config: required gate artifact paths must be non-empty single-line paths without surrounding whitespace"
+        );
+    }
+    if !(1..=90).contains(&artifacts.retention_days) {
+        bail!("simit project config: required gate artifact retention_days must be 1..=90");
+    }
+    validate_required_gate_artifact_expressions(artifacts)
+}
+
+fn validate_target_smokes(ci: &CiConfig) -> Result<()> {
+    use std::collections::BTreeSet;
+    let mut ids = BTreeSet::new();
+    let mut jobs = BTreeSet::new();
+    // The build job's own upload name is reserved in the same workflow.
+    let mut artifact_names = BTreeSet::new();
+    for smoke in &ci.target_smokes {
+        let id = smoke.id.trim();
+        let table = format!("[[ci.target_smokes]] `{id}`");
+        if id.is_empty()
+            || !id
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+        {
+            bail!("simit project config: [[ci.target_smokes]] id `{id}` must match [a-zA-Z0-9_-]+");
+        }
+        let sanitized = crate::render::ci::sanitize_gate_id(id);
+        if !ids.insert(id.to_owned()) || !jobs.insert(sanitized.clone()) {
+            bail!(
+                "simit project config: [[ci.target_smokes]] id `{id}` is a duplicate (ids collide after sanitization to `{sanitized}`)"
+            );
+        }
+        artifact_names.insert(format!("target-smoke-{sanitized}"));
+        validate_runner_label(&smoke.runner)
+            .map_err(|err| anyhow!("simit project config: {table} runner: {err}"))?;
+        for (field, value) in [("nix_build", &smoke.nix_build), ("run", &smoke.run)] {
+            if value.trim().is_empty() || value.contains(['\n', '\r']) {
+                bail!("simit project config: {table} {field} must be a non-empty single line");
+            }
+        }
+        // The build job runs with a fixed budget; the smoke job adds 15 minutes
+        // of checkout/download/upload overhead to this limit.
+        if smoke.timeout_minutes == 0 || smoke.timeout_minutes > 345 {
+            bail!("simit project config: {table} timeout_minutes must be 1..=345");
+        }
+        for (key, value) in &smoke.env {
+            if key.trim().is_empty()
+                || key.contains(['\n', '\r', ' ', '='])
+                || key == "SIMIT_TARGET_SMOKE_DIR"
+            {
+                bail!(
+                    "simit project config: {table} env keys must be non-empty without whitespace or `=`, and cannot be SIMIT_TARGET_SMOKE_DIR"
+                );
+            }
+            if value.contains(['\n', '\r']) {
+                bail!("simit project config: {table} env value for `{key}` must be single-line");
+            }
+        }
+    }
+    for smoke in &ci.target_smokes {
+        if let Some(artifacts) = &smoke.artifacts {
+            validate_gate_artifact_fields(
+                artifacts,
+                !artifact_names.insert(artifacts.name.clone()),
+            )?;
+        }
+    }
+    Ok(())
+}
+
+fn set_target_smokes_table(table: &mut Table, smokes: &[TargetSmoke]) {
+    if smokes.is_empty() {
+        table.remove("target_smokes");
+        return;
+    }
+    let mut array = Array::new();
+    for smoke in smokes {
+        let mut item = InlineTable::default();
+        item.insert("id", Value::from(smoke.id.as_str()));
+        item.insert("nix_build", Value::from(smoke.nix_build.as_str()));
+        item.insert("runner", Value::from(smoke.runner.as_str()));
+        item.insert("shell", Value::from(smoke.shell.as_str()));
+        item.insert("run", Value::from(smoke.run.as_str()));
+        if smoke.timeout_minutes != default_gate_timeout_minutes() {
+            item.insert("timeout_minutes", Value::from(smoke.timeout_minutes as i64));
+        }
+        if !smoke.env.is_empty() {
+            let mut env = InlineTable::default();
+            for (key, value) in &smoke.env {
+                env.insert(key.as_str(), Value::from(value.as_str()));
+            }
+            item.insert("env", Value::InlineTable(env));
+        }
+        if let Some(artifacts) = &smoke.artifacts {
+            item.insert(
+                "artifacts",
+                Value::InlineTable(artifacts_inline_table(artifacts)),
+            );
+        }
+        array.push(Value::InlineTable(item));
+    }
+    table["target_smokes"] = Item::Value(Value::Array(array));
+}
+
+fn artifacts_inline_table(artifacts: &RequiredGateArtifacts) -> InlineTable {
+    let mut value = InlineTable::default();
+    value.insert("name", Value::from(artifacts.name.as_str()));
+    let mut paths = Array::new();
+    for path in &artifacts.paths {
+        paths.push(path.as_str());
+    }
+    value.insert("paths", Value::Array(paths));
+    value.insert(
+        "retention_days",
+        Value::from(artifacts.retention_days as i64),
+    );
+    value
 }
 
 fn validate_local_gate_steps(ci: &CiConfig) -> Result<()> {
@@ -4540,18 +4712,10 @@ fn set_required_gates_table(table: &mut Table, key: &str, gates: &[RequiredGate]
             item.insert("env", Value::InlineTable(env));
         }
         if let Some(artifacts) = &gate.artifacts {
-            let mut value = InlineTable::default();
-            value.insert("name", Value::from(artifacts.name.as_str()));
-            let mut paths = Array::new();
-            for path in &artifacts.paths {
-                paths.push(path.as_str());
-            }
-            value.insert("paths", Value::Array(paths));
-            value.insert(
-                "retention_days",
-                Value::from(artifacts.retention_days as i64),
+            item.insert(
+                "artifacts",
+                Value::InlineTable(artifacts_inline_table(artifacts)),
             );
-            item.insert("artifacts", Value::InlineTable(value));
         }
         array.push(Value::InlineTable(item));
     }
@@ -4876,6 +5040,7 @@ fn set_ci_table(table: &mut Table, ci: &CiConfig) {
     }
     set_required_gates_table(table, "required_gates", &ci.required_gates);
     set_required_gates_table(table, "manual_gates", &ci.manual_gates);
+    set_target_smokes_table(table, &ci.target_smokes);
     set_string_array(table, "extra_setup", &ci.extra_setup);
     set_string_map(table, "extra_env", &ci.extra_env);
     set_string_map(table, "workflow_templates", &ci.workflow_templates);

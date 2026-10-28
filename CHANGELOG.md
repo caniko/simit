@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- New `[[ci.target_smokes]]` renders a build job on the Linux CI runner
+  (`nix build`, dereferenced output uploaded as an artifact) and a smoke job on
+  a target runner such as `windows-2025` or `macos-15` that downloads it and runs
+  a command in `bash` or `pwsh`, with scoped `env` and failure-proof artifact
+  upload, in `target-smokes.yaml`. GitHub Actions only; other backends reject it.
 - `[winget]` now submits to `microsoft/winget-pkgs` through the GitHub REST API
   (`curl` and `jq` as the `WINGET_PAT` user) instead of `wingetcreate` under
   wine, which no longer runs on hosted runners (its release asset needs .NET).
