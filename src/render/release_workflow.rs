@@ -4015,6 +4015,7 @@ esac"#,
         assert!(!step.contains("must POST"));
     }
 
+    #[cfg(unix)]
     /// The rendered submission script, un-indented from the workflow step.
     fn winget_script() -> String {
         let step = winget_step(&sorrel_winget(), ReleasePublisherEnforcement::default());
@@ -4025,10 +4026,12 @@ esac"#,
             .collect()
     }
 
+    #[cfg(unix)]
     struct Fake {
         dir: tempfile::TempDir,
     }
 
+    #[cfg(unix)]
     const FAKE_CURL: &str = r#"
 m=GET out=/dev/null data=; a=("$@")
 for ((i = 0; i < ${#a[@]}; i++)); do
@@ -4047,6 +4050,7 @@ else echo 404 > "$FAKE/code"; echo '{"message":"Not Found"}' > "$out"; fi
 cat "$FAKE/code"
 "#;
 
+    #[cfg(unix)]
     impl Fake {
         fn new() -> Self {
             use std::os::unix::fs::PermissionsExt;
@@ -4186,6 +4190,7 @@ cat "$FAKE/code"
         }
     }
 
+    #[cfg(unix)]
     #[test]
     fn winget_script_opens_a_new_package_pr() {
         let fake = Fake::new();
@@ -4216,6 +4221,7 @@ cat "$FAKE/code"
         fake.assert_token_hygiene(&out);
     }
 
+    #[cfg(unix)]
     #[test]
     fn winget_script_opens_a_new_version_pr_and_syncs_a_lagging_fork() {
         let fake = Fake::new();
@@ -4263,6 +4269,7 @@ cat "$FAKE/code"
         );
     }
 
+    #[cfg(unix)]
     #[test]
     fn winget_script_is_idempotent() {
         let up = "/repos/microsoft/winget-pkgs";
@@ -4297,6 +4304,7 @@ cat "$FAKE/code"
         assert!(!fake.log("argv.log").contains("/user"));
     }
 
+    #[cfg(unix)]
     #[test]
     fn winget_script_reports_api_errors_without_the_token() {
         let fake = Fake::new();
