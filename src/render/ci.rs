@@ -3280,6 +3280,116 @@ pub fn manual_gates_file(
     }
 }
 
+/// `[[ci.target_smokes]]`: for each entry, a Linux job builds the Nix
+/// installable and uploads the dereferenced output tree, then a smoke job on
+/// the target runner downloads it and runs the configured command. Both run on
+/// the ordinary push/PR triggers with read-only permissions, so a smoke failure
+/// fails the workflow like any other required check.
+pub fn target_smokes_file(
+    ci_runner: &ResolvedRunner,
+    push_branches: &[String],
+    nix_cache: (&[String], &[String]),
+    smokes: &[crate::config::TargetSmoke],
+) -> Result<GeneratedFile> {
+    let platform = Platform::Github;
+    let mut workflow = String::new();
+    push_generated_workflow_header(&mut workflow);
+    workflow.push_str("name: Target smokes\n\non:\n  push:\n");
+    push_ci_branches(&mut workflow, push_branches);
+    workflow.push_str("    tags-ignore: [\"**\"]\n  pull_request:\n\n");
+    push_github_read_permissions(&mut workflow, platform);
+    push_github_concurrency(&mut workflow);
+    workflow.push_str("jobs:");
+    for smoke in smokes {
+        let id = sanitize_gate_id(&smoke.id);
+        let dir = format!("target-smoke-{id}");
+        let target = ResolvedRunner::literal(&smoke.runner)?;
+        // Build on the Linux CI runner with the shared Nix setup and caches.
+        workflow.push_str(&format!("\n  build-target-smoke-{id}:\n    runs-on: "));
+        workflow.push_str(&runs_on(ci_runner));
+        workflow.push_str("\n    timeout-minutes: 60\n");
+        push_job_github_read_permissions(&mut workflow, platform);
+        workflow.push_str("    steps:\n");
+        push_checkout_step(&mut workflow, platform, ci_runner);
+        push_install_nix_step_with_cache(&mut workflow, platform, nix_cache.0, nix_cache.1);
+        workflow.push_str(&format!(
+            "      - name: Build {}\n        run: |\n          set -euo pipefail\n          nix build {} --out-link result\n          mkdir {dir}\n          cp -rL result/. {dir}/\n          chmod -R u+w {dir}\n\n",
+            smoke.id,
+            shell_word(&smoke.nix_build),
+        ));
+        workflow.push_str("      - name: Upload build output\n");
+        push_action_uses(
+            &mut workflow,
+            platform,
+            Some(ci_runner),
+            "upload-artifact",
+            "v7.0.2",
+            "v4.6.2",
+        );
+        workflow.push_str(&format!(
+            "        with:\n          name: {dir}\n          path: {dir}/\n          include-hidden-files: true\n          retention-days: 1\n          if-no-files-found: error\n"
+        ));
+
+        // Run on the target OS against the downloaded output.
+        workflow.push_str(&format!(
+            "\n  target-smoke-{id}:\n    needs: [build-target-smoke-{id}]\n    runs-on: "
+        ));
+        workflow.push_str(&runs_on(&target));
+        workflow.push_str(&format!(
+            "\n    timeout-minutes: {}\n",
+            smoke.timeout_minutes + 15
+        ));
+        push_job_github_read_permissions(&mut workflow, platform);
+        workflow.push_str(&format!(
+            "    env:\n      SIMIT_TARGET_SMOKE_DIR: ${{{{ github.workspace }}}}/{dir}\n    steps:\n"
+        ));
+        push_checkout_step(&mut workflow, platform, &target);
+        workflow.push_str("      - name: Download build output\n");
+        push_action_uses(
+            &mut workflow,
+            platform,
+            Some(&target),
+            "download-artifact",
+            "v8.0.2",
+            "v4.3.0",
+        );
+        workflow.push_str(&format!(
+            "        with:\n          name: {dir}\n          path: {dir}\n\n"
+        ));
+        workflow.push_str(&format!(
+            "      - name: Target smoke {}\n        id: simit-required-gate-{id}\n        shell: {}\n        timeout-minutes: {}\n",
+            smoke.id,
+            smoke.shell.as_str(),
+            smoke.timeout_minutes
+        ));
+        if !smoke.env.is_empty() {
+            workflow.push_str("        env:\n");
+            for (key, value) in &smoke.env {
+                workflow.push_str(&format!(
+                    "          {key}: \"{}\"\n",
+                    yaml_double_quote(value)
+                ));
+            }
+        }
+        workflow.push_str(&format!("        run: |\n          {}\n", smoke.run));
+        // Reuse the gate evidence upload: it runs when the smoke started,
+        // pass or fail, and never publishes for a skipped smoke.
+        let gate = crate::config::RequiredGate {
+            id: smoke.id.clone(),
+            run: smoke.run.clone(),
+            timeout_minutes: smoke.timeout_minutes,
+            env: smoke.env.clone(),
+            artifacts: smoke.artifacts.clone(),
+        };
+        push_required_gate_artifacts(&mut workflow, &gate, Some(&target), "", ("", ""));
+    }
+    trim_trailing_blank_lines(&mut workflow);
+    Ok(GeneratedFile {
+        relative_path: PathBuf::from(Platform::Github.workflow_dir()).join("target-smokes.yaml"),
+        content: workflow,
+    })
+}
+
 pub(crate) fn push_required_gate_artifacts(
     workflow: &mut String,
     gate: &crate::config::RequiredGate,

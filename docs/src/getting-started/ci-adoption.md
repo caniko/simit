@@ -1450,6 +1450,55 @@ Forgejo and Crow reject
 this GitHub-only option after CLI backend overrides are resolved; hosted release
 generation checks its effective release backend independently of the CI default.
 
+## Target-OS Smoke Tests
+
+A Nix cross-build (for example a Windows `.exe` built on Linux) has not run on
+the OS it targets until a real runner executes it. `[[ci.target_smokes]]` builds
+an installable on the Linux CI runner and runs a command against the output on
+a target-OS runner:
+
+```toml
+[[ci.target_smokes]]
+id = "windows"
+nix_build = ".#packages.x86_64-linux.sorrel-windows-smoke"
+runner = "windows-2025"
+shell = "pwsh"
+run = "./smoke/windows.ps1"
+timeout_minutes = 30
+env = { SORREL_LOG = "info" }
+artifacts = { name = "windows-smoke", paths = ["smoke-out/**"], retention_days = 7 }
+```
+
+| Field             | Default  | Meaning                                                         |
+| ----------------- | -------- | --------------------------------------------------------------- |
+| `id`              | required | Unique, `[a-zA-Z0-9_-]+`; names the jobs and the build artifact |
+| `nix_build`       | required | Installable for `nix build` on the Linux CI runner              |
+| `runner`          | required | Target runner label (same rules as `[ci].runner`)               |
+| `shell`           | `bash`   | `bash` or `pwsh`                                                |
+| `run`             | required | Single-line command run from the checked-out repository         |
+| `timeout_minutes` | `30`     | Limit for `run`, 1-345; the job adds 15 minutes of overhead     |
+| `env`             | `{}`     | Environment for `run` only                                      |
+| `artifacts`       | none     | Same fields as gate artifacts; uploaded even when `run` fails   |
+
+Each entry renders two jobs in `target-smokes.yaml`, on the same push and
+pull-request triggers, concurrency and read-only `contents` permission as
+ordinary CI:
+
+1. `build-target-smoke-<id>` uses the shared Nix setup and substituters, runs
+   `nix build <nix_build> --out-link result`, copies the dereferenced output
+   into `target-smoke-<id>/` and uploads it with `actions/upload-artifact`.
+2. `target-smoke-<id>` needs the build job, checks the repository out on
+   `runner`, downloads the output into `target-smoke-<id>/`, exports
+   `SIMIT_TARGET_SMOKE_DIR` pointing at it and runs `run` in `shell`.
+
+Mark `target-smoke-<id>` as a required status check so a failure blocks the
+pull request. Artifact upload does not preserve the executable bit, so the smoke
+script should `chmod +x` binaries it runs on macOS. Nix and the Rust CI path
+both emit the workflow; Python uv CI rejects the option. Forgejo, GitLab and
+Crow cannot run it and fail with an error instead of ignoring it. The table
+persists in `simit.toml` like the other `[ci]` options and is drift-checked by
+`simit init ci --check`; removing it deletes the generated workflow.
+
 ## Coordinated Workspace Publication
 
 Member-scoped publishing (`publish-crate-<crate>.yaml`) has no cross-crate

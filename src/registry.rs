@@ -857,7 +857,15 @@ fn detect_ci_status(workspace_root: &Path) -> FeatureStatus {
 }
 
 fn is_manual_gates_workflow(file: &WorkflowFile) -> bool {
-    file.marked && file.relative_path.file_name() == Some("manual-gates.yaml".as_ref())
+    // Target smokes are config-owned like manual gates: `init ci --check`
+    // drift-checks them, and the workflow-inferred expectation cannot.
+    file.marked
+        && matches!(
+            file.relative_path
+                .file_name()
+                .and_then(|name| name.to_str()),
+            Some("manual-gates.yaml" | "target-smokes.yaml")
+        )
 }
 
 fn is_release_workflow(file: &WorkflowFile) -> bool {

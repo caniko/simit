@@ -492,6 +492,17 @@ pub fn run(command: InitCiCommand) -> Result<()> {
             &cfg.ci.manual_gates,
         ));
     }
+    if !command.primary_only && !cfg.ci.target_smokes.is_empty() {
+        files.push(ci::target_smokes_file(
+            &runners.ci,
+            &options.push_branches,
+            (
+                &options.ci_nix_substituters,
+                &options.ci_nix_trusted_public_keys,
+            ),
+            &cfg.ci.target_smokes,
+        )?);
+    }
     files.extend(prebuild_files(&cfg, cfg.ci.crow.format)?);
     if !command.primary_only
         && resolved.with_pypi_publish
@@ -1204,6 +1215,15 @@ fn run_nix_only_at(command: InitCiCommand, workspace_root: &Path) -> Result<()> 
             )?);
         }
     }
+    if !command.primary_only && !cfg.ci.target_smokes.is_empty() {
+        let cache = cfg.ci_cache_artifacts();
+        files.push(ci::target_smokes_file(
+            &ResolvedRunner::literal(&runner)?,
+            &cfg.ci.push_branches,
+            (&cache.substituters, &cache.trusted_public_keys),
+            &cfg.ci.target_smokes,
+        )?);
+    }
     files.extend(prebuild_files(&cfg, cfg.ci.crow.format)?);
     if let Some(pages) = &pages {
         files.push(ci::codeberg_pages_file(
@@ -1309,6 +1329,9 @@ fn run_python(command: InitCiCommand) -> Result<()> {
 
     if command.workspace || !command.packages.is_empty() {
         bail!("Python uv CI does not support --workspace or --package");
+    }
+    if !cfg.ci.target_smokes.is_empty() {
+        bail!("[[ci.target_smokes]] is not supported for Python uv CI");
     }
     if command.with_homebrew
         || command.with_chocolatey
@@ -2737,6 +2760,7 @@ pub(crate) fn is_ci_managed_workflow_name(name: &std::ffi::OsStr) -> bool {
             | "nix-builds.yml"
             | "producer-custody.yaml"
             | "manual-gates.yaml"
+            | "target-smokes.yaml"
             | "prebuild.yaml"
             | "prebuild.yml"
             | "prebuild.jsonnet"

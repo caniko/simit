@@ -7449,3 +7449,281 @@ fn manual_gates_audit_clean_and_supersede_inferred_required_gates() {
         .unwrap();
     assert!(output.status.success(), "{output:?}");
 }
+
+const TARGET_SMOKE_CONFIG: &str = r#"[ci]
+platform = "github"
+provider = "actions"
+runtime = "nix"
+
+[[ci.target_smokes]]
+id = "windows"
+nix_build = ".#packages.x86_64-linux.sorrel-windows-smoke"
+runner = "windows-2025"
+shell = "pwsh"
+run = "./smoke/windows.ps1"
+timeout_minutes = 25
+env = { SORREL_LOG = "info" }
+artifacts = { name = "windows-smoke", paths = ["smoke-out/**"], retention_days = 7 }
+
+[[ci.target_smokes]]
+id = "macos"
+nix_build = ".#packages.aarch64-darwin.app"
+runner = "macos-15"
+run = "./smoke/mac.sh"
+"#;
+
+fn init_target_smokes(config: &str, args: &[&str]) -> (TempDir, std::process::Output) {
+    let temp = init_package(true);
+    fs::write(temp.path().join("simit.toml"), config).unwrap();
+    let output = simit()
+        .current_dir(temp.path())
+        .args(["init", "ci"])
+        .args(args)
+        .output()
+        .unwrap();
+    (temp, output)
+}
+
+#[test]
+fn target_smokes_render_build_and_smoke_jobs_and_round_trip() {
+    let (temp, output) = init_target_smokes(TARGET_SMOKE_CONFIG, &[]);
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let path = temp.path().join(".github/workflows/target-smokes.yaml");
+    let text = fs::read_to_string(&path).unwrap();
+    let yaml: serde_yaml::Value = serde_yaml::from_str(&text).unwrap();
+    // Same trigger, permission and concurrency conventions as ordinary CI.
+    assert!(yaml["on"]["pull_request"].is_null());
+    assert!(yaml["on"]["push"]["branches"].is_sequence());
+    assert_eq!(yaml["permissions"]["contents"].as_str(), Some("read"));
+    assert!(yaml["concurrency"]["cancel-in-progress"].as_bool().unwrap());
+    assert_eq!(yaml["jobs"].as_mapping().unwrap().len(), 4);
+
+    let build = &yaml["jobs"]["build-target-smoke-windows"];
+    assert_eq!(build["permissions"]["contents"].as_str(), Some("read"));
+    assert!(build["runs-on"].as_str().unwrap().starts_with("ubuntu"));
+    assert!(
+        text.contains("nix build .#packages.x86_64-linux.sorrel-windows-smoke --out-link result")
+    );
+    assert!(text.contains("cp -rL result/. target-smoke-windows/"));
+    assert!(text.contains("cachix/install-nix-action@"));
+
+    let smoke = &yaml["jobs"]["target-smoke-windows"];
+    assert_eq!(
+        smoke["needs"][0].as_str(),
+        Some("build-target-smoke-windows")
+    );
+    assert_eq!(smoke["runs-on"].as_str(), Some("windows-2025"));
+    assert_eq!(smoke["permissions"]["contents"].as_str(), Some("read"));
+    assert_eq!(smoke["timeout-minutes"].as_u64(), Some(40));
+    assert_eq!(
+        smoke["env"]["SIMIT_TARGET_SMOKE_DIR"].as_str(),
+        Some("${{ github.workspace }}/target-smoke-windows")
+    );
+    let steps = smoke["steps"].as_sequence().unwrap();
+    let step = |name: &str| {
+        steps
+            .iter()
+            .find(|step| step["name"].as_str().is_some_and(|n| n.starts_with(name)))
+            .unwrap_or_else(|| panic!("no step {name}: {text}"))
+    };
+    assert!(
+        step("Checkout")["uses"]
+            .as_str()
+            .unwrap()
+            .starts_with("actions/checkout@")
+    );
+    let download = step("Download build output");
+    assert!(
+        download["uses"]
+            .as_str()
+            .unwrap()
+            .starts_with("actions/download-artifact@")
+    );
+    assert_eq!(
+        download["with"]["name"].as_str(),
+        Some("target-smoke-windows")
+    );
+    assert_eq!(
+        download["with"]["path"].as_str(),
+        Some("target-smoke-windows")
+    );
+    let run = step("Target smoke windows");
+    assert_eq!(run["shell"].as_str(), Some("pwsh"));
+    assert_eq!(run["env"]["SORREL_LOG"].as_str(), Some("info"));
+    assert_eq!(run["timeout-minutes"].as_u64(), Some(25));
+    assert_eq!(
+        run["run"].as_str().map(str::trim),
+        Some("./smoke/windows.ps1")
+    );
+    let upload = step("Retain required gate evidence");
+    assert!(upload["if"].as_str().unwrap().starts_with("always()"));
+    assert!(
+        upload["uses"]
+            .as_str()
+            .unwrap()
+            .starts_with("actions/upload-artifact@")
+    );
+    assert_eq!(upload["with"]["name"].as_str(), Some("windows-smoke"));
+    assert_eq!(upload["with"]["retention-days"].as_u64(), Some(7));
+
+    // Every action is pinned to a commit with a version comment.
+    for line in text
+        .lines()
+        .filter(|line| line.trim_start().starts_with("uses:"))
+    {
+        let (_, pinned) = line.split_once('@').expect(line);
+        assert!(
+            pinned.len() > 40 && pinned[..40].bytes().all(|b| b.is_ascii_hexdigit()),
+            "{line}"
+        );
+        assert!(pinned.contains("# v"), "{line}");
+    }
+
+    // Defaults: bash shell, 30-minute timeout, no artifacts.
+    let mac = &yaml["jobs"]["target-smoke-macos"];
+    assert_eq!(mac["runs-on"].as_str(), Some("macos-15"));
+    assert_eq!(mac["timeout-minutes"].as_u64(), Some(45));
+    assert!(!text.contains("target-smoke-macos\n        if: always()"));
+    assert!(
+        mac["steps"]
+            .as_sequence()
+            .unwrap()
+            .iter()
+            .any(|s| s["shell"].as_str() == Some("bash"))
+    );
+
+    // Ordinary CI is untouched; the config round-trips and passes --check.
+    let ci = fs::read_to_string(temp.path().join(".github/workflows/ci.yaml")).unwrap();
+    assert!(!ci.contains("target-smoke"), "{ci}");
+    let config = fs::read_to_string(temp.path().join("simit.toml")).unwrap();
+    assert!(config.contains("target_smokes"), "{config}");
+    assert!(config.contains("sorrel-windows-smoke"), "{config}");
+    let check = simit()
+        .current_dir(temp.path())
+        .args(["init", "ci", "--check"])
+        .output()
+        .unwrap();
+    assert!(
+        check.status.success(),
+        "{}",
+        String::from_utf8_lossy(&check.stderr)
+    );
+    // Drift is detected, and removing the config removes the workflow.
+    fs::write(&path, format!("{text}# drift\n")).unwrap();
+    let check = simit()
+        .current_dir(temp.path())
+        .args(["init", "ci", "--check"])
+        .output()
+        .unwrap();
+    assert!(!check.status.success());
+    fs::write(
+        temp.path().join("simit.toml"),
+        "[ci]\nplatform = \"github\"\nprovider = \"actions\"\nruntime = \"nix\"\n",
+    )
+    .unwrap();
+    let output = simit()
+        .current_dir(temp.path())
+        .args(["init", "ci"])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(!path.exists());
+}
+
+#[test]
+fn target_smokes_reject_invalid_config_and_unsupported_backends() {
+    let smoke = |fields: &str| {
+        format!(
+            "[ci]\nplatform = \"github\"\nprovider = \"actions\"\nruntime = \"nix\"\n[[ci.target_smokes]]\nid = \"w\"\nnix_build = \".#x\"\nrunner = \"windows-2025\"\nrun = \"./s.ps1\"\n{fields}"
+        )
+    };
+    let cases = [
+        (smoke("shell = \"cmd\"\n"), "cmd"),
+        (smoke("timeout_minutes = 0\n"), "timeout_minutes"),
+        (
+            smoke("env = { SIMIT_TARGET_SMOKE_DIR = \"x\" }\n"),
+            "SIMIT_TARGET_SMOKE_DIR",
+        ),
+        (
+            smoke("artifacts = { name = \"target-smoke-w\", paths = [\"o\"] }\n"),
+            "unique",
+        ),
+        (
+            smoke(
+                "[[ci.target_smokes]]\nid = \"w\"\nnix_build = \".#y\"\nrunner = \"macos-15\"\nrun = \"./m\"\n",
+            ),
+            "duplicate",
+        ),
+        (
+            smoke(
+                "[[ci.target_smokes]]\nid = \"W\"\nnix_build = \".#y\"\nrunner = \"macos-15\"\nrun = \"./m\"\n",
+            ),
+            "duplicate",
+        ),
+        (
+            smoke(
+                "[[ci.target_smokes]]\nid = \"bad id\"\nnix_build = \".#y\"\nrunner = \"macos-15\"\nrun = \"./m\"\n",
+            ),
+            "must match",
+        ),
+        (
+            smoke(
+                "[[ci.target_smokes]]\nid = \"e\"\nnix_build = \" \"\nrunner = \"macos-15\"\nrun = \"./m\"\n",
+            ),
+            "nix_build",
+        ),
+        (
+            smoke(
+                "[[ci.target_smokes]]\nid = \"e\"\nnix_build = \".#y\"\nrunner = \"macos-15\"\nrun = \"\"\n",
+            ),
+            "run",
+        ),
+        (
+            smoke(
+                "[[ci.target_smokes]]\nid = \"e\"\nnix_build = \".#y\"\nrunner = \"bad runner!\"\nrun = \"./m\"\n",
+            ),
+            "runner",
+        ),
+        (
+            smoke("").replace(
+                "platform = \"github\"\nprovider = \"actions\"",
+                "platform = \"forgejo\"\nprovider = \"actions\"",
+            ),
+            "GitHub Actions",
+        ),
+    ];
+    for (config, needle) in cases {
+        let (_temp, output) = init_target_smokes(&config, &[]);
+        assert!(!output.status.success(), "{config}");
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(stderr.contains(needle), "{needle}: {stderr}");
+    }
+}
+
+#[test]
+fn target_smokes_render_for_nix_only_ci() {
+    let config = TARGET_SMOKE_CONFIG.replacen(
+        "runtime = \"nix\"\n",
+        "runtime = \"nix\"\nnix_builds = [\".#x\"]\n\n[ci.nix_build]\nonly = true\n",
+        1,
+    );
+    let (temp, output) = init_target_smokes(&config, &[]);
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        temp.path()
+            .join(".github/workflows/target-smokes.yaml")
+            .is_file()
+    );
+}
