@@ -117,19 +117,33 @@ Optional fields used for the first submission, with their defaults:
 | `binary`            | `<cargo name>.exe`, the path of the executable inside the zip |
 | `command`           | Cargo package name, the portable command alias                |
 
-The release step picks its mode from the state of the package in
-`winget-pkgs`. When the package exists it runs `wingetcreate update`. When it
-does not, `wingetcreate new` is interactive, so the step instead writes the
-three ManifestVersion 1.10.0 files (`<id>.yaml`, `<id>.installer.yaml`,
-`<id>.locale.en-US.yaml`) with an `InstallerType: zip` / `NestedInstallerType:
-portable` installer, the uppercase SHA-256 of the released zip, and runs
-`wingetcreate submit` on them. Under
-`[release.publish].enforcement = "activated-remote"` the mode comes from the
+The release step submits through the GitHub REST API as the `WINGET_PAT` user
+(`curl` and `jq`; no wine, no `wingetcreate`). New packages and new versions
+take one path: it writes the three ManifestVersion 1.10.0 files
+(`<id>.yaml`, `<id>.installer.yaml`, `<id>.locale.en-US.yaml`) with an
+`InstallerType: zip` / `NestedInstallerType: portable` installer and the
+uppercase SHA-256 of the released zip under
+`manifests/<x>/<Publisher>/<Name>/<version>/`, ensures the token owner's fork
+of `microsoft/winget-pkgs` exists, commits the files to a branch
+`<id>-<version>` on it (blobs, tree on the upstream head, commit, ref) and opens
+the PR with the winget-pkgs title `New package: <id> version <v>` or
+`New version: <id> version <v>`. Reruns are safe: an open PR from the branch is
+printed and the step succeeds, and so does a version that already exists
+upstream ("already published"). The token is passed to curl through a 0600
+header file, never on the command line, and API failures print the HTTP status
+and GitHub's message.
+
+The package directory decides new package versus new version. Under
+`[release.publish].enforcement = "activated-remote"` that comes from the
 publisher probe (`PUBLISH_WINGET_STATE`; only a 200 or 404 from winget-pkgs
 counts, any other response fails the release rather than guessing) and a
-failed first submission only warns until the package is active; otherwise the step probes
-`api.github.com/repos/microsoft/winget-pkgs/contents/manifests/...` itself (404
-means first submission) and a failure fails the release. The first submission
-needs a license and a short description (set them or fill the Cargo
-metadata; 3-256 characters), otherwise the step fails with a message naming
-the fields.
+failed submission only warns until the package is active; otherwise the step
+probes `api.github.com/repos/microsoft/winget-pkgs/contents/manifests/...`
+itself and a failure fails the release. Every submission now writes the full
+manifests, so it needs a license and a short description (set them or fill the
+Cargo metadata; 3-256 characters), otherwise the step fails with a message
+naming the fields. `WINGET_PAT` is still a classic token with `public_repo`.
+
+`simit dist winget submit --version X` runs the same script locally (needs
+`bash`, `curl`, `jq`): it downloads the zip for its checksum and submits.
+`--wine`, `--wingetcreate` and `--wingetcreate-url` were removed.

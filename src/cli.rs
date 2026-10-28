@@ -1423,7 +1423,7 @@ pub struct WingetCommand {
 
 #[derive(Debug, Subcommand)]
 pub enum WingetAction {
-    #[command(about = "Submit a winget-pkgs manifest update with wingetcreate")]
+    #[command(about = "Submit a winget-pkgs manifest PR through the GitHub API")]
     Submit(WingetSubmitArgs),
 }
 
@@ -1462,31 +1462,12 @@ pub struct WingetSubmitArgs {
     )]
     pub token_env: Option<String>,
     #[arg(
-        long = "wingetcreate",
-        value_name = "PATH",
-        help = "wingetcreate executable path"
-    )]
-    pub wingetcreate: Option<Utf8PathBuf>,
-    #[arg(
-        long = "wingetcreate-url",
-        value_name = "URL",
-        help = "Download wingetcreate.exe from this URL instead of GitHub latest"
-    )]
-    pub wingetcreate_url: Option<String>,
-    #[arg(
         long = "work-dir",
         value_name = "DIR",
-        help = "Working directory for downloaded wingetcreate.exe"
+        help = "Working directory for the downloaded installer and submission script"
     )]
     pub work_dir: Option<Utf8PathBuf>,
-    #[arg(
-        long = "wine",
-        value_name = "PATH",
-        default_value = "wine",
-        help = "Wine executable used to run wingetcreate"
-    )]
-    pub wine: String,
-    #[arg(long, help = "Print the wingetcreate command without running it")]
+    #[arg(long, help = "Print what would be submitted without running it")]
     pub dry_run: bool,
 }
 

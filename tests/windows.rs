@@ -89,7 +89,7 @@ fn windows_publish_dry_run_plans_configured_channels() {
     let stdout = String::from_utf8(output.stdout).unwrap();
     assert!(stdout.contains("would write Chocolatey package demo-app 1.2.3"));
     assert!(stdout.contains("would write Scoop manifest demo-app 1.2.3"));
-    assert!(stdout.contains("wine "));
-    assert!(stdout.contains("wingetcreate.exe update Example.DemoApp"));
+    assert!(!stdout.contains("wine "));
+    assert!(stdout.contains("would submit Example.DemoApp 1.2.3"));
     assert!(!stdout.contains("secret-token"));
 }

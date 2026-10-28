@@ -1,12 +1,11 @@
 use std::fs;
-use std::path::PathBuf;
 use std::process::Command;
 
 use anyhow::{Context, Result, bail};
 
 use crate::cargo;
 use crate::cli::{Platform, WingetAction, WingetCommand, WingetSubmitArgs};
-use crate::config::{ProjectConfig, WingetConfig};
+use crate::config::{ProjectConfig, ResolvedWinget, WingetConfig};
 use crate::packaging_common::{validate_download_repo, validate_version};
 use crate::registry::{self, FeatureStatus};
 
@@ -16,6 +15,8 @@ pub fn run(command: WingetCommand) -> Result<()> {
     }
 }
 
+/// Submit the release zip to winget-pkgs by running the same GitHub REST
+/// script as the release workflow step (needs `bash`, `curl` and `jq`).
 pub(crate) fn submit(args: WingetSubmitArgs) -> Result<()> {
     validate_version(&args.version)?;
     let (resolved, platform, tag_prefix) = resolve(&args)?;
@@ -31,171 +32,126 @@ pub(crate) fn submit(args: WingetSubmitArgs) -> Result<()> {
     if token_env.is_empty() {
         bail!("Winget token environment variable name is empty");
     }
+    if args.dry_run {
+        println!(
+            "winget: would submit {} {} ({url}) to microsoft/winget-pkgs through the GitHub API with ${token_env}",
+            resolved.package_id, args.version
+        );
+        return Ok(());
+    }
     let token = std::env::var(token_env)
         .with_context(|| format!("reading Winget GitHub token from ${token_env}"))?;
     if token.is_empty() {
         bail!("Winget token environment variable ${token_env} is empty");
     }
 
-    let wingetcreate = resolve_wingetcreate(&args)?;
-    let command_display = format!(
-        "{} {} update {} --version {} --urls {}|x64 --token ${} --submit",
-        args.wine,
-        wingetcreate.display(),
-        resolved.package_id,
-        args.version,
-        url,
-        token_env
-    );
-    if args.dry_run {
-        println!("{command_display}");
-        return Ok(());
+    let work_dir = args
+        .work_dir
+        .as_ref()
+        .map(|path| path.as_std_path().to_path_buf())
+        .unwrap_or_else(|| "target/simit-winget".into());
+    let release_dir = work_dir.join("release");
+    fs::create_dir_all(&release_dir)
+        .with_context(|| format!("creating {}", release_dir.display()))?;
+    let zip_name = url.rsplit('/').next().unwrap_or_default();
+    if zip_name.is_empty() {
+        bail!("cannot derive the installer file name from {url}");
     }
-
-    let mut command = Command::new(&args.wine);
-    command
-        .arg(&wingetcreate)
-        .arg("update")
-        .arg(&resolved.package_id)
-        .arg("--version")
-        .arg(&args.version)
-        .arg("--urls")
-        .arg(format!("{url}|x64"))
-        .arg("--token")
-        .arg(token)
-        .arg("--submit")
-        .env("WINEDEBUG", "-all")
-        .env("TERM", "xterm");
-    if args.wingetcreate.is_none() {
-        let wineprefix = wingetcreate
-            .parent()
-            .unwrap_or_else(|| std::path::Path::new("."))
-            .join("wine");
-        command.env("WINEPREFIX", wineprefix);
-    }
-    let status = command
+    // The manifests carry the installer's SHA-256, so fetch the zip.
+    let status = Command::new("curl")
+        .args(["-fsSL", "-o"])
+        .arg(release_dir.join(zip_name))
+        .arg(&url)
         .status()
-        .with_context(|| format!("running {}", args.wine))?;
+        .context("downloading the installer with curl")?;
     if !status.success() {
-        bail!("wingetcreate update failed");
+        bail!("downloading {url} failed");
+    }
+    let script = work_dir.join("winget-submit.sh");
+    fs::write(
+        &script,
+        crate::render::release_workflow::winget_submit_script(&resolved),
+    )
+    .with_context(|| format!("writing {}", script.display()))?;
+    // The token travels in the environment; the script hands it to curl via a header file.
+    let status = Command::new("bash")
+        .arg("winget-submit.sh")
+        .current_dir(&work_dir)
+        .env("VERSION", &args.version)
+        .env("ZIP_NAME", zip_name)
+        .env("ZIP_URL", &url)
+        .env("WINGET_PAT", token)
+        .env_remove("PUBLISH_WINGET_STATE")
+        .status()
+        .context("running bash")?;
+    if !status.success() {
+        bail!("winget submission failed");
     }
     registry::touch_current_project_or_warn([("winget", FeatureStatus::Managed)]);
     Ok(())
 }
 
-fn resolve_wingetcreate(args: &WingetSubmitArgs) -> Result<PathBuf> {
-    if let Some(path) = &args.wingetcreate {
-        return Ok(path.as_std_path().to_path_buf());
-    }
-    let work_dir = args
-        .work_dir
-        .as_ref()
-        .map(|path| path.as_std_path().to_path_buf())
-        .unwrap_or_else(|| PathBuf::from("target/simit-winget"));
-    if args.dry_run {
-        return Ok(work_dir.join("wingetcreate.exe"));
-    }
-    fs::create_dir_all(&work_dir).with_context(|| format!("creating {}", work_dir.display()))?;
-    let wingetcreate = work_dir.join("wingetcreate.exe");
-    if wingetcreate.is_file() {
-        return Ok(wingetcreate);
-    }
-    let url = match &args.wingetcreate_url {
-        Some(url) => url.clone(),
-        None => latest_wingetcreate_url()?,
-    };
-    let status = Command::new("curl")
-        .arg("-fsSL")
-        .arg("-o")
-        .arg(&wingetcreate)
-        .arg(&url)
-        .status()
-        .with_context(|| "downloading wingetcreate.exe with curl")?;
-    if !status.success() {
-        bail!("downloading wingetcreate.exe failed");
-    }
-    Ok(wingetcreate)
-}
-
-fn latest_wingetcreate_url() -> Result<String> {
-    let output = Command::new("curl")
-        .arg("-fsSL")
-        .arg("https://api.github.com/repos/microsoft/winget-create/releases/latest")
-        .output()
-        .with_context(|| "fetching latest winget-create release with curl")?;
-    if !output.status.success() {
-        bail!("fetching latest winget-create release failed");
-    }
-    let json: serde_json::Value =
-        serde_json::from_slice(&output.stdout).context("parsing winget-create release JSON")?;
-    json.get("assets")
-        .and_then(|assets| assets.as_array())
-        .and_then(|assets| {
-            assets.iter().find_map(|asset| {
-                (asset.get("name").and_then(|name| name.as_str()) == Some("wingetcreate.exe"))
-                    .then(|| {
-                        asset
-                            .get("browser_download_url")
-                            .and_then(|url| url.as_str())
-                    })
-                    .flatten()
-            })
-        })
-        .map(str::to_owned)
-        .context("latest winget-create release did not contain wingetcreate.exe")
-}
-
 fn resolve(
     args: &WingetSubmitArgs,
-) -> Result<(WingetConfig, Platform, crate::release_identity::TagPrefix)> {
+) -> Result<(ResolvedWinget, Platform, crate::release_identity::TagPrefix)> {
     let metadata = cargo::metadata_for_current_dir()?;
     let workspace_root = metadata.workspace_root.as_std_path();
-    let cfg = ProjectConfig::load(workspace_root)?;
-    let configured = cfg.winget.as_ref();
-    let package_id = args
-        .package_id
-        .clone()
-        .or_else(|| configured.map(|winget| winget.package_id.clone()))
-        .context("winget.package_id not set; provide --package-id or [winget].package_id")?;
-    let download_repo = args
-        .download_repo
-        .clone()
-        .or_else(|| configured.map(|winget| winget.download_repo.clone()))
-        .context(
-            "winget.download_repo not set; provide --download-repo or [winget].download_repo",
-        )?;
-    let zip_archive = args
-        .zip_archive
-        .clone()
-        .or_else(|| configured.map(|winget| winget.zip_archive.clone()))
-        .context("winget.zip_archive not set; provide --zip-archive or [winget].zip_archive")?;
-    let token_secret = args
-        .token_env
-        .clone()
-        .or_else(|| configured.map(|winget| winget.token_secret.clone()))
-        .unwrap_or_else(|| "WINGET_PAT".to_owned());
+    let mut cfg = ProjectConfig::load(workspace_root)?;
+    let package = cargo::representative_package(&metadata, cfg.primary_package.as_deref())?;
+    let mut winget = cfg.winget.clone().unwrap_or(WingetConfig {
+        package_id: String::new(),
+        download_repo: String::new(),
+        zip_archive: String::new(),
+        token_secret: "WINGET_PAT".to_owned(),
+        publisher: None,
+        package_name: None,
+        license: None,
+        license_url: None,
+        short_description: None,
+        homepage: None,
+        binary: None,
+        command: None,
+    });
+    for (flag, value, slot, name) in [
+        (
+            "--package-id",
+            &args.package_id,
+            &mut winget.package_id,
+            "package_id",
+        ),
+        (
+            "--download-repo",
+            &args.download_repo,
+            &mut winget.download_repo,
+            "download_repo",
+        ),
+        (
+            "--zip-archive",
+            &args.zip_archive,
+            &mut winget.zip_archive,
+            "zip_archive",
+        ),
+    ] {
+        if let Some(value) = value {
+            slot.clone_from(value);
+        }
+        if slot.is_empty() {
+            bail!("winget.{name} not set; provide {flag} or [winget].{name}");
+        }
+    }
+    if let Some(env) = &args.token_env {
+        winget.token_secret.clone_from(env);
+    }
+    cfg.winget = Some(winget);
     Ok((
-        WingetConfig {
-            package_id,
-            download_repo,
-            zip_archive,
-            token_secret,
-            publisher: None,
-            package_name: None,
-            license: None,
-            license_url: None,
-            short_description: None,
-            homepage: None,
-            binary: None,
-            command: None,
-        },
+        cfg.resolve_winget(&package)?,
         crate::ci_resolution::release_backend(&cfg, None, None)?.platform(),
         cfg.release.tag_prefix,
     ))
 }
 
 fn release_url(
-    resolved: &WingetConfig,
+    resolved: &ResolvedWinget,
     version: &str,
     platform: Platform,
     prefix: crate::release_identity::TagPrefix,

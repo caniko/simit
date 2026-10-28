@@ -2537,8 +2537,6 @@ fn push_publish_winget(
     platform: Platform,
 ) {
     let zip = winget.zip_archive.replace("{version}", "${VERSION}");
-    let manifest_dir = winget_manifest_dir(&winget.package_id);
-    let id = shell_quote(&winget.package_id);
     w.push_str("      - name: Publish winget manifest PR\n        env:\n");
     writeln!(
         w,
@@ -2573,55 +2571,52 @@ fn push_publish_winget(
     w.push('\n');
     if activated_remote {
         // Outside the heredoc so `publisher_missing` cannot downgrade it to a warning.
-        w.push_str("          case \"${PUBLISH_WINGET_STATE:-}\" in active-required|inactive-soft) ;; *) echo \"::error::winget: winget-pkgs probe was inconclusive (${PUBLISH_WINGET_STATE:-unset}); not guessing between an update and a first submission.\" >&2; exit 1 ;; esac\n");
+        w.push_str("          case \"${PUBLISH_WINGET_STATE:-}\" in active-required|inactive-soft) ;; *) echo \"::error::winget: winget-pkgs probe was inconclusive (${PUBLISH_WINGET_STATE:-unset}); not guessing between a new version and a first submission.\" >&2; exit 1 ;; esac\n");
     }
     // Under activated-remote a failed submission stays a warning while the
     // channel is inactive (the first submission); once active it is an error.
-    w.push_str("          nix shell nixpkgs#curl nixpkgs#jq nixpkgs#unzip nixpkgs#wineWow64Packages.stable nixpkgs#util-linux -c bash <<'SCRIPT'");
+    w.push_str("          nix shell nixpkgs#curl nixpkgs#jq -c bash <<'SCRIPT'");
     if activated_remote {
-        w.push_str(" || publisher_missing winget 'wingetcreate submission failed'");
+        w.push_str(" || publisher_missing winget 'GitHub API submission failed'");
     }
     w.push('\n');
-    w.push_str("          set -euo pipefail\n          tmpdir=\"$(mktemp -d)\"; trap 'rm -rf \"$tmpdir\"' EXIT\n");
-    w.push_str(
-        "          export WINEPREFIX=\"$tmpdir/wine\"; export WINEDEBUG=-all; export TERM=xterm\n",
-    );
-    w.push_str("          release_json=\"$(curl -fsSL https://api.github.com/repos/microsoft/winget-create/releases/latest)\"\n");
-    w.push_str("          url=\"$(printf '%s' \"$release_json\" | jq -r '.assets[] | select(.name == \"wingetcreate.exe\") | .browser_download_url' | head -n 1)\"\n");
-    w.push_str("          curl -fsSL -o \"$tmpdir/wingetcreate.exe\" \"$url\"\n");
-    // active-required: the package exists in winget-pkgs, so update it.
-    // Anything else: first submission from generated manifests.
-    w.push_str("          state=\"${PUBLISH_WINGET_STATE:-}\"\n");
-    if !activated_remote {
-        w.push_str("          if [ -z \"$state\" ]; then\n");
-        writeln!(
-            w,
-            "            code=\"$(curl -sS -o /dev/null -w '%{{http_code}}' -H \"Authorization: Bearer $WINGET_PAT\" {})\"",
-            shell_quote(&format!(
-                "https://api.github.com/repos/microsoft/winget-pkgs/contents/{manifest_dir}"
-            ))
-        )
-        .expect("write");
-        w.push_str("            case \"$code\" in 200) state=active-required ;; 404) state=inactive-soft ;; *) echo \"::error::winget: unexpected HTTP $code probing winget-pkgs\" >&2; exit 1 ;; esac\n");
-        w.push_str("          fi\n");
-    }
-    w.push_str("          if [ \"$state\" = active-required ]; then\n");
-    writeln!(w, "            wine \"$tmpdir/wingetcreate.exe\" update {} --version \"$VERSION\" --urls \"${{ZIP_URL}}|x64\" --token \"$WINGET_PAT\" --submit", winget.package_id).expect("write");
-    w.push_str("          else\n");
-    match (&winget.license, &winget.short_description) {
-        (Some(license), Some(description)) => {
-            push_winget_bootstrap(w, winget, &id, &manifest_dir, license, description);
-        }
-        _ => {
-            w.push_str("            echo '::error::winget: the package is not in winget-pkgs yet; set [winget].license and [winget].short_description (3-256 characters; or Cargo license and description) for the first submission.' >&2; exit 1\n");
+    for line in winget_submit_script(winget).lines() {
+        if line.is_empty() {
+            w.push('\n');
+        } else {
+            writeln!(w, "          {line}").expect("write");
         }
     }
-    w.push_str("          fi\n");
     w.push_str("          SCRIPT\n");
 }
 
-/// Writes the three ManifestVersion 1.10.0 files and runs `wingetcreate submit`.
-fn push_winget_bootstrap(
+/// The bash that submits one winget-pkgs PR through the GitHub REST API: it
+/// writes the three manifests, then forks, commits and opens the PR (new
+/// package and new version alike). Reads `VERSION`, `ZIP_NAME`, `ZIP_URL` and
+/// `WINGET_PAT` from the environment, the zip from `release/$ZIP_NAME` and an
+/// optional `PUBLISH_WINGET_STATE`. Shared with `simit dist winget submit`.
+pub(crate) fn winget_submit_script(winget: &ResolvedWinget) -> String {
+    let manifest_dir = winget_manifest_dir(&winget.package_id);
+    let id = shell_quote(&winget.package_id);
+    let mut w = String::new();
+    w.push_str("set -euo pipefail\ntmpdir=\"$(mktemp -d)\"; trap 'rm -rf \"$tmpdir\"' EXIT\n");
+    writeln!(
+        w,
+        "ID={id}; MANIFEST_DIR={}; state=\"${{PUBLISH_WINGET_STATE:-}}\"",
+        shell_quote(&manifest_dir)
+    )
+    .expect("write");
+    let (Some(license), Some(description)) = (&winget.license, &winget.short_description) else {
+        w.push_str("echo '::error::winget: set [winget].license and [winget].short_description (3-256 characters; or Cargo license and description) to write the manifests.' >&2; exit 1\n");
+        return w;
+    };
+    push_winget_manifests(&mut w, winget, &id, &manifest_dir, license, description);
+    w.push_str(include_str!("winget_submit.sh"));
+    w
+}
+
+/// Writes the three ManifestVersion 1.10.0 files into `$dir`.
+fn push_winget_manifests(
     w: &mut String,
     winget: &ResolvedWinget,
     id: &str,
@@ -2631,20 +2626,22 @@ fn push_winget_bootstrap(
 ) {
     let q = shell_quote;
     let file = |name: &str| format!("\"$dir\"/{id}.{name}yaml");
-    w.push_str("            # yaml(): double-quoted YAML scalar; f KEY VALUE writes one field.\n");
-    w.push_str("            yaml() { local s=\"${1//\\\\/\\\\\\\\}\"; printf '\"%s\"' \"${s//\\\"/\\\\\\\"}\"; }\n");
-    w.push_str("            f() { printf '%s: %s\\n' \"$1\" \"$(yaml \"$2\")\"; }\n");
+    w.push_str("# yaml(): double-quoted YAML scalar; f KEY VALUE writes one field.\n");
+    w.push_str(
+        "yaml() { local s=\"${1//\\\\/\\\\\\\\}\"; printf '\"%s\"' \"${s//\\\"/\\\\\\\"}\"; }\n",
+    );
+    w.push_str("f() { printf '%s: %s\\n' \"$1\" \"$(yaml \"$2\")\"; }\n");
     writeln!(
         w,
-        "            dir=\"$tmpdir/\"{}\"/$VERSION\"; mkdir -p \"$dir\"",
+        "dir=\"$tmpdir/\"{}\"/$VERSION\"; mkdir -p \"$dir\"",
         q(manifest_dir)
     )
     .expect("write");
-    w.push_str("            sha=\"$(sha256sum \"release/${ZIP_NAME}\" | cut -d' ' -f1 | tr '[:lower:]' '[:upper:]')\"\n");
+    w.push_str("sha=\"$(sha256sum \"release/${ZIP_NAME}\" | cut -d' ' -f1 | tr '[:lower:]' '[:upper:]')\"\n");
     // version manifest
-    writeln!(w, "            {{ f PackageIdentifier {id}; f PackageVersion \"$VERSION\"; echo 'DefaultLocale: en-US'; echo 'ManifestType: version'; echo 'ManifestVersion: 1.10.0'; }} > {}", file("")).expect("write");
+    writeln!(w, "{{ f PackageIdentifier {id}; f PackageVersion \"$VERSION\"; echo 'DefaultLocale: en-US'; echo 'ManifestType: version'; echo 'ManifestVersion: 1.10.0'; }} > {}", file("")).expect("write");
     // installer manifest
-    writeln!(w, "            {{ f PackageIdentifier {id}; f PackageVersion \"$VERSION\"; echo 'InstallerType: zip'; echo 'NestedInstallerType: portable'; echo 'NestedInstallerFiles:'; printf '%s\\n' \"- RelativeFilePath: $(yaml {})\" \"  PortableCommandAlias: $(yaml {})\"; echo 'Installers:'; echo '- Architecture: x64'; printf '%s\\n' \"  InstallerUrl: $(yaml \"$ZIP_URL\")\" \"  InstallerSha256: $sha\"; echo 'ManifestType: installer'; echo 'ManifestVersion: 1.10.0'; }} > {}", q(&winget.binary), q(&winget.command), file("installer.")).expect("write");
+    writeln!(w, "{{ f PackageIdentifier {id}; f PackageVersion \"$VERSION\"; echo 'InstallerType: zip'; echo 'NestedInstallerType: portable'; echo 'NestedInstallerFiles:'; printf '%s\\n' \"- RelativeFilePath: $(yaml {})\" \"  PortableCommandAlias: $(yaml {})\"; echo 'Installers:'; echo '- Architecture: x64'; printf '%s\\n' \"  InstallerUrl: $(yaml \"$ZIP_URL\")\" \"  InstallerSha256: $sha\"; echo 'ManifestType: installer'; echo 'ManifestVersion: 1.10.0'; }} > {}", q(&winget.binary), q(&winget.command), file("installer.")).expect("write");
     // default-locale manifest
     let mut locale = format!(
         "f PackageIdentifier {id}; f PackageVersion \"$VERSION\"; echo 'PackageLocale: en-US'; f Publisher {}; f PackageName {}; f License {};",
@@ -2659,8 +2656,12 @@ fn push_winget_bootstrap(
     if let Some(url) = &winget.homepage {
         write!(locale, " f PackageUrl {};", q(url)).expect("write");
     }
-    writeln!(w, "            {{ {locale} echo 'ManifestType: defaultLocale'; echo 'ManifestVersion: 1.10.0'; }} > {}", file("locale.en-US.")).expect("write");
-    w.push_str("            wine \"$tmpdir/wingetcreate.exe\" submit \"$(winepath -w \"$dir\")\" --token \"$WINGET_PAT\"\n");
+    writeln!(
+        w,
+        "{{ {locale} echo 'ManifestType: defaultLocale'; echo 'ManifestVersion: 1.10.0'; }} > {}",
+        file("locale.en-US.")
+    )
+    .expect("write");
 }
 
 fn push_publish_chocolatey(
@@ -3640,7 +3641,8 @@ esac"#,
         assert!(workflow.contains("require_credential 'global/user secret'"));
         assert!(workflow.contains("\"${CHOCOLATEY_API_KEY:-}\""));
         assert!(workflow.contains("https://github.com/flathub/com.tartanoglu.modde.git"));
-        assert!(workflow.contains("wine \"$tmpdir/wingetcreate.exe\" update Caniko.Modde"));
+        assert!(workflow.contains("MANIFEST_DIR='manifests/c/Caniko/Modde'"));
+        assert!(!workflow.contains("wingetcreate"));
         assert!(workflow.contains("/api/v1/statuses"));
         assert!(workflow.contains(
             "nix shell github:caniko/nixpkgs/add-chocolatey-scoop#chocolatey git+https://github.com/caniko/simit.git -c simit dist chocolatey bump"
@@ -3935,35 +3937,35 @@ esac"#,
     }
 
     #[test]
-    fn winget_first_submission_branches_on_state_and_writes_manifests() {
+    fn winget_step_submits_through_the_github_api() {
         let winget = sorrel_winget();
 
         let standalone = winget_step(&winget, ReleasePublisherEnforcement::default());
-        // Without activated-remote the branch comes from probing winget-pkgs.
-        assert!(standalone.contains("code=\"$(curl -sS -o /dev/null -w '%{http_code}'"));
-        assert!(standalone.contains("'https://api.github.com/repos/microsoft/winget-pkgs/contents/manifests/c/Caniko/Sorrel'"));
-        assert!(standalone.contains("404) state=inactive-soft"));
-        assert!(!standalone.contains("publisher_missing winget 'wingetcreate"));
+        // Without activated-remote the script probes winget-pkgs itself, with
+        // the token in a header file instead of argv.
+        assert!(standalone.contains("state=\"${PUBLISH_WINGET_STATE:-}\""));
+        assert!(standalone.contains("api GET \"/repos/$UP/contents/$MANIFEST_DIR\""));
+        assert!(standalone.contains("MANIFEST_DIR='manifests/c/Caniko/Sorrel'"));
+        assert!(!standalone.contains("publisher_missing winget 'GitHub API"));
 
         let activated = winget_step(&winget, ReleasePublisherEnforcement::ActivatedRemote);
-        // Under activated-remote it reuses the probe result and warns on failure.
-        assert!(!activated.contains("contents/manifests/c/Caniko/Sorrel"));
+        // Under activated-remote the probe result decides new package vs new
+        // version and a failed first submission warns.
         assert!(
             activated.contains("export ZIP_NAME ZIP_URL VERSION WINGET_PAT PUBLISH_WINGET_STATE")
         );
-        assert!(activated.contains("state=\"${PUBLISH_WINGET_STATE:-}\""));
         assert!(activated.contains("active-required|inactive-soft) ;; *) echo"));
         assert!(
-            activated.contains(
-                "<<'SCRIPT' || publisher_missing winget 'wingetcreate submission failed'"
-            )
+            activated
+                .contains("<<'SCRIPT' || publisher_missing winget 'GitHub API submission failed'")
         );
 
         for step in [&standalone, &activated] {
-            // Existing-package path stays an update.
-            assert!(step.contains("if [ \"$state\" = active-required ]; then"));
-            assert!(step.contains("wine \"$tmpdir/wingetcreate.exe\" update Caniko.Sorrel --version \"$VERSION\" --urls \"${ZIP_URL}|x64\" --token \"$WINGET_PAT\" --submit"));
-            // Bootstrap path.
+            assert!(step.contains("nix shell nixpkgs#curl nixpkgs#jq -c bash <<'SCRIPT'"));
+            for gone in ["wine", "wingetcreate", "winepath"] {
+                assert!(!step.contains(gone), "{gone} left in the winget step");
+            }
+            // Manifests.
             assert!(step.contains("dir=\"$tmpdir/\"'manifests/c/Caniko/Sorrel'\"/$VERSION\""));
             assert!(step.contains("sha256sum \"release/${ZIP_NAME}\""));
             assert!(step.contains("tr '[:lower:]' '[:upper:]'"));
@@ -3980,20 +3982,348 @@ esac"#,
             assert!(step.contains("> \"$dir\"/'Caniko.Sorrel'.installer.yaml"));
             assert!(step.contains("> \"$dir\"/'Caniko.Sorrel'.locale.en-US.yaml"));
             assert!(step.contains("ManifestVersion: 1.10.0"));
-            assert!(step.contains("wine \"$tmpdir/wingetcreate.exe\" submit \"$(winepath -w \"$dir\")\" --token \"$WINGET_PAT\"\n"));
+            // API flow.
+            assert!(step.contains("api GET \"/repos/$UP/contents/$MANIFEST_DIR/$VERSION\""));
+            assert!(step.contains("must GET /user"));
+            assert!(step.contains("must POST \"/repos/$UP/forks\""));
+            assert!(step.contains("must GET \"/repos/$UP/git/ref/heads/$base\""));
+            assert!(step.contains("must POST \"$fork/merge-upstream\""));
+            assert!(step.contains("must POST \"$fork/git/blobs\""));
+            assert!(step.contains("must POST \"$fork/git/trees\""));
+            assert!(step.contains("must POST \"$fork/git/commits\""));
+            assert!(step.contains("must POST \"/repos/$UP/pulls\""));
+            assert!(step.contains("state=open\""));
+            assert!(step.contains("title=\"$kind: $ID version $VERSION\""));
+            // The token only travels in a header file.
+            assert!(step.contains(
+                "printf 'Authorization: Bearer %s\\n' \"$WINGET_PAT\" > \"$tmpdir/auth\""
+            ));
+            assert!(step.contains("-H \"@$tmpdir/auth\""));
+            assert!(!step.contains("--token"));
+            assert!(!step.contains("Bearer $WINGET_PAT"));
         }
     }
 
     #[test]
-    fn winget_first_submission_needs_license_and_description() {
+    fn winget_step_needs_license_and_description() {
         let winget = ResolvedWinget {
             license: None,
             ..sorrel_winget()
         };
         let step = winget_step(&winget, ReleasePublisherEnforcement::ActivatedRemote);
         assert!(step.contains("set [winget].license and [winget].short_description"));
-        assert!(!step.contains("wingetcreate.exe\" submit"));
-        assert!(step.contains("wingetcreate.exe\" update Caniko.Sorrel"));
+        assert!(!step.contains("must POST"));
+    }
+
+    #[cfg(unix)]
+    /// The rendered submission script, un-indented from the workflow step.
+    fn winget_script() -> String {
+        let step = winget_step(&sorrel_winget(), ReleasePublisherEnforcement::default());
+        let body = step.split_once("<<'SCRIPT'\n").expect("heredoc").1;
+        let body = body.split_once("          SCRIPT\n").expect("end").0;
+        body.lines()
+            .map(|line| format!("{}\n", line.strip_prefix("          ").unwrap_or(line)))
+            .collect()
+    }
+
+    #[cfg(unix)]
+    struct Fake {
+        dir: tempfile::TempDir,
+    }
+
+    #[cfg(unix)]
+    const FAKE_CURL: &str = r#"
+m=GET out=/dev/null data=; a=("$@")
+for ((i = 0; i < ${#a[@]}; i++)); do
+  case "${a[i]}" in
+    -X) m="${a[++i]}" ;; -o) out="${a[++i]}" ;; --data-binary) data="${a[++i]#@}" ;;
+    -H) h="${a[++i]}"; case "$h" in @*) cat "${h#@}" >> "$FAKE/auth.log" ;; esac ;;
+    -w | --retry) i=$((i + 1)) ;;
+  esac
+done
+path="${a[-1]#https://api.github.com}"
+echo "$m $path ${a[*]}" >> "$FAKE/argv.log"
+[ -z "$data" ] || echo "$m $path BODY $(jq -c . "$data")" >> "$FAKE/body.log"
+route="$FAKE/routes/$(printf '%s_%s' "$m" "$path" | tr -c 'A-Za-z0-9' _)"
+if [ -f "$route" ]; then head -n1 "$route" > "$FAKE/code"; tail -n +2 "$route" > "$out"
+else echo 404 > "$FAKE/code"; echo '{"message":"Not Found"}' > "$out"; fi
+cat "$FAKE/code"
+"#;
+
+    #[cfg(unix)]
+    impl Fake {
+        fn new() -> Self {
+            use std::os::unix::fs::PermissionsExt;
+            let dir = tempfile::tempdir().unwrap();
+            std::fs::create_dir_all(dir.path().join("routes")).unwrap();
+            std::fs::create_dir_all(dir.path().join("bin")).unwrap();
+            let curl = dir.path().join("bin/curl");
+            std::fs::write(dir.path().join("bin/curl.bash"), FAKE_CURL).unwrap();
+            // /usr/bin/env is absent in the Nix sandbox, so hand off through /bin/sh.
+            std::fs::write(&curl, "#!/bin/sh\nexec bash \"${0%/*}/curl.bash\" \"$@\"\n").unwrap();
+            std::fs::set_permissions(&curl, std::fs::Permissions::from_mode(0o755)).unwrap();
+            let fake = Fake { dir };
+            let fork = "/repos/bot/winget-pkgs";
+            let up = "/repos/microsoft/winget-pkgs";
+            for (m, p, code, body) in [
+                ("GET", "/user", 200, r#"{"login":"bot"}"#),
+                ("GET", up, 200, r#"{"default_branch":"master"}"#),
+                (
+                    "GET",
+                    &format!("{up}/pulls?head=bot:Caniko.Sorrel-1.2.3&state=open"),
+                    200,
+                    "[]",
+                ),
+                ("POST", &format!("{up}/forks"), 202, "{}"),
+                ("GET", fork, 200, "{}"),
+                (
+                    "GET",
+                    &format!("{up}/git/ref/heads/master"),
+                    200,
+                    r#"{"object":{"sha":"headsha"}}"#,
+                ),
+                (
+                    "GET",
+                    &format!("{up}/git/commits/headsha"),
+                    200,
+                    r#"{"tree":{"sha":"basetree"}}"#,
+                ),
+                ("GET", &format!("{fork}/git/commits/headsha"), 200, "{}"),
+                (
+                    "POST",
+                    &format!("{fork}/git/blobs"),
+                    201,
+                    r#"{"sha":"blobsha"}"#,
+                ),
+                (
+                    "POST",
+                    &format!("{fork}/git/trees"),
+                    201,
+                    r#"{"sha":"newtree"}"#,
+                ),
+                (
+                    "POST",
+                    &format!("{fork}/git/commits"),
+                    201,
+                    r#"{"sha":"newcommit"}"#,
+                ),
+                ("POST", &format!("{fork}/git/refs"), 201, "{}"),
+                (
+                    "POST",
+                    &format!("{up}/pulls"),
+                    201,
+                    r#"{"html_url":"https://github.com/microsoft/winget-pkgs/pull/1"}"#,
+                ),
+            ] {
+                fake.route(m, p, code, body);
+            }
+            fake
+        }
+
+        fn route(&self, method: &str, path: &str, code: u16, body: &str) {
+            let key: String = format!("{method}_{path}")
+                .chars()
+                .map(|c| if c.is_ascii_alphanumeric() { c } else { '_' })
+                .collect();
+            std::fs::write(
+                self.dir.path().join("routes").join(key),
+                format!("{code}\n{body}\n"),
+            )
+            .unwrap();
+        }
+
+        fn log(&self, name: &str) -> String {
+            std::fs::read_to_string(self.dir.path().join(name)).unwrap_or_default()
+        }
+
+        /// Run the rendered script; `None` when bash or jq is missing.
+        fn run(&self, state: Option<&str>) -> Option<std::process::Output> {
+            let tools = ["bash", "jq"].iter().all(|tool| {
+                std::process::Command::new(tool)
+                    .arg("--version")
+                    .output()
+                    .is_ok_and(|o| o.status.success())
+            });
+            if !tools {
+                eprintln!("skipping: bash and jq are required");
+                return None;
+            }
+            let work = self.dir.path().join("work");
+            std::fs::create_dir_all(work.join("release")).unwrap();
+            std::fs::write(work.join("release/sorrel-1.2.3-x86_64-windows.zip"), "zip").unwrap();
+            let path = format!(
+                "{}:{}",
+                self.dir.path().join("bin").display(),
+                std::env::var("PATH").unwrap_or_default()
+            );
+            let mut cmd = std::process::Command::new("bash");
+            cmd.arg("-c")
+                .arg(winget_script())
+                .current_dir(&work)
+                .env("PATH", path)
+                .env("FAKE", self.dir.path())
+                .env("VERSION", "1.2.3")
+                .env("ZIP_NAME", "sorrel-1.2.3-x86_64-windows.zip")
+                .env("ZIP_URL", "https://github.com/caniko/sorrel/releases/download/v1.2.3/sorrel-1.2.3-x86_64-windows.zip")
+                .env("WINGET_PAT", "secret-token")
+                .env_remove("PUBLISH_WINGET_STATE");
+            if let Some(state) = state {
+                cmd.env("PUBLISH_WINGET_STATE", state);
+            }
+            Some(cmd.output().unwrap())
+        }
+
+        /// The token reached curl only through its 0600 header file.
+        fn assert_token_hygiene(&self, out: &std::process::Output) {
+            for text in [
+                self.log("argv.log"),
+                self.log("body.log"),
+                String::from_utf8_lossy(&out.stdout).into_owned(),
+                String::from_utf8_lossy(&out.stderr).into_owned(),
+            ] {
+                assert!(!text.contains("secret-token"), "token leaked: {text}");
+            }
+            assert!(
+                self.log("auth.log")
+                    .contains("Authorization: Bearer secret-token")
+            );
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn winget_script_opens_a_new_package_pr() {
+        let fake = Fake::new();
+        let Some(out) = fake.run(None) else { return };
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(out.status.success(), "{stderr}");
+        assert!(String::from_utf8_lossy(&out.stdout).contains("pull/1"));
+        let body = fake.log("body.log");
+        let up = "/repos/microsoft/winget-pkgs";
+        assert!(body.contains("New package: Caniko.Sorrel version 1.2.3"));
+        assert!(body.contains(&format!(
+            "POST {up}/pulls BODY {{\"title\":\"New package: Caniko.Sorrel version 1.2.3\",\"head\":\"bot:Caniko.Sorrel-1.2.3\",\"base\":\"master\""
+        )));
+        assert!(body.contains("\"base_tree\":\"basetree\""));
+        for file in ["", ".installer", ".locale.en-US"] {
+            assert!(body.contains(&format!(
+                "\"path\":\"manifests/c/Caniko/Sorrel/1.2.3/Caniko.Sorrel{file}.yaml\""
+            )));
+        }
+        assert!(body.contains("\"parents\":[\"headsha\"]"));
+        assert!(body.contains("\"ref\":\"refs/heads/Caniko.Sorrel-1.2.3\",\"sha\":\"newcommit\""));
+        assert!(body.contains("InstallerSha256: "));
+        let argv = fake.log("argv.log");
+        assert!(
+            argv.contains("GET /repos/microsoft/winget-pkgs/contents/manifests/c/Caniko/Sorrel ")
+        );
+        assert!(!argv.contains("merge-upstream"));
+        fake.assert_token_hygiene(&out);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn winget_script_opens_a_new_version_pr_and_syncs_a_lagging_fork() {
+        let fake = Fake::new();
+        let up = "/repos/microsoft/winget-pkgs";
+        fake.route(
+            "GET",
+            &format!("{up}/contents/manifests/c/Caniko/Sorrel"),
+            200,
+            "[]",
+        );
+        fake.route(
+            "GET",
+            "/repos/bot/winget-pkgs/git/commits/headsha",
+            404,
+            "{}",
+        );
+        fake.route("POST", "/repos/bot/winget-pkgs/merge-upstream", 200, "{}");
+        let Some(out) = fake.run(None) else { return };
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        assert!(
+            fake.log("body.log")
+                .contains("New version: Caniko.Sorrel version 1.2.3")
+        );
+        assert!(
+            fake.log("body.log").contains(
+                "POST /repos/bot/winget-pkgs/merge-upstream BODY {\"branch\":\"master\"}"
+            )
+        );
+        fake.assert_token_hygiene(&out);
+        // The probe result from the publisher state wins over the probe.
+        let fake = Fake::new();
+        let Some(out) = fake.run(Some("active-required")) else {
+            return;
+        };
+        assert!(out.status.success());
+        assert!(fake.log("body.log").contains("New version: "));
+        assert!(
+            !fake
+                .log("argv.log")
+                .contains("GET /repos/microsoft/winget-pkgs/contents/manifests/c/Caniko/Sorrel ")
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn winget_script_is_idempotent() {
+        let up = "/repos/microsoft/winget-pkgs";
+        // An open PR for the branch is reported and nothing is written.
+        let fake = Fake::new();
+        fake.route(
+            "GET",
+            &format!("{up}/pulls?head=bot:Caniko.Sorrel-1.2.3&state=open"),
+            200,
+            r#"[{"html_url":"https://github.com/microsoft/winget-pkgs/pull/9"}]"#,
+        );
+        let Some(out) = fake.run(None) else { return };
+        assert!(out.status.success());
+        assert!(
+            String::from_utf8_lossy(&out.stdout)
+                .contains("PR already open: https://github.com/microsoft/winget-pkgs/pull/9")
+        );
+        assert!(!fake.log("argv.log").contains("POST "));
+
+        // A version already upstream is "already published".
+        let fake = Fake::new();
+        fake.route(
+            "GET",
+            &format!("{up}/contents/manifests/c/Caniko/Sorrel/1.2.3"),
+            200,
+            "[]",
+        );
+        let Some(out) = fake.run(None) else { return };
+        assert!(out.status.success());
+        assert!(String::from_utf8_lossy(&out.stdout).contains("already published"));
+        assert!(!fake.log("argv.log").contains("POST "));
+        assert!(!fake.log("argv.log").contains("/user"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn winget_script_reports_api_errors_without_the_token() {
+        let fake = Fake::new();
+        fake.route(
+            "POST",
+            "/repos/microsoft/winget-pkgs/forks",
+            403,
+            r#"{"message":"Resource not accessible by personal access token"}"#,
+        );
+        let Some(out) = fake.run(None) else { return };
+        assert!(!out.status.success());
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(
+            stderr.contains(
+                "POST /repos/microsoft/winget-pkgs/forks -> HTTP 403: Resource not accessible"
+            ),
+            "{stderr}"
+        );
+        fake.assert_token_hygiene(&out);
     }
 
     #[test]

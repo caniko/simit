@@ -12,15 +12,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   a target runner such as `windows-2025` or `macos-15` that downloads it and runs
   a command in `bash` or `pwsh`, with scoped `env` and failure-proof artifact
   upload, in `target-smokes.yaml`. GitHub Actions only; other backends reject it.
-- `[winget]` can make the first submission of a package: when it is not in
-  `microsoft/winget-pkgs` yet, the release step writes the ManifestVersion
-  1.10.0 version, installer (zip with a nested portable executable and
-  uppercase SHA-256) and default-locale manifests and runs
-  `wingetcreate submit`; existing packages keep `wingetcreate update`. New
+- `[winget]` now submits to `microsoft/winget-pkgs` through the GitHub REST API
+  (`curl` and `jq` as the `WINGET_PAT` user) instead of `wingetcreate` under
+  wine, which no longer runs on hosted runners (its release asset needs .NET).
+  New packages and new versions share one path: the release step writes the
+  ManifestVersion 1.10.0 version, installer (zip with a nested portable
+  executable and uppercase SHA-256) and default-locale manifests, commits them
+  to `<id>-<version>` on the token owner's fork and opens a `New package:` or
+  `New version:` PR. Reruns reuse an open PR and skip versions already
+  upstream. The token never appears on a command line. `WINGET_PAT` still needs
+  `public_repo` (classic). Every submission now needs a license and short
+  description (`[winget]` or Cargo metadata), not just the first one. New
   optional `publisher`, `package_name`, `license`, `license_url`,
   `short_description`, `homepage`, `binary` and `command` fields default from
-  the package id and Cargo metadata. Under `activated-remote` a failed first
+  the package id and Cargo metadata. Under `activated-remote` a failed
   submission warns until the channel is active.
+- `simit dist winget submit` runs the same script (`bash`, `curl`, `jq`) and
+  no longer needs wine; `--wine`, `--wingetcreate` and `--wingetcreate-url`
+  were removed.
 - Fixed: Chocolatey package install URLs always pointed at codeberg.org. They
   now follow the release host (`[release.github]` gives github.com, Codeberg
   and Forgejo configs keep codeberg.org).
