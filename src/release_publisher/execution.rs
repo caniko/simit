@@ -571,14 +571,7 @@ pub fn run(command: ReleaseCommand) -> Result<()> {
                 .context("prepare requires --publisher-output")?;
             let destination = destination.as_std_path();
             fs::create_dir(destination).context("publisher output must be a new directory")?;
-            for (path, content) in members {
-                let relative = path
-                    .strip_prefix(&format!("{root}/"))
-                    .context("invalid member root")?;
-                let output = destination.join(relative);
-                fs::create_dir_all(output.parent().context("member has no parent")?)?;
-                write_verified_member(&output, &content)?;
-            }
+            write_verified_source(destination, &root, &members)?;
             println!(
                 "{}",
                 serde_json::to_string(
@@ -613,6 +606,30 @@ pub fn run(command: ReleaseCommand) -> Result<()> {
                 )?
             );
         }
+    }
+    Ok(())
+}
+
+/// Materialize the dry-run source tree. Cargo reserves `Cargo.toml.orig` and
+/// `.cargo_vcs_info.json` as package-generated names and rejects them in a
+/// source tree with no `include` list, so they are omitted here. Both were
+/// already compared against the signed source and bound to the archive checksum
+/// before this point; `Cargo.toml` and `Cargo.lock` stay for `--locked`.
+fn write_verified_source(
+    destination: &Path,
+    root: &str,
+    members: &BTreeMap<String, CrateMember>,
+) -> Result<()> {
+    for (path, content) in members {
+        let relative = path
+            .strip_prefix(&format!("{root}/"))
+            .context("invalid member root")?;
+        if matches!(relative, "Cargo.toml.orig" | ".cargo_vcs_info.json") {
+            continue;
+        }
+        let output = destination.join(relative);
+        fs::create_dir_all(output.parent().context("member has no parent")?)?;
+        write_verified_member(&output, content)?;
     }
     Ok(())
 }
@@ -2249,6 +2266,56 @@ mod tests {
             fs::write(source.path().join("Cargo.toml"), format!("[{section}]\npath='/api'\nbuild='external'\nworkspace='/outside'\nreadme='/etc/passwd'\nmembers=['/outside']\ninclude=['/outside']\nexclude=['/outside']\n")).unwrap();
             validate_manifest_paths(source.path()).unwrap();
         }
+    }
+
+    #[test]
+    fn dry_run_source_omits_cargo_reserved_files_and_cargo_accepts_it() {
+        let root = "demo-1.0.0";
+        let member = |contents: &str| CrateMember {
+            contents: contents.as_bytes().to_vec(),
+            mode: 0o644,
+        };
+        // A packaged crate whose manifest declares no `include` list.
+        let manifest = "[package]\nname = \"demo\"\nversion = \"1.0.0\"\nedition = \"2021\"\ndescription = \"d\"\nlicense = \"MIT\"\n";
+        let lock = "version = 4\n\n[[package]]\nname = \"demo\"\nversion = \"1.0.0\"\n";
+        let members = BTreeMap::from([
+            (format!("{root}/Cargo.toml"), member(manifest)),
+            (format!("{root}/Cargo.toml.orig"), member(manifest)),
+            (
+                format!("{root}/.cargo_vcs_info.json"),
+                member("{\"git\":{\"sha1\":\"0\"},\"path_in_vcs\":\"\"}"),
+            ),
+            (format!("{root}/Cargo.lock"), member(lock)),
+            (format!("{root}/src/lib.rs"), member("")),
+        ]);
+        let parent = TempDir::new().unwrap();
+        let destination = parent.path().join("verified");
+        fs::create_dir(&destination).unwrap();
+        write_verified_source(&destination, root, &members).unwrap();
+        assert!(!destination.join("Cargo.toml.orig").exists());
+        assert!(!destination.join(".cargo_vcs_info.json").exists());
+        assert_eq!(
+            fs::read_to_string(destination.join("Cargo.lock")).unwrap(),
+            lock
+        );
+        // Cargo's own packaging file walk is what rejected the reserved names.
+        let listed = Command::new("cargo")
+            .args([
+                "package",
+                "--list",
+                "--locked",
+                "--offline",
+                "--allow-dirty",
+            ])
+            .arg("--manifest-path")
+            .arg(destination.join("Cargo.toml"))
+            .output()
+            .unwrap();
+        assert!(
+            listed.status.success(),
+            "{}",
+            String::from_utf8_lossy(&listed.stderr)
+        );
     }
 
     #[cfg(unix)]
