@@ -75,3 +75,28 @@ fn submit_rejects_the_removed_wine_flags() {
         assert!(!output.status.success(), "{flag}");
     }
 }
+
+#[test]
+fn submit_rejects_dependency_ids_with_whitespace() {
+    let temp = init_package();
+    let manifest = temp.path().join("Cargo.toml");
+    let toml = fs::read_to_string(&manifest).unwrap();
+    let run = |deps: &str| {
+        fs::write(&manifest, format!("{toml}dependencies = [{deps}]\n")).unwrap();
+        simit()
+            .current_dir(temp.path())
+            .args([
+                "dist",
+                "winget",
+                "submit",
+                "--version",
+                "1.2.3",
+                "--dry-run",
+            ])
+            .output()
+            .unwrap()
+    };
+    assert!(run("\"astral-sh.uv\"").status.success());
+    assert!(!run("\"astral sh.uv\"").status.success());
+    assert!(!run("\"\"").status.success());
+}

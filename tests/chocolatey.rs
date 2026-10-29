@@ -379,3 +379,46 @@ fn install_url_follows_the_release_host() {
         );
     }
 }
+
+#[test]
+fn render_emits_nuspec_dependencies_only_when_configured() {
+    let render = |extra: &str| {
+        let temp = init_package("0.9.0");
+        let toml = temp.path().join("simit.toml");
+        fs::write(&toml, read(&toml) + extra).unwrap();
+        let out = temp.path().join("pkg");
+        let output = simit()
+            .current_dir(temp.path())
+            .args([
+                "dist",
+                "chocolatey",
+                "render",
+                "--version",
+                "0.1.0",
+                "--output-dir",
+            ])
+            .arg(&out)
+            .output()
+            .unwrap();
+        (
+            output,
+            fs::read_to_string(out.join("demo-app.nuspec")).unwrap_or_default(),
+        )
+    };
+    let (output, plain) = render("");
+    assert!(output.status.success());
+    assert!(!plain.contains("<dependencies>"));
+
+    let (output, nuspec) = render(
+        "\n[[chocolatey.dependencies]]\nid = \"uv\"\n\n[[chocolatey.dependencies]]\nid = \"a&b\"\nversion = \"[1.0,2.0)\"\n",
+    );
+    assert!(output.status.success());
+    assert!(nuspec.contains(
+        "    <dependencies>\n      <dependency id=\"uv\" />\n      <dependency id=\"a&amp;b\" version=\"[1.0,2.0)\" />\n    </dependencies>\n  </metadata>"
+    ));
+
+    for bad in ["id = \"u v\"", "id = \"\"", "id = \"uv\"\nversion = \" \""] {
+        let (output, _) = render(&format!("\n[[chocolatey.dependencies]]\n{bad}\n"));
+        assert!(!output.status.success(), "{bad}");
+    }
+}
