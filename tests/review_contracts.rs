@@ -920,3 +920,16 @@ fn external_lock_requires_direct_nonflake_exact_source() {
     lock["nodes"]["source"]["locked"]["rev"] = json!(BASE);
     assert!(validate_lock(&p, &lock).is_err());
 }
+
+#[test]
+fn lone_platform_artifact_extracted_flat_is_found() {
+    let p = plan();
+    let temp = tempfile::tempdir().unwrap();
+    assert_eq!(platform_dir(&p, temp.path(), "x86_64-linux"), None);
+    // download-artifact does not nest a single matching artifact under its name.
+    std::fs::write(temp.path().join("review-result.json"), "{}").unwrap();
+    assert_eq!(
+        platform_dir(&p, temp.path(), "x86_64-linux").as_deref(),
+        Some(temp.path())
+    );
+}
