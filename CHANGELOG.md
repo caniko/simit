@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Added: `[ci] qualified_by = "owner/repo"` marks a component repository as
+  qualified by a superproject. `simit init ci` then generates only the Pages
+  workflow, `--check` reports simit-generated qualification workflows
+  (`ci*.yaml`, `build*`, `nix-builds*`, `prebuild*`, `qualify*`) as drift and a
+  plain run removes them (handwritten files are kept), and the README CI badge
+  links to `https://github.com/<owner>/<repo>/actions`. It is rejected with
+  `[monorepo]`, `nix_builds`, `required_gates` and `publish_crates`, because
+  crate publication is keyed on the removed qualification workflows.
 - Fixed: the credential-free crate producer (`publish-workspace.yaml` and
   `publish-crate-<name>.yaml`) packaged with `--no-verify`, so a member whose
   tarball does not compile (for example an `include_str!` of a file outside

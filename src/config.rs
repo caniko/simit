@@ -768,6 +768,11 @@ pub struct CiConfig {
     pub components: Vec<CiComponent>,
     #[serde(default)]
     pub crow: CrowCiConfig,
+    /// GitHub `owner/repo` of the superproject that qualifies this repository.
+    /// When set, simit generates only publication workflows (Pages) here and
+    /// treats simit-owned qualification workflows as obsolete.
+    #[serde(default)]
+    pub qualified_by: Option<String>,
 }
 
 impl CiConfig {
@@ -2737,6 +2742,41 @@ impl ProjectConfig {
         }
     }
 
+    fn validate_qualified_by(&self) -> Result<()> {
+        let Some(slug) = &self.ci.qualified_by else {
+            return Ok(());
+        };
+        let segment = |s: &str| {
+            !s.is_empty()
+                && s.chars()
+                    .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '.' | '-'))
+        };
+        if !slug
+            .split_once('/')
+            .is_some_and(|(owner, repo)| segment(owner) && segment(repo))
+        {
+            bail!("simit project config: [ci].qualified_by must be a GitHub `owner/repo` slug");
+        }
+        if self.ci.platform.is_some_and(|p| p != Platform::Github)
+            || self.ci.provider.is_some_and(|p| p != CiProvider::Actions)
+        {
+            bail!("simit project config: [ci].qualified_by requires GitHub Actions");
+        }
+        for (conflict, name) in [
+            (self.monorepo.is_some(), "[monorepo]"),
+            (!self.ci.nix_builds.is_empty(), "[ci].nix_builds"),
+            (!self.ci.required_gates.is_empty(), "[[ci.required_gates]]"),
+            (self.ci.publish_crates, "[ci].publish_crates"),
+        ] {
+            if conflict {
+                bail!(
+                    "simit project config: [ci].qualified_by delegates qualification and cannot be combined with {name}"
+                );
+            }
+        }
+        Ok(())
+    }
+
     fn validate_common(&self) -> Result<()> {
         crate::render::workflow_templates::validate_config(&self.ci)?;
         if let Some(policy) = &self.review_policy {
@@ -2750,6 +2790,7 @@ impl ProjectConfig {
         if let Some(monorepo) = &self.monorepo {
             monorepo.validate()?;
         }
+        self.validate_qualified_by()?;
         if let Some(review) = &self.review {
             review.validate()?;
         }
@@ -5034,6 +5075,7 @@ fn set_ci_table(table: &mut Table, ci: &CiConfig) {
     set_optional_string(table, "runner", ci.runner.as_deref());
     set_string_map(table, "nix_system_runners", &ci.nix_system_runners);
     set_optional_string(table, "windows_runner", ci.windows_runner.as_deref());
+    set_optional_string(table, "qualified_by", ci.qualified_by.as_deref());
     set_bool(table, "workspace", ci.workspace);
     set_optional_string(table, "check_command", ci.check_command.as_deref());
     set_optional_bool_default_true(table, "nix_flake_check", ci.nix_flake_check);
