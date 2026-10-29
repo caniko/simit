@@ -768,6 +768,28 @@ fn coordinated_tag_prefixes_validate_source_and_archive_versions() {
                 ),
                 "fixture archive"
             );
+            // An archive over the crates.io upload limit fails the build job.
+            fs::File::create(
+                temp.path()
+                    .join(format!("simit-package-target/package/{name}-0.1.0.crate")),
+            )
+            .unwrap()
+            .set_len(10 * 1024 * 1024 + 1)
+            .unwrap();
+            let output = Command::new("bash")
+                .current_dir(temp.path())
+                .args(["-c", step["run"].as_str().unwrap()])
+                .env("PATH", &path)
+                .env("RUNNER_TEMP", temp.path())
+                .env("GITHUB_REF_NAME", format!("{prefix}0.1.0"))
+                .output()
+                .unwrap();
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            assert!(
+                !output.status.success()
+                    && stderr.contains(&format!("crate {name} archive is 10485761 bytes")),
+                "{prefix}/{name}: {output:?}"
+            );
         }
     }
 }
