@@ -562,6 +562,36 @@ pub fn audit_ci(workspace_root: &Path) -> Result<CiAudit> {
         .filter(|file| !is_supplementary_workflow(file))
         .collect::<Vec<_>>();
 
+    // Delegated qualification: only Pages-style publication workflows are
+    // expected; marked primary-CI workflows are leftovers.
+    if ProjectConfig::load(workspace_root)?
+        .ci
+        .qualified_by
+        .is_some()
+    {
+        let stale = marked
+            .iter()
+            .filter(|file| {
+                file.relative_path
+                    .file_name()
+                    .is_some_and(crate::commands::init_ci::is_primary_ci_workflow_name)
+            })
+            .map(|file| file.relative_path.clone())
+            .collect::<Vec<_>>();
+        return Ok(CiAudit {
+            status: if stale.is_empty() {
+                FeatureStatus::Managed
+            } else {
+                FeatureStatus::Drift
+            },
+            provider: Some(CiProvider::Actions),
+            platform: Some(Platform::Github.as_str().to_owned()),
+            changed_files: Vec::new(),
+            missing_files: Vec::new(),
+            extra_generated_files: stale,
+        });
+    }
+
     if marked.is_empty() {
         return Ok(CiAudit {
             status: if unmarked.is_empty() {

@@ -54,6 +54,29 @@ pub fn run(command: InitCiCommand) -> Result<()> {
             platform,
         )?;
     }
+    if !command.review_only
+        && !command.prebuild_only
+        && !command.pages_only
+        && let Ok(root) = workflow_workspace_root()
+        && let Some(qualifier) = ProjectConfig::load(&root)?.ci.qualified_by
+    {
+        if command.primary_only
+            || command.plan_json
+            || command.publish_crates == Some(true)
+            || command.with_vscode
+            || command.with_jetbrains
+            || command.with_homebrew
+            || command.with_chocolatey
+            || command.with_scoop
+            || command.with_artifacts == Some(true)
+            || command.with_pypi_publish == Some(true)
+        {
+            bail!(
+                "[ci].qualified_by = {qualifier:?} delegates qualification; --primary-only, --plan-json, --publish-crates, --with-vscode, --with-jetbrains, --with-homebrew, --with-chocolatey, --with-scoop, --with-artifacts and --with-pypi-publish are not supported"
+            );
+        }
+        return run_pages_only(command);
+    }
     if let Some(root) = crate::monorepo::find_root(&std::env::current_dir()?)?
         && !command.review_only
         && !command.prebuild_only
@@ -809,15 +832,19 @@ fn workflow_workspace_root() -> Result<PathBuf> {
 
 fn run_pages_only(command: InitCiCommand) -> Result<()> {
     let workspace_root = workflow_workspace_root()?;
-    if !workspace_root.join("flake.nix").is_file() {
-        bail!("Pages workflow generation requires flake.nix at the workspace root");
-    }
-
     let cfg = ProjectConfig::load(&workspace_root)?;
+    let qualified = cfg.ci.qualified_by.is_some();
     let platform = command
         .platform
         .or(cfg.ci.platform)
-        .unwrap_or(Platform::Forgejo);
+        .unwrap_or(if qualified {
+            Platform::Github
+        } else {
+            Platform::Forgejo
+        });
+    if qualified && platform != Platform::Github {
+        bail!("[ci].qualified_by requires --platform github");
+    }
     if platform == Platform::Gitlab {
         bail!("Pages-only generation supports GitHub or Forgejo Actions");
     }
@@ -854,29 +881,65 @@ fn run_pages_only(command: InitCiCommand) -> Result<()> {
             .context("Forgejo Pages generation requires --runner or [ci].runner")?,
         Platform::Gitlab => unreachable!(),
     };
-    let pages = codeberg_pages_options(&cfg, &command, inferred_pages.as_ref())?.context(
-        "--pages-only requires --with-pages, [ci.pages], or an existing managed Pages workflow",
-    )?;
-    let files = [ci::codeberg_pages_file(
-        platform,
-        &ResolvedRunner::literal(runner)?,
-        &pages,
-    )?];
-    let message = format!(
-        "Pages workflow is not up to date; run `simit init ci --pages-only --platform {}`",
-        platform.as_str()
-    );
+    let pages = codeberg_pages_options(&cfg, &command, inferred_pages.as_ref())?;
+    if pages.is_none() && !qualified {
+        bail!(
+            "--pages-only requires --with-pages, [ci.pages], or an existing managed Pages workflow"
+        );
+    }
+    if (pages.is_some() || !qualified) && !workspace_root.join("flake.nix").is_file() {
+        bail!("Pages workflow generation requires flake.nix at the workspace root");
+    }
+    let files = pages
+        .iter()
+        .map(|pages| ci::codeberg_pages_file(platform, &ResolvedRunner::literal(runner)?, pages))
+        .collect::<Result<Vec<_>>>()?;
+    // A qualified repository owns no qualification workflows: simit-generated
+    // ones (marker-checked, so handwritten files are never touched) are drift.
+    let obsolete = if qualified {
+        project::obsolete_generated_workflows(&workspace_root, &files, is_primary_ci_workflow_name)?
+    } else {
+        Vec::new()
+    };
+    let message = if qualified {
+        "Qualification is delegated by [ci].qualified_by; run `simit init ci`".to_owned()
+    } else {
+        format!(
+            "Pages workflow is not up to date; run `simit init ci --pages-only --platform {}`",
+            platform.as_str()
+        )
+    };
 
     if command.check {
-        project::check_generated_files(&workspace_root, &files, &message, command.diff)?;
+        project::reconcile_generated_files(
+            &workspace_root,
+            &files,
+            &obsolete,
+            &message,
+            true,
+            command.diff,
+        )?;
+        if qualified {
+            upgrade::update_readme_badges_if_present(&workspace_root, true, command.diff)?;
+        }
     } else {
-        project::write_generated_files(&workspace_root, &files)?;
+        project::reconcile_generated_files(
+            &workspace_root,
+            &files,
+            &obsolete,
+            &message,
+            false,
+            false,
+        )?;
         if command.with_codeberg_pages && ProjectConfig::can_persist_ci(&workspace_root)? {
             let mut persisted_ci = cfg.ci;
-            persisted_ci.pages = Some(codeberg_pages_config(&Some(pages))?);
+            persisted_ci.pages = Some(codeberg_pages_config(&pages)?);
             ProjectConfig::write_ci(&workspace_root, &persisted_ci)?;
         }
         registry::touch_current_project_or_warn([("ci", FeatureStatus::Managed)]);
+        if qualified {
+            upgrade::update_readme_badges_if_present(&workspace_root, false, false)?;
+        }
     }
     Ok(())
 }
@@ -2658,7 +2721,7 @@ pub(crate) fn is_primary_ci_workflow_name(name: &std::ffi::OsStr) -> bool {
             | "qualify.yaml"
             | "qualify.yml"
             | "qualify.jsonnet"
-    ) || ["ci-", "build-", "nix-builds-", "prebuild-"]
+    ) || ["ci-", "build-", "nix-builds-", "prebuild-", "qualify-"]
         .iter()
         .any(|prefix| {
             name.starts_with(prefix)

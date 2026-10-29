@@ -167,6 +167,34 @@ checkout used for package verification also fetches submodules. The trust model:
 
 Without the setting, signed sources containing gitlinks are still rejected.
 
+### Components qualified by a superproject
+
+A component repository that the superproject qualifies keeps only its
+publication workflows. Declare the qualifier in the component's own `simit.toml`:
+
+```toml
+[ci]
+qualified_by = "caniko/fleet"   # GitHub owner/repo of the superproject
+
+[ci.pages]
+repo = "caniko/component"
+```
+
+With `qualified_by` set, `simit init ci` generates only the Pages workflow
+(what `--pages-only` generates), and `simit init ci --check` reports any
+simit-generated qualification workflow (`ci.yaml`, `ci-<crate>.yaml`,
+`build*`, `nix-builds*`, `prebuild*`, `qualify*`) as obsolete drift; a plain
+`simit init ci` deletes them. Handwritten workflows are never touched.
+`simit upgrade` links the README CI badge to
+`https://github.com/<qualified_by>/actions`. The platform defaults to GitHub.
+
+The slug must be exactly `owner/repo`. Crate publication workflows are keyed on
+the qualification workflows, so `qualified_by` is rejected together with
+`[monorepo]`, `[ci].nix_builds`, `[[ci.required_gates]]`, `[ci].publish_crates`,
+a non-GitHub platform or provider, and `--primary-only`, `--plan-json` or
+`--publish-crates` on the command line. `--review-only` and `--prebuild-only`
+still run their own generators unchanged.
+
 ### Running a declared check
 
 ```console
