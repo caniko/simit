@@ -508,6 +508,10 @@ pub fn validate_nixpkgs_selection(plan: &Plan, system: &str, selection: &Value) 
     let changed = selection["changed_attributes"]
         .as_array()
         .ok_or_else(|| anyhow::anyhow!("missing changed-package discovery"))?;
+    ensure!(
+        !plan.request.skip_discovery || changed.is_empty(),
+        "skipped discovery cannot report changed packages"
+    );
     let selected = selection["derivations"]
         .as_array()
         .ok_or_else(|| anyhow::anyhow!("missing Nixpkgs selection"))?;

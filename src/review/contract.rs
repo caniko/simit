@@ -80,6 +80,10 @@ pub struct Request {
     /// Package-scoped Nixpkgs broken warnings; omitted for legacy request identity.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub nixpkgs_broken_warnings: Vec<String>,
+    /// Nixpkgs only: build exactly `packages` and `checks`, skipping changed-package
+    /// discovery; omitted when false so legacy request identity is unchanged.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub skip_discovery: bool,
     #[serde(default = "runner_default")]
     pub runner_profile: String,
     #[serde(default = "test_default")]
@@ -233,6 +237,12 @@ impl Request {
                 "Nixpkgs broken warnings require an explicitly requested top-level package"
             );
         }
+        ensure!(
+            !self.skip_discovery
+                || (self.backend == Backend::Nixpkgs
+                    && !(self.packages.is_empty() && self.checks.is_empty())),
+            "skip_discovery requires the nixpkgs backend and explicit targets"
+        );
         match self.backend {
             Backend::Nixpkgs => {
                 ensure!(
@@ -545,6 +555,7 @@ pub fn example() -> Request {
         packages: vec!["default".into()],
         checks: vec!["smoke".into()],
         nixpkgs_broken_warnings: vec![],
+        skip_discovery: false,
         runner_profile: runner_default(),
         test_profile: test_default(),
         cache_profile: None,

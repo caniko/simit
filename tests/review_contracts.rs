@@ -320,6 +320,39 @@ fn strict_request_fields_selectors_and_platforms() {
     assert!(r.validate().is_err());
 }
 #[test]
+fn nixpkgs_skip_discovery_takes_only_dotted_attribute_paths() {
+    let mut request = example();
+    request.skip_discovery = true;
+    assert!(request.validate().is_err(), "flake backend");
+    request.backend = Backend::Nixpkgs;
+    request.repository = "NixOS/nixpkgs".into();
+    request.packages.clear();
+    request.checks.clear();
+    assert!(request.validate().is_err(), "no explicit targets");
+    request.checks = vec![
+        "nixosTests.postgresql.postgresql.postgresql_18".into(),
+        "postgresql18Packages.postgis.tests.extension".into(),
+    ];
+    request.validate().unwrap();
+    let digest = canonical_digest(&request).unwrap();
+    request.skip_discovery = false;
+    assert_ne!(digest, canonical_digest(&request).unwrap());
+    assert!(
+        serde_json::to_value(&request)
+            .unwrap()
+            .get("skip_discovery")
+            .is_none()
+    );
+    for expression in [
+        "postgresql_18.withPackages (ps: [ps.pgvector])",
+        "a..b",
+        "a/b",
+    ] {
+        request.checks = vec![expression.into()];
+        assert!(request.validate().is_err(), "{expression}");
+    }
+}
+#[test]
 fn nixpkgs_additions_and_broken_warnings_are_typed_and_scoped() {
     let mut request = example();
     assert!(
