@@ -104,19 +104,28 @@ pub fn aggregate(plan: &Plan, reports: Vec<PlatformResult>) -> Result<ReviewResu
         platforms, missing_platforms: missing, bundle_digests: BTreeMap::new(),
         provenance: "GitHub metadata is frozen by resolver; effective locks, derivations, and test evidence are untrusted runner observations, not independent attestations.".into() })
 }
+/// Locate a platform's downloaded artifact; the report inside is still validated against the plan.
+pub fn platform_dir(plan: &Plan, inputs: &Path, system: &str) -> Option<PathBuf> {
+    let dir = inputs.join(format!(
+        "platform-{system}-{}-{}",
+        plan.run_id, plan.run_attempt
+    ));
+    if dir.exists() {
+        return Some(dir);
+    }
+    // download-artifact extracts a lone matching artifact flat, not under its name.
+    (plan.request.systems.len() == 1 && inputs.join("review-result.json").exists())
+        .then(|| inputs.to_path_buf())
+}
 pub fn collect(plan: &Plan, inputs: &Path, out: &Path) -> Result<ReviewResult> {
     super::engine::verify_plan(plan)?;
     fs::create_dir_all(out)?;
     let mut reports = vec![];
     let mut bundles = BTreeMap::new();
     for system in &plan.request.systems {
-        let dir = inputs.join(format!(
-            "platform-{system}-{}-{}",
-            plan.run_id, plan.run_attempt
-        ));
-        if !dir.exists() {
+        let Some(dir) = platform_dir(plan, inputs, system) else {
             continue;
-        }
+        };
         let r: PlatformResult = read_json(&dir.join("review-result.json"))?;
         ensure!(
             r.effective.system == *system,
