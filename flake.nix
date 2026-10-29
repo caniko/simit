@@ -144,7 +144,7 @@
         // {
           inherit cargoArtifacts;
           nativeBuildInputs = commonArgs.nativeBuildInputs ++ [preCommitBin];
-          nativeCheckInputs = [pkgs.git pkgs.gnupg pkgs.nodejs pkgs.jq pkgs.python3 actionlint] ++ pkgs.lib.optionals pkgs.stdenv.isLinux [pkgs.bubblewrap pkgs.nix pkgs.sqlite];
+          nativeCheckInputs = [pkgs.git pkgs.gnupg pkgs.nodejs pkgs.jq pkgs.python3 actionlint] ++ pkgs.lib.optionals pkgs.stdenv.hostPlatform.isLinux [pkgs.bubblewrap pkgs.nix pkgs.sqlite];
           # Namespace integration runs in both hosted runtime feature modes.
           # Keep the engine's non-namespace checks in package qualification.
           cargoTestExtraArgs = "-- --skip commands::projects_update::engine::tests::namespace_";
@@ -156,7 +156,7 @@
         // {
           cargoArtifacts = publicCargoArtifacts;
           nativeBuildInputs = commonArgs.nativeBuildInputs ++ [preCommitBin];
-          nativeCheckInputs = [pkgs.git pkgs.gnupg pkgs.nodejs pkgs.jq pkgs.python3 actionlint] ++ pkgs.lib.optionals pkgs.stdenv.isLinux [pkgs.bubblewrap pkgs.nix pkgs.sqlite];
+          nativeCheckInputs = [pkgs.git pkgs.gnupg pkgs.nodejs pkgs.jq pkgs.python3 actionlint] ++ pkgs.lib.optionals pkgs.stdenv.hostPlatform.isLinux [pkgs.bubblewrap pkgs.nix pkgs.sqlite];
           cargoTestExtraArgs = "-- --skip commands::projects_update::engine::tests::namespace_";
         });
 
@@ -229,7 +229,7 @@
       nextestCheck = publicCraneLib.cargoNextest (commonArgs
         // {
           cargoArtifacts = publicCargoArtifacts;
-          nativeCheckInputs = [pkgs.git pkgs.gnupg pkgs.nodejs pkgs.jq pkgs.python3 actionlint] ++ pkgs.lib.optionals pkgs.stdenv.isLinux [pkgs.bubblewrap pkgs.nix pkgs.sqlite];
+          nativeCheckInputs = [pkgs.git pkgs.gnupg pkgs.nodejs pkgs.jq pkgs.python3 actionlint] ++ pkgs.lib.optionals pkgs.stdenv.hostPlatform.isLinux [pkgs.bubblewrap pkgs.nix pkgs.sqlite];
           cargoNextestExtraArgs = "-E 'not test(commands::projects_update::engine::tests::namespace_)'";
         });
 
@@ -350,7 +350,7 @@
 
       devShells = {
         test = publicCraneLib.devShell {
-          packages = with pkgs; [git gnupg nodejs jq python3 actionlint perl] ++ lib.optionals stdenv.isLinux [bubblewrap nix sqlite];
+          packages = with pkgs; [git gnupg nodejs jq python3 actionlint perl] ++ lib.optionals stdenv.hostPlatform.isLinux [bubblewrap nix sqlite];
         };
         msrv = let
           msrvToolchain = harbor.lib.rust.mkToolchain {
@@ -393,7 +393,7 @@
               rust-analyzer
               taplo
             ]
-            ++ pkgs.lib.optionals pkgs.stdenv.isLinux [pkgs.bubblewrap pkgs.nix pkgs.sqlite]
+            ++ pkgs.lib.optionals pkgs.stdenv.hostPlatform.isLinux [pkgs.bubblewrap pkgs.nix pkgs.sqlite]
             ++ pre-commit-check.enabledPackages;
           shellHook = pre-commit-check.shellHook;
         };
