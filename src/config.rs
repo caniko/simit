@@ -289,6 +289,10 @@ pub struct WingetConfig {
     /// Portable command alias; defaults to the Cargo package name.
     #[serde(default)]
     pub command: Option<String>,
+    /// winget `PackageIdentifier`s the installer depends on, e.g. `astral-sh.uv`.
+    /// Written as `Dependencies.PackageDependencies` in the installer manifest.
+    #[serde(default)]
+    pub dependencies: Vec<String>,
 }
 
 /// winget-pkgs `ShortDescription` schema bounds.
@@ -1997,6 +2001,19 @@ pub struct ChocolateyConfig {
     /// a Forgejo runner credential exposed as a container env var).
     #[serde(default)]
     pub api_key_from_runner: bool,
+
+    /// Chocolatey packages this package depends on (nuspec `<dependencies>`).
+    #[serde(default)]
+    pub dependencies: Vec<ChocolateyDependency>,
+}
+
+/// One nuspec `<dependency>`: package id and optional version (range).
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct ChocolateyDependency {
+    pub id: String,
+    #[serde(default)]
+    pub version: Option<String>,
 }
 
 fn default_chocolatey_nix_tool() -> String {
@@ -2531,6 +2548,7 @@ pub struct ResolvedChocolatey {
     pub api_key_env: String,
     pub api_key_secret: String,
     pub api_key_from_runner: bool,
+    pub dependencies: Vec<ChocolateyDependency>,
 }
 
 /// `[winget]` with Cargo-metadata fallbacks applied, for the generated
@@ -2549,6 +2567,7 @@ pub struct ResolvedWinget {
     pub homepage: Option<String>,
     pub binary: String,
     pub command: String,
+    pub dependencies: Vec<String>,
 }
 
 #[derive(Debug, Clone, Copy, Default)]
@@ -3428,6 +3447,15 @@ impl ProjectConfig {
             "simit project config: [chocolatey].push.source",
             &chocolatey.push.source,
         )?;
+        for dep in &chocolatey.dependencies {
+            validate_dependency_id("simit project config: [chocolatey].dependencies", &dep.id)?;
+            if let Some(version) = &dep.version {
+                validate_nonempty_string(
+                    "simit project config: [chocolatey].dependencies version",
+                    version,
+                )?;
+            }
+        }
 
         Ok(())
     }
@@ -3578,7 +3606,11 @@ impl ProjectConfig {
                 .clone()
                 .unwrap_or_else(|| format!("{}.exe", package.name)),
             command: cfg.command.clone().unwrap_or_else(|| package.name.clone()),
+            dependencies: cfg.dependencies.clone(),
         };
+        for id in &resolved.dependencies {
+            validate_dependency_id("simit project config: [winget].dependencies", id)?;
+        }
         // The values are written into single-line YAML scalars by the release step.
         for (field, value) in [
             ("publisher", Some(&resolved.publisher)),
@@ -3754,6 +3786,9 @@ impl ProjectConfig {
                 chocolatey.api_key_secret.clone()
             }),
             api_key_from_runner: cfg.is_some_and(|chocolatey| chocolatey.api_key_from_runner),
+            dependencies: cfg
+                .map(|chocolatey| chocolatey.dependencies.clone())
+                .unwrap_or_default(),
         })
     }
 
@@ -4416,6 +4451,14 @@ fn missing_packager_message(
 fn validate_nonempty_strings(name: &str, values: &[String]) -> Result<()> {
     if values.iter().any(|value| value.trim().is_empty()) {
         bail!("{name} must not contain empty values");
+    }
+    Ok(())
+}
+
+/// Package ids end up in single-token manifest fields: non-empty, no whitespace.
+fn validate_dependency_id(name: &str, id: &str) -> Result<()> {
+    if id.is_empty() || id.contains(char::is_whitespace) {
+        bail!("{name} ids must be non-empty and contain no whitespace (got {id:?})");
     }
     Ok(())
 }

@@ -2993,7 +2993,18 @@ fn push_winget_manifests(
     writeln!(w, "{{ hdr version; f PackageIdentifier {id}; f PackageVersion \"$VERSION\"; echo 'DefaultLocale: en-US'; echo 'ManifestType: version'; echo 'ManifestVersion: {mv}'; }} > {}", file("")).expect("write");
     // installer manifest: InstallerType/NestedInstallerType stay at the root,
     // NestedInstallerFiles sits in the installer entry (as in accepted zip+portable packages).
-    writeln!(w, "{{ hdr installer; f PackageIdentifier {id}; f PackageVersion \"$VERSION\"; echo 'InstallerType: zip'; echo 'NestedInstallerType: portable'; echo 'Installers:'; echo '- Architecture: x64'; echo '  NestedInstallerFiles:'; printf '%s\\n' \"  - RelativeFilePath: $(yaml {})\" \"    PortableCommandAlias: $(yaml {})\"; printf '%s\\n' \"  InstallerUrl: $(yaml \"$ZIP_URL\")\" \"  InstallerSha256: $sha\"; echo 'ManifestType: installer'; echo 'ManifestVersion: {mv}'; }} > {}", q(&winget.binary), q(&winget.command), file("installer.")).expect("write");
+    // Dependencies (also schema-valid at the root) sits beside them.
+    let deps = if winget.dependencies.is_empty() {
+        String::new()
+    } else {
+        let ids: String = winget
+            .dependencies
+            .iter()
+            .map(|d| format!("\"  - PackageIdentifier: $(yaml {})\" ", q(d)))
+            .collect();
+        format!("echo 'Dependencies:'; echo '  PackageDependencies:'; printf '%s\\n' {ids}; ")
+    };
+    writeln!(w, "{{ hdr installer; f PackageIdentifier {id}; f PackageVersion \"$VERSION\"; echo 'InstallerType: zip'; echo 'NestedInstallerType: portable'; {deps}echo 'Installers:'; echo '- Architecture: x64'; echo '  NestedInstallerFiles:'; printf '%s\\n' \"  - RelativeFilePath: $(yaml {})\" \"    PortableCommandAlias: $(yaml {})\"; printf '%s\\n' \"  InstallerUrl: $(yaml \"$ZIP_URL\")\" \"  InstallerSha256: $sha\"; echo 'ManifestType: installer'; echo 'ManifestVersion: {mv}'; }} > {}", q(&winget.binary), q(&winget.command), file("installer.")).expect("write");
     // default-locale manifest
     let mut locale = format!(
         "hdr defaultLocale; f PackageIdentifier {id}; f PackageVersion \"$VERSION\"; echo 'PackageLocale: en-US'; f Publisher {}; f PublisherUrl {}; f PackageName {}; f PackageUrl {}; f License {};",
@@ -3314,6 +3325,7 @@ mod tests {
             api_key_env: "CHOCOLATEY_API_KEY".to_owned(),
             api_key_secret: "chocolatey_api_key".to_owned(),
             api_key_from_runner: false,
+            dependencies: Vec::new(),
             nix_tool: "github:caniko/nixpkgs/add-chocolatey-scoop#chocolatey git+https://github.com/caniko/simit.git"
                 .to_owned(),
         }
@@ -3361,6 +3373,7 @@ mod tests {
             homepage: Some("https://modde.rs".to_owned()),
             binary: "modde.exe".to_owned(),
             command: "modde".to_owned(),
+            dependencies: Vec::new(),
         }
     }
 
@@ -4263,6 +4276,7 @@ esac"#,
             homepage: None,
             binary: "sorrel.exe".to_owned(),
             command: "sorrel".to_owned(),
+            dependencies: Vec::new(),
         }
     }
 
@@ -4347,6 +4361,7 @@ esac"#,
             // NestedInstallerFiles lives inside the installer entry, after Architecture.
             assert!(step.contains("echo '- Architecture: x64'; echo '  NestedInstallerFiles:'; printf '%s\\n' \"  - RelativeFilePath: $(yaml 'sorrel.exe')\" \"    PortableCommandAlias: $(yaml 'sorrel')\""));
             assert!(!step.contains("echo 'NestedInstallerFiles:'"));
+            assert!(!step.contains("Dependencies"));
             assert!(
                 step.contains("hdr version;")
                     && step.contains("hdr installer;")
@@ -4395,8 +4410,8 @@ esac"#,
 
     #[cfg(unix)]
     /// The rendered submission script, un-indented from the workflow step.
-    fn winget_script() -> String {
-        let step = winget_step(&sorrel_winget(), ReleasePublisherEnforcement::default());
+    fn winget_script(winget: &ResolvedWinget) -> String {
+        let step = winget_step(winget, ReleasePublisherEnforcement::default());
         let body = step.split_once("<<'SCRIPT'\n").expect("heredoc").1;
         let body = body.split_once("          SCRIPT\n").expect("end").0;
         body.lines()
@@ -4516,6 +4531,14 @@ cat "$FAKE/code"
 
         /// Run the rendered script; `None` when bash or jq is missing.
         fn run(&self, state: Option<&str>) -> Option<std::process::Output> {
+            self.run_with(state, &sorrel_winget())
+        }
+
+        fn run_with(
+            &self,
+            state: Option<&str>,
+            winget: &ResolvedWinget,
+        ) -> Option<std::process::Output> {
             let tools = ["bash", "jq"].iter().all(|tool| {
                 std::process::Command::new(tool)
                     .arg("--version")
@@ -4536,7 +4559,7 @@ cat "$FAKE/code"
             );
             let mut cmd = std::process::Command::new("bash");
             cmd.arg("-c")
-                .arg(winget_script())
+                .arg(winget_script(winget))
                 .current_dir(&work)
                 .env("PATH", path)
                 .env("FAKE", self.dir.path())
@@ -4771,6 +4794,27 @@ cat "$FAKE/code"
         assert!(body.contains("Architecture: x64\\n  NestedInstallerFiles:\\n  - RelativeFilePath: \\\"sorrel.exe\\\"\\n    PortableCommandAlias: \\\"sorrel\\\"\\n  InstallerUrl:"));
         assert!(body.contains("PublisherUrl: \\\"https://github.com/caniko\\\""));
         assert!(body.contains("PackageUrl: \\\"https://github.com/caniko/sorrel\\\""));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn winget_installer_manifest_lists_package_dependencies_only_when_set() {
+        let body_of = |winget: &ResolvedWinget| {
+            let fake = Fake::new();
+            let out = fake.run_with(None, winget)?;
+            assert!(out.status.success());
+            Some(fake.log("body.log"))
+        };
+        let Some(plain) = body_of(&sorrel_winget()) else {
+            return;
+        };
+        assert!(!plain.contains("Dependencies"));
+        let with = ResolvedWinget {
+            dependencies: vec!["astral-sh.uv".to_owned(), "Foo.Bar".to_owned()],
+            ..sorrel_winget()
+        };
+        let Some(body) = body_of(&with) else { return };
+        assert!(body.contains("NestedInstallerType: portable\\nDependencies:\\n  PackageDependencies:\\n  - PackageIdentifier: \\\"astral-sh.uv\\\"\\n  - PackageIdentifier: \\\"Foo.Bar\\\"\\nInstallers:\\n"), "{body}");
     }
 
     #[cfg(unix)]

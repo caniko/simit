@@ -130,6 +130,19 @@ pub fn render_nuspec(opts: &ChocolateyRenderOptions<'_>) -> String {
     if let Some(release_notes_url) = &resolved.release_notes_url {
         field(&mut out, "releaseNotes", release_notes_url);
     }
+    if !resolved.dependencies.is_empty() {
+        out.push_str("    <dependencies>\n");
+        for dep in &resolved.dependencies {
+            write!(out, "      <dependency id=\"{}\"", xml_escape(&dep.id))
+                .expect("write to String cannot fail");
+            if let Some(version) = &dep.version {
+                write!(out, " version=\"{}\"", xml_escape(version))
+                    .expect("write to String cannot fail");
+            }
+            out.push_str(" />\n");
+        }
+        out.push_str("    </dependencies>\n");
+    }
     out.push_str("  </metadata>\n");
     out.push_str("  <files>\n");
     out.push_str("    <file src=\"tools\\chocolateyInstall.ps1\" target=\"tools\" />\n");

@@ -32,6 +32,15 @@ Chocolatey requires `download_repo` plus package metadata. Scoop requires
 `bucket_url` and `download_repo`. Fields not listed here can usually fall back
 to Cargo package metadata.
 
+Chocolatey dependencies become nuspec `<dependencies>`; `version` is optional
+(a NuGet version or range) and ids must be non-empty without whitespace:
+
+```toml
+[[chocolatey.dependencies]]
+id = "uv"
+# version = "[0.5,)"
+```
+
 ## Bootstrap
 
 ```sh
@@ -116,6 +125,22 @@ Optional fields used for the first submission, with their defaults:
 | `homepage`          | Cargo `homepage` (becomes `PackageUrl`; else the repo URL)    |
 | `binary`            | `<cargo name>.exe`, the path of the executable inside the zip |
 | `command`           | Cargo package name, the portable command alias                |
+| `dependencies`      | none; winget `PackageIdentifier`s, see below                  |
+
+`dependencies` lists winget packages the installer needs. Each becomes a
+`PackageDependencies` entry in the installer manifest (nothing is written when
+the list is empty):
+
+```toml
+[winget]
+dependencies = ["astral-sh.uv"]
+```
+
+```yaml
+Dependencies:
+  PackageDependencies:
+    - PackageIdentifier: "astral-sh.uv"
+```
 
 The release step submits through the GitHub REST API as the `WINGET_PAT` user
 (`curl` and `jq`; no wine, no `wingetcreate`). New packages and new versions
