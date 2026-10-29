@@ -204,7 +204,8 @@ fn archive_steps_with_packaging(
         String::new()
     };
     let mut w = format!(
-        "      - name: Build immutable archive {name}\n        run: |\n          set -euo pipefail\n          version=\"{version_expression}\"\n          test \"$({prefix}cargo pkgid --locked{manifest} -p {quoted} | awk -F'[#@]' 'NF > 1 {{print $NF}}' | tail -n 1)\" = \"$version\"\n{packaging}          mkdir -p \"$RUNNER_TEMP/simit-crates/{name}\"\n          cp \"$RUNNER_TEMP/simit-package-target/package/{name}-$version.crate\" \"$RUNNER_TEMP/simit-crates/{name}/\"\n"
+        "      - name: Build immutable archive {name}\n        run: |\n          set -euo pipefail\n          version=\"{version_expression}\"\n          test \"$({prefix}cargo pkgid --locked{manifest} -p {quoted} | awk -F'[#@]' 'NF > 1 {{print $NF}}' | tail -n 1)\" = \"$version\"\n{packaging}          mkdir -p \"$RUNNER_TEMP/simit-crates/{name}\"\n          cp \"$RUNNER_TEMP/simit-package-target/package/{name}-$version.crate\" \"$RUNNER_TEMP/simit-crates/{name}/\"\n          size=\"$(wc -c < \"$RUNNER_TEMP/simit-crates/{name}/{name}-$version.crate\")\"\n          test \"$size\" -le {limit} || {{ echo \"crate {name} archive is $size bytes, over the crates.io upload limit of {limit} bytes (10 MiB)\" >&2; exit 1; }}\n",
+        limit = crate::release_publisher::archive::MAX_CRATES_IO_UPLOAD_BYTES
     );
     w.push_str(&format!(
         "      - name: Retain original-run archive {name}\n"

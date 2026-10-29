@@ -17,7 +17,7 @@ use sha2::{Digest, Sha256};
 use tempfile::TempDir;
 
 use super::archive::{
-    CrateMember, MAX_CRATE_BYTES, crate_from_provider_zip, crate_members,
+    CrateMember, MAX_CRATE_BYTES, crate_from_provider_zip, crate_members, ensure_crates_io_size,
     verify_reconstructed_crate,
 };
 use super::{
@@ -1431,6 +1431,7 @@ fn publish_archive_with_reconciliation(
         hex::encode(Sha256::digest(archive)) == checksum,
         "verified archive checksum changed before upload"
     );
+    ensure_crates_io_size(name, archive.len() as u64)?;
     if let Some(record) = registry(name, version)? {
         ensure!(
             exact_registry_record(&record, name, version, checksum),
@@ -1442,6 +1443,18 @@ fn publish_archive_with_reconciliation(
         .filter(|token| !token.is_empty())
         .context("publishing credential is required for a missing registry version")?;
     if let Err(upload_error) = upload(token, metadata, archive) {
+        // A definite HTTP 4xx means the registry refused the upload, so there
+        // is nothing to reconcile (408 is a timeout and stays uncertain).
+        if let Some(status) = upload_error
+            .downcast_ref::<reqwest::Error>()
+            .and_then(reqwest::Error::status)
+            .filter(|status| status.is_client_error() && status.as_u16() != 408)
+        {
+            bail!(
+                "registry rejected upload (HTTP {}): {upload_error:#}",
+                status.as_u16()
+            );
+        }
         // An upload may have committed even when its response is lost or
         // unreadable. Never repeat it in this invocation: reconcile only the
         // exact immutable registry identity, then let the caller's independent
@@ -2257,6 +2270,105 @@ mod tests {
             assert_eq!(uploads, 1);
             assert!(reads <= 21 && waits <= 19);
         }
+    }
+
+    #[test]
+    fn oversized_archive_is_rejected_before_any_upload() {
+        let archive = vec![0_u8; 10 * 1024 * 1024 + 1];
+        let checksum = hex::encode(Sha256::digest(&archive));
+        let mut uploads = 0;
+        let error = publish_archive_with_reconciliation(
+            &json!({"name":"fixture-ui","vers":"0.1.0"}),
+            &archive,
+            &checksum,
+            Some("disposable-fixture-token"),
+            |_, _| Ok(None),
+            |_, _, _| {
+                uploads += 1;
+                Ok(())
+            },
+            || {},
+        )
+        .unwrap_err()
+        .to_string();
+        assert_eq!(uploads, 0);
+        assert!(
+            error.contains("fixture-ui")
+                && error.contains("10485761")
+                && error.contains("10485760"),
+            "{error}"
+        );
+    }
+
+    /// Upload through the real HTTP transport against a one-shot local server.
+    fn upload_status(status: u16) -> (usize, usize, anyhow::Error) {
+        use std::io::Write;
+        use std::net::TcpListener;
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = std::thread::spawn(move || {
+            let (mut socket, _) = listener.accept().unwrap();
+            socket
+                .set_read_timeout(Some(Duration::from_secs(5)))
+                .unwrap();
+            let mut request = [0; 4096];
+            assert!(socket.read(&mut request).unwrap() > 0);
+            write!(
+                socket,
+                "HTTP/1.1 {status} fixture\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+            )
+            .unwrap();
+        });
+        let client = Client::builder()
+            .timeout(Duration::from_secs(5))
+            .no_proxy()
+            .build()
+            .unwrap();
+        let archive = b"verified archive";
+        let checksum = hex::encode(Sha256::digest(archive));
+        let (mut uploads, mut waits) = (0, 0);
+        let error = publish_archive_with_reconciliation(
+            &json!({"name":"fixture","vers":"0.1.0"}),
+            archive,
+            &checksum,
+            Some("disposable-fixture-token"),
+            |_, _| Ok(None),
+            |token, metadata, archive| {
+                uploads += 1;
+                upload_archive_at(
+                    &client,
+                    &format!("http://{address}/api/v1/crates/new"),
+                    token,
+                    metadata,
+                    archive,
+                )
+            },
+            || waits += 1,
+        )
+        .unwrap_err();
+        server.join().unwrap();
+        (uploads, waits, error)
+    }
+
+    #[test]
+    fn definite_4xx_rejection_fails_immediately_without_reconciling() {
+        for status in [403, 413] {
+            let (uploads, waits, error) = upload_status(status);
+            assert_eq!((uploads, waits), (1, 0), "{status}");
+            assert!(
+                error
+                    .to_string()
+                    .contains(&format!("registry rejected upload (HTTP {status})")),
+                "{error:#}"
+            );
+        }
+    }
+
+    #[test]
+    fn server_error_upload_still_reconciles() {
+        let (uploads, waits, error) = upload_status(503);
+        assert_eq!((uploads, waits), (1, 19));
+        assert!(error.to_string().contains("uncertain upload"), "{error:#}");
     }
 
     #[test]
