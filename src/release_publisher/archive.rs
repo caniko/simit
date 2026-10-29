@@ -7,6 +7,17 @@ use anyhow::{Context, Result, ensure};
 use flate2::read::GzDecoder;
 
 pub const MAX_CRATE_BYTES: u64 = 128 * 1024 * 1024;
+/// crates.io rejects larger uploads (HTTP 413) only after earlier workspace
+/// members were irreversibly published, so admit against it up front.
+pub const MAX_CRATES_IO_UPLOAD_BYTES: u64 = 10 * 1024 * 1024;
+
+pub fn ensure_crates_io_size(name: &str, archive_bytes: u64) -> Result<()> {
+    ensure!(
+        archive_bytes <= MAX_CRATES_IO_UPLOAD_BYTES,
+        "crate {name} archive is {archive_bytes} bytes, over the crates.io upload limit of {MAX_CRATES_IO_UPLOAD_BYTES} bytes (10 MiB); exclude files or split the crate before tagging"
+    );
+    Ok(())
+}
 const MAX_CONTENT_BYTES: u64 = 256 * 1024 * 1024;
 const MAX_MEMBER_BYTES: u64 = 32 * 1024 * 1024;
 const MAX_MEMBERS: usize = 10_000;
