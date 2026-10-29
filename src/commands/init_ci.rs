@@ -60,9 +60,19 @@ pub fn run(command: InitCiCommand) -> Result<()> {
         && let Ok(root) = workflow_workspace_root()
         && let Some(qualifier) = ProjectConfig::load(&root)?.ci.qualified_by
     {
-        if command.primary_only || command.plan_json || command.publish_crates == Some(true) {
+        if command.primary_only
+            || command.plan_json
+            || command.publish_crates == Some(true)
+            || command.with_vscode
+            || command.with_jetbrains
+            || command.with_homebrew
+            || command.with_chocolatey
+            || command.with_scoop
+            || command.with_artifacts == Some(true)
+            || command.with_pypi_publish == Some(true)
+        {
             bail!(
-                "[ci].qualified_by = {qualifier:?} delegates qualification; --primary-only, --plan-json and --publish-crates are not supported"
+                "[ci].qualified_by = {qualifier:?} delegates qualification; --primary-only, --plan-json, --publish-crates, --with-vscode, --with-jetbrains, --with-homebrew, --with-chocolatey, --with-scoop, --with-artifacts and --with-pypi-publish are not supported"
             );
         }
         return run_pages_only(command);
@@ -824,9 +834,6 @@ fn run_pages_only(command: InitCiCommand) -> Result<()> {
     let workspace_root = workflow_workspace_root()?;
     let cfg = ProjectConfig::load(&workspace_root)?;
     let qualified = cfg.ci.qualified_by.is_some();
-    if !qualified && !workspace_root.join("flake.nix").is_file() {
-        bail!("Pages workflow generation requires flake.nix at the workspace root");
-    }
     let platform = command
         .platform
         .or(cfg.ci.platform)
@@ -879,6 +886,9 @@ fn run_pages_only(command: InitCiCommand) -> Result<()> {
         bail!(
             "--pages-only requires --with-pages, [ci.pages], or an existing managed Pages workflow"
         );
+    }
+    if (pages.is_some() || !qualified) && !workspace_root.join("flake.nix").is_file() {
+        bail!("Pages workflow generation requires flake.nix at the workspace root");
     }
     let files = pages
         .iter()
@@ -2711,7 +2721,7 @@ pub(crate) fn is_primary_ci_workflow_name(name: &std::ffi::OsStr) -> bool {
             | "qualify.yaml"
             | "qualify.yml"
             | "qualify.jsonnet"
-    ) || ["ci-", "build-", "nix-builds-", "prebuild-"]
+    ) || ["ci-", "build-", "nix-builds-", "prebuild-", "qualify-"]
         .iter()
         .any(|prefix| {
             name.starts_with(prefix)

@@ -7792,14 +7792,17 @@ fn qualified_by_removes_only_simit_owned_qualification_workflows() {
     let workflows = temp.path().join(".github/workflows");
     let generated = workflows.join("ci-foo.yaml");
     let handwritten = workflows.join("ci-handwritten.yaml");
-    fs::write(
-        &generated,
-        format!(
-            "{}\nname: leftover\n",
-            simit::render::ci::GENERATED_WORKFLOW_MARKER
-        ),
-    )
-    .unwrap();
+    let qualify = workflows.join("qualify-generator.yaml");
+    for path in [&generated, &qualify] {
+        fs::write(
+            path,
+            format!(
+                "{}\nname: leftover\n",
+                simit::render::ci::GENERATED_WORKFLOW_MARKER
+            ),
+        )
+        .unwrap();
+    }
     fs::write(&handwritten, "name: handwritten\n").unwrap();
 
     let check = simit()
@@ -7808,8 +7811,11 @@ fn qualified_by_removes_only_simit_owned_qualification_workflows() {
         .output()
         .unwrap();
     assert!(!check.status.success());
-    assert!(String::from_utf8_lossy(&check.stderr).contains("ci-foo.yaml"));
+    let stderr = String::from_utf8_lossy(&check.stderr);
+    assert!(stderr.contains("ci-foo.yaml"), "{stderr}");
+    assert!(stderr.contains("qualify-generator.yaml"), "{stderr}");
     assert!(generated.exists());
+    assert!(qualify.exists());
 
     assert!(
         simit()
@@ -7820,8 +7826,64 @@ fn qualified_by_removes_only_simit_owned_qualification_workflows() {
             .success()
     );
     assert!(!generated.exists());
+    assert!(!qualify.exists());
     assert!(handwritten.exists());
     assert!(workflows.join("pages.yaml").exists());
+}
+
+#[test]
+fn qualified_by_pages_require_flake_and_reject_publisher_flags() {
+    let no_flake = TempDir::new().unwrap();
+    fs::write(no_flake.path().join("simit.toml"), QUALIFIED_CONFIG).unwrap();
+    let output = simit()
+        .current_dir(no_flake.path())
+        .args(["init", "ci", "--check"])
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("requires flake.nix"));
+
+    let temp = qualified_package(QUALIFIED_CONFIG);
+    let output = simit()
+        .current_dir(temp.path())
+        .args(["init", "ci", "--with-homebrew"])
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("--with-homebrew"));
+}
+
+#[test]
+fn qualified_by_audit_expects_pages_only() {
+    let temp = qualified_package(QUALIFIED_CONFIG);
+    assert!(
+        simit()
+            .current_dir(temp.path())
+            .args(["init", "ci"])
+            .status()
+            .unwrap()
+            .success()
+    );
+    let audit = simit::registry::audit_ci(temp.path()).unwrap();
+    assert_eq!(audit.status, simit::registry::FeatureStatus::Managed);
+    assert!(audit.extra_generated_files.is_empty());
+
+    fs::write(
+        temp.path().join(".github/workflows/qualify-generator.yaml"),
+        format!(
+            "{}\nname: leftover\n",
+            simit::render::ci::GENERATED_WORKFLOW_MARKER
+        ),
+    )
+    .unwrap();
+    let audit = simit::registry::audit_ci(temp.path()).unwrap();
+    assert_eq!(audit.status, simit::registry::FeatureStatus::Drift);
+    assert_eq!(
+        audit.extra_generated_files,
+        [std::path::PathBuf::from(
+            ".github/workflows/qualify-generator.yaml"
+        )]
+    );
 }
 
 #[test]
