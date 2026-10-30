@@ -1658,6 +1658,109 @@ pub struct ArtifactsConfig {
     /// Skip artifact signing (minisign + cosign) when false.
     #[serde(default = "default_true")]
     pub sign: bool,
+    /// Archive members promoted to standalone release assets before the
+    /// checksums are generated, so they are hashed, signed, attested and
+    /// uploaded like every other asset.
+    #[serde(default)]
+    pub extract: Vec<ExtractAssetConfig>,
+}
+
+/// `[[release.artifacts.extract]]` — copy one archive member into `release/`
+/// as its own asset. `{version}` is the only placeholder.
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct ExtractAssetConfig {
+    /// Archive in `release/` (`.zip`, `.tar.gz` or `.tgz`).
+    pub archive: String,
+    /// Path of the member inside the archive.
+    pub member: String,
+    /// New top-level file name in `release/`.
+    pub asset: String,
+}
+
+impl ExtractAssetConfig {
+    /// `value` for a double-quoted shell word run after `. ./release-env`.
+    pub fn shell_word(value: &str) -> String {
+        value.replace("{version}", "${VERSION}")
+    }
+}
+
+/// Reject anything that could be reinterpreted by the shell, a glob or a
+/// placeholder expander; `{version}` is stripped first.
+fn validate_extract_text(what: &str, value: &str) -> Result<()> {
+    let rest = value.replace("{version}", "");
+    if value.is_empty()
+        || rest
+            .chars()
+            .any(|c| c.is_control() || "\"$`\\{}*?[]".contains(c))
+    {
+        bail!(
+            "simit project config: [[release.artifacts.extract]] {what} {value:?} must be non-empty, contain no quotes, $, backslash, glob characters or control characters, and use only the {{version}} placeholder"
+        );
+    }
+    Ok(())
+}
+
+impl ArtifactsConfig {
+    /// Validate `[[release.artifacts.extract]]` entries.
+    pub fn validate_extract(&self) -> Result<()> {
+        let bare = |what: &str, value: &str| -> Result<()> {
+            validate_extract_text(what, value)?;
+            if value.contains('/') || value == "." || value == ".." {
+                bail!(
+                    "simit project config: [[release.artifacts.extract]] {what} {value:?} must be a bare file name"
+                );
+            }
+            Ok(())
+        };
+        let mut assets = std::collections::BTreeSet::new();
+        for entry in &self.extract {
+            bare("archive", &entry.archive)?;
+            bare("asset", &entry.asset)?;
+            validate_extract_text("member", &entry.member)?;
+            if entry.member.starts_with('/') || entry.member.split('/').any(|part| part == "..") {
+                bail!(
+                    "simit project config: [[release.artifacts.extract]] member {:?} must be a relative path without `..`",
+                    entry.member
+                );
+            }
+            if ![".zip", ".tar.gz", ".tgz"]
+                .iter()
+                .any(|ext| entry.archive.ends_with(ext))
+            {
+                bail!(
+                    "simit project config: [[release.artifacts.extract]] archive {:?} must end in .zip, .tar.gz or .tgz",
+                    entry.archive
+                );
+            }
+            if entry.asset.starts_with("SHA256SUMS.txt")
+                || entry.asset.ends_with(".cosign.bundle")
+                || entry.asset.ends_with(".intoto.bundle")
+            {
+                bail!(
+                    "simit project config: [[release.artifacts.extract]] asset {:?} collides with generated integrity files",
+                    entry.asset
+                );
+            }
+            if !assets.insert(entry.asset.as_str()) {
+                bail!(
+                    "simit project config: [[release.artifacts.extract]] asset {:?} is listed twice",
+                    entry.asset
+                );
+            }
+        }
+        if let Some(entry) = self.extract.iter().find(|entry| {
+            self.extract
+                .iter()
+                .any(|other| other.archive == entry.asset)
+        }) {
+            bail!(
+                "simit project config: [[release.artifacts.extract]] asset {:?} equals an archive name",
+                entry.asset
+            );
+        }
+        Ok(())
+    }
 }
 
 impl ArtifactsConfig {
@@ -2866,6 +2969,7 @@ impl ProjectConfig {
                 token_secret,
             )?;
         }
+        self.release.artifacts.validate_extract()?;
         if let Some(netrc_secret) = &self.release.artifacts.netrc_secret {
             validate_github_actions_secret_identifier(
                 "simit project config: [release.artifacts].netrc_secret",
@@ -5692,4 +5796,87 @@ fn missing_scoop_message(name: &str) -> String {
 
 fn config_hint() -> &'static str {
     "simit.toml, Cargo.toml [workspace.metadata.simit]/[package.metadata.simit], or flake outputs.simitConfig"
+}
+
+#[cfg(test)]
+mod extract_tests {
+    use super::*;
+
+    fn entry(archive: &str, member: &str, asset: &str) -> ExtractAssetConfig {
+        ExtractAssetConfig {
+            archive: archive.to_owned(),
+            member: member.to_owned(),
+            asset: asset.to_owned(),
+        }
+    }
+
+    fn check(entries: Vec<ExtractAssetConfig>) -> Result<()> {
+        ArtifactsConfig {
+            extract: entries,
+            ..ArtifactsConfig::default()
+        }
+        .validate_extract()
+    }
+
+    #[test]
+    fn parses_and_accepts_the_sorrel_entry() {
+        let artifacts: ArtifactsConfig = toml_edit::de::from_str(
+            r#"
+[[extract]]
+archive = "sorrel-{version}-x86_64-windows.zip"
+member = "sorrel.exe"
+asset = "sorrel-{version}-x86_64-windows.exe"
+"#,
+        )
+        .unwrap();
+        assert_eq!(artifacts.extract.len(), 1);
+        artifacts.validate_extract().unwrap();
+        check(vec![entry("a-{version}.tar.gz", "bin/a", "a-{version}")]).unwrap();
+        check(vec![entry("a.tgz", "a", "a")]).unwrap();
+        assert!(
+            toml_edit::de::from_str::<ArtifactsConfig>(
+                "[[extract]]\narchive='a.zip'\nmember='a'\nasset='b'\nextra=1"
+            )
+            .is_err()
+        );
+        assert!(ArtifactsConfig::default().extract.is_empty());
+    }
+
+    #[test]
+    fn rejects_invalid_entries() {
+        let ok = || entry("a.zip", "a.exe", "a.exe.copy");
+        let bad: Vec<(&str, Vec<ExtractAssetConfig>)> = vec![
+            ("asset slash", vec![entry("a.zip", "a", "dir/a")]),
+            ("asset dotdot", vec![entry("a.zip", "a", "..")]),
+            ("asset empty", vec![entry("a.zip", "a", "")]),
+            ("archive slash", vec![entry("d/a.zip", "a", "b")]),
+            ("member absolute", vec![entry("a.zip", "/a", "b")]),
+            ("member dotdot", vec![entry("a.zip", "x/../a", "b")]),
+            ("member empty", vec![entry("a.zip", "", "b")]),
+            ("member glob", vec![entry("a.zip", "*.exe", "b")]),
+            ("unknown ext", vec![entry("a.7z", "a", "b")]),
+            ("unknown placeholder", vec![entry("a-{ver}.zip", "a", "b")]),
+            ("shell metachar", vec![entry("a.zip", "a", "b$(x)")]),
+            (
+                "integrity name",
+                vec![entry("a.zip", "a", "SHA256SUMS.txt")],
+            ),
+            (
+                "duplicate asset",
+                vec![ok(), entry("b.zip", "b", "a.exe.copy")],
+            ),
+            (
+                "asset equals archive",
+                vec![entry("a.zip", "a", "b.zip"), entry("b.zip", "b", "c")],
+            ),
+        ];
+        for (why, entries) in bad {
+            let err = check(entries).expect_err(why).to_string();
+            assert!(
+                err.contains("[[release.artifacts.extract]]"),
+                "{why}: {err}"
+            );
+        }
+        check(vec![ok()]).unwrap();
+    }
 }

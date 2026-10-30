@@ -16,11 +16,11 @@ use std::fmt::Write as _;
 
 use crate::cli::Platform;
 use crate::config::{
-    AnnounceConfig, ArtifactsConfig, AtticConfig, FlatpakConfig, PrebuildConfig, PypiReleaseConfig,
-    ReleaseNotesSource, ReleaseProvider, ReleasePublishConfig, ReleasePublisherEnforcement,
-    ReleasePublisherPolicy, RequiredGate, ResolvedApt, ResolvedAur, ResolvedChocolatey,
-    ResolvedCopr, ResolvedHomebrew, ResolvedReleaseTarget, ResolvedScoop, ResolvedWinget,
-    WindowsSigningConfig,
+    AnnounceConfig, ArtifactsConfig, AtticConfig, ExtractAssetConfig, FlatpakConfig,
+    PrebuildConfig, PypiReleaseConfig, ReleaseNotesSource, ReleaseProvider, ReleasePublishConfig,
+    ReleasePublisherEnforcement, ReleasePublisherPolicy, RequiredGate, ResolvedApt, ResolvedAur,
+    ResolvedChocolatey, ResolvedCopr, ResolvedHomebrew, ResolvedReleaseTarget, ResolvedScoop,
+    ResolvedWinget, WindowsSigningConfig,
 };
 use crate::project::GeneratedFile;
 use crate::render::ci::{forgejo_action_ref, github_action_ref, immutable_action_ref};
@@ -679,6 +679,7 @@ pub fn render(inputs: &ReleaseWorkflowInputs<'_>) -> String {
     if let Some(windows) = inputs.windows_signing {
         push_windows_signing(&mut w, windows);
     }
+    push_promote_assets(&mut w, inputs.artifacts);
     push_checksums(&mut w, inputs.artifacts);
     if inputs.artifacts.sign {
         push_sign(&mut w, inputs.artifacts, inputs.release, inputs.platform);
@@ -1730,8 +1731,58 @@ fn push_build_debs(w: &mut String, _apt: &ResolvedApt) {
     w.push_str("          nix develop -c simit dist apt build --version \"$VERSION\" --release-dir release\n");
 }
 
+/// Copy configured archive members into `release/` as standalone assets.
+/// Runs after every archive exists and before checksums, so each promoted
+/// asset is hashed, signed, attested and uploaded like any other.
+fn push_promote_assets(w: &mut String, artifacts: &ArtifactsConfig) {
+    if artifacts.extract.is_empty() {
+        return;
+    }
+    w.push_str("      - name: Promote archive members to release assets\n        run: |\n          set -euo pipefail\n");
+    w.push_str("          nix shell nixpkgs#libarchive -c bash <<'SCRIPT'\n");
+    w.push_str("          set -euo pipefail\n          . ./release-env\n");
+    w.push_str("          tmp=\"$(mktemp -d)\"; trap 'rm -rf \"$tmp\"' EXIT\n");
+    w.push_str("          promote() {\n            archive=\"$1\"; member=\"$2\"; asset=\"$3\"\n");
+    w.push_str("            test -f \"release/$archive\" || { echo \"release archive missing: $archive\" >&2; exit 1; }\n");
+    w.push_str("            test ! -e \"release/$asset\" || { echo \"release asset collision: $asset\" >&2; exit 1; }\n");
+    w.push_str("            dir=\"$(mktemp -d \"$tmp/x.XXXXXX\")\"\n");
+    w.push_str("            bsdtar -xpf \"release/$archive\" -C \"$dir\" -- \"$member\"\n");
+    w.push_str("            { test -f \"$dir/$member\" && test ! -L \"$dir/$member\"; } || { echo \"member $member is not a regular file in $archive\" >&2; exit 1; }\n");
+    w.push_str("            cp -p \"$dir/$member\" \"release/$asset\"\n          }\n");
+    for e in &artifacts.extract {
+        writeln!(
+            w,
+            "          promote \"{}\" \"{}\" \"{}\"",
+            ExtractAssetConfig::shell_word(&e.archive),
+            ExtractAssetConfig::shell_word(&e.member),
+            ExtractAssetConfig::shell_word(&e.asset)
+        )
+        .expect("write");
+    }
+    w.push_str("          SCRIPT\n");
+}
+
+/// Add promoted assets to a bash `files` array; globs like `checksum_globs`
+/// must never be able to leave them out. Needs `VERSION` in scope.
+fn push_extract_files(w: &mut String, artifacts: &ArtifactsConfig, dir: &str) {
+    for e in &artifacts.extract {
+        writeln!(
+            w,
+            "          files+=(\"{dir}{}\")",
+            ExtractAssetConfig::shell_word(&e.asset)
+        )
+        .expect("write");
+    }
+}
+
 fn push_checksums(w: &mut String, artifacts: &ArtifactsConfig) {
-    w.push_str("      - name: Generate release checksums\n        run: |\n          set -euo pipefail\n          cd release\n");
+    w.push_str(
+        "      - name: Generate release checksums\n        run: |\n          set -euo pipefail\n",
+    );
+    if !artifacts.extract.is_empty() {
+        w.push_str("          . ./release-env\n");
+    }
+    w.push_str("          cd release\n");
     w.push_str("          shopt -s nullglob\n");
     w.push_str("          files=()\n");
     w.push_str("          add_matches() { local pattern=\"$1\" match; while IFS= read -r match; do files+=(\"$match\"); done < <(compgen -G \"$pattern\" || true); }\n");
@@ -1742,6 +1793,7 @@ fn push_checksums(w: &mut String, artifacts: &ArtifactsConfig) {
             writeln!(w, "          add_matches {}", shell_single_quote(glob)).expect("write");
         }
     }
+    push_extract_files(w, artifacts, "");
     w.push_str("          : > SHA256SUMS.txt\n");
     w.push_str("          count=0\n");
     w.push_str("          while IFS= read -r file; do\n");
@@ -1824,6 +1876,7 @@ fn push_sign(
     w.push_str("          attest_blob_with_key() { file=\"$1\"; predicate=\"$2\"; cosign attest-blob --yes --key \"$cosign_key\" --predicate \"$predicate\" --type slsaprovenance1 --bundle \"${file}.intoto.bundle\" \"$file\"; }\n");
     w.push_str("          shopt -s nullglob\n");
     w.push_str("          files=(release/*.tar.gz release/*.zip release/*.AppImage release/*.deb release/*.src.rpm release/*.exe)\n");
+    push_extract_files(w, artifacts, "release/");
     w.push_str("          while IFS= read -r file; do\n");
     w.push_str("            [ -f \"$file\" ] || continue\n");
     w.push_str("            artifact_sha=\"$(sha256sum \"$file\" | awk '{print $1}')\"; predicate=\"$(mktemp)\"\n");
@@ -1976,6 +2029,7 @@ fn push_github_release(
             .expect("write");
         }
     }
+    push_extract_files(w, artifacts, "release/");
     w.push_str("          while IFS= read -r file; do\n");
     w.push_str(
         "            [ -f \"$file\" ] || continue\n            name=$(basename \"$file\")\n",
@@ -2051,6 +2105,7 @@ fn push_forgejo_release(
             .expect("write");
         }
     }
+    push_extract_files(w, artifacts, "release/");
     w.push_str("          while IFS= read -r file; do\n");
     w.push_str("            [ -f \"$file\" ] || continue\n");
     w.push_str("            name=\"$(basename \"$file\")\"\n");
@@ -3392,6 +3447,7 @@ mod tests {
             checksum_globs: vec!["*.tar.gz".to_owned(), "*.deb".to_owned()],
             minisign_pub: "keys/minisign.pub".to_owned(),
             sign: true,
+            extract: vec![],
         }
     }
 
@@ -4194,6 +4250,194 @@ esac"#,
         assert!(workflow.contains("nix build '.#release-bundle'"));
         assert!(workflow.contains("expected exactly one release manifest from Nix bundles"));
         assert!(workflow.contains(".schemaVersion == 2"));
+    }
+
+    fn sorrel_extract() -> ExtractAssetConfig {
+        ExtractAssetConfig {
+            archive: "sorrel-{version}-x86_64-windows.zip".to_owned(),
+            member: "sorrel.exe".to_owned(),
+            asset: "sorrel-{version}-x86_64-windows.exe".to_owned(),
+        }
+    }
+
+    /// Sorrel's restrictive globs plus one promoted asset.
+    fn extract_workflow(
+        platform: Platform,
+        provider: ReleaseProvider,
+        prebuild: Option<&PrebuildConfig>,
+    ) -> String {
+        let mut release = codeberg();
+        release.provider = provider;
+        if provider == ReleaseProvider::Github {
+            release.api_base = "https://api.github.com".to_owned();
+        }
+        let artifacts = ArtifactsConfig {
+            nix_bundle_attrs: vec!["release-bundle".to_owned()],
+            build_commands: vec![],
+            checksum_globs: ["*.tar.gz", "*.zip", "*.AppImage", "*.whl"]
+                .map(str::to_owned)
+                .to_vec(),
+            extract: vec![sorrel_extract()],
+            ..artifacts()
+        };
+        render(&ReleaseWorkflowInputs {
+            platform,
+            runner: "ubuntu-24.04",
+            preinstalled_nix: false,
+            publish_enforcement: ReleasePublisherEnforcement::Declared,
+            publish: &ReleasePublishConfig::default(),
+            artifacts: &artifacts,
+            prebuild,
+            smoke_command: None,
+            release: Some(&release),
+            tag_prefix: crate::release_identity::TagPrefix::None,
+            notes_source: None,
+            required_gates: &[],
+            attic: None,
+            aur: None,
+            copr: None,
+            apt: None,
+            homebrew: None,
+            scoop: None,
+            chocolatey: None,
+            windows_signing: None,
+            flatpak: None,
+            winget: None,
+            announce: None,
+            pypi: None,
+        })
+    }
+
+    #[test]
+    fn promoted_assets_are_checksummed_signed_and_uploaded_despite_restrictive_globs() {
+        let prebuild = PrebuildConfig {
+            release_archives: true,
+            ..PrebuildConfig::default()
+        };
+        for (platform, provider, prebuild) in [
+            (Platform::Github, ReleaseProvider::Github, None),
+            (Platform::Forgejo, ReleaseProvider::Forgejo, None),
+            (Platform::Github, ReleaseProvider::Github, Some(&prebuild)),
+        ] {
+            let w = extract_workflow(platform, provider, prebuild);
+            let at = |name: &str| {
+                w.find(&format!("      - name: {name}\n"))
+                    .unwrap_or_else(|| panic!("no step {name}"))
+            };
+            let build = if prebuild.is_some() {
+                at("Collect native release archives")
+            } else {
+                at("Build release artifacts")
+            };
+            let promote = at("Promote archive members to release assets");
+            let sums = at("Generate release checksums");
+            let sign = at("Sign checksums and attest release artifacts");
+            let publish = w
+                .find("      - name: Publish ")
+                .filter(|publish| *publish > sign)
+                .expect("hosted release step");
+            assert!(build < promote && promote < sums && sums < sign && sign < publish);
+            let asset = "sorrel-${VERSION}-x86_64-windows.exe";
+            assert!(w[promote..sums].contains(&format!(
+                "promote \"sorrel-${{VERSION}}-x86_64-windows.zip\" \"sorrel.exe\" \"{asset}\""
+            )));
+            assert!(w[sums..sign].contains("          . ./release-env\n          cd release\n"));
+            assert!(w[sums..sign].contains(&format!("files+=(\"{asset}\")")));
+            assert!(w[sign..publish].contains(&format!("files+=(\"release/{asset}\")")));
+            assert!(w[publish..].contains(&format!("files+=(\"release/{asset}\")")));
+            assert!(!w[sums..sign].contains("*.exe"), "globs stay restrictive");
+        }
+    }
+
+    #[test]
+    fn no_promote_step_without_extract_entries() {
+        let mut artifacts = artifacts();
+        artifacts.extract.clear();
+        let mut w = String::new();
+        push_promote_assets(&mut w, &artifacts);
+        push_checksums(&mut w, &artifacts);
+        assert!(!w.contains("Promote archive members"));
+        assert!(!w.contains("release-env"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn promote_script_extracts_the_member_with_its_bytes_and_mode() {
+        use std::os::unix::fs::PermissionsExt;
+        let tool = |name: &str| {
+            std::process::Command::new(name)
+                .arg("--version")
+                .output()
+                .is_ok_and(|o| o.status.success())
+        };
+        if !(tool("bash") && tool("bsdtar")) {
+            eprintln!("skipping: bash and bsdtar are required");
+            return;
+        }
+        let artifacts = ArtifactsConfig {
+            extract: vec![sorrel_extract()],
+            ..artifacts()
+        };
+        let mut step = String::new();
+        push_promote_assets(&mut step, &artifacts);
+        let body = step.split_once("<<'SCRIPT'\n").expect("heredoc").1;
+        let body = body.split_once("          SCRIPT\n").expect("end").0;
+        let script: String = body
+            .lines()
+            .map(|line| format!("{}\n", line.strip_prefix("          ").unwrap_or(line)))
+            .collect();
+
+        let dir = tempfile::tempdir().unwrap();
+        let work = dir.path();
+        std::fs::create_dir_all(work.join("release")).unwrap();
+        std::fs::write(work.join("release-env"), "VERSION=1.2.3\n").unwrap();
+        let zip = work.join("release/sorrel-1.2.3-x86_64-windows.zip");
+        let mut writer = zip::ZipWriter::new(std::fs::File::create(&zip).unwrap());
+        let options = zip::write::SimpleFileOptions::default().unix_permissions(0o755);
+        writer.start_file("sorrel.exe", options).unwrap();
+        std::io::Write::write_all(&mut writer, b"MZ\0exe bytes").unwrap();
+        writer.start_file("README.md", options).unwrap();
+        std::io::Write::write_all(&mut writer, b"readme").unwrap();
+        writer.finish().unwrap();
+        let run = || {
+            std::process::Command::new("bash")
+                .arg("-c")
+                .arg(&script)
+                .current_dir(work)
+                .output()
+                .unwrap()
+        };
+
+        let out = run();
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let asset = work.join("release/sorrel-1.2.3-x86_64-windows.exe");
+        assert_eq!(std::fs::read(&asset).unwrap(), b"MZ\0exe bytes");
+        assert_eq!(
+            std::fs::metadata(&asset).unwrap().permissions().mode() & 0o111,
+            0o111
+        );
+        assert!(!work.join("release/README.md").exists());
+
+        // A second run refuses to overwrite the promoted asset.
+        let out = run();
+        assert!(!out.status.success());
+        assert!(String::from_utf8_lossy(&out.stderr).contains("release asset collision"));
+
+        // A member absent from the archive fails the step.
+        std::fs::remove_file(&asset).unwrap();
+        let missing = script.replace("\"sorrel.exe\"", "\"nope.exe\"");
+        let out = std::process::Command::new("bash")
+            .arg("-c")
+            .arg(&missing)
+            .current_dir(work)
+            .output()
+            .unwrap();
+        assert!(!out.status.success());
+        assert!(!asset.exists());
     }
 
     #[test]
