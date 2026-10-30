@@ -76,6 +76,32 @@ versioned `*-release-manifest.json`; Simit validates its schema and release
 version before checksums and hosted-release upload. Project-specific
 `build_commands` remain additive for formats outside this contract.
 
+### Promoting archive members to release assets
+
+`[[release.artifacts.extract]]` copies one member of a release archive into
+`release/` as its own asset, for example the lone `sorrel.exe` inside a Windows
+zip. Package managers keep consuming the archive.
+
+```toml
+[[release.artifacts.extract]]
+archive = "sorrel-{version}-x86_64-windows.zip"
+member  = "sorrel.exe"
+asset   = "sorrel-{version}-x86_64-windows.exe"
+```
+
+The generated "Promote archive members to release assets" step runs after
+`release/` is populated (Nix bundles, prebuilt native archives, Windows
+signing) and before checksums. It fails when the archive or member is missing
+or `release/<asset>` already exists, and keeps the member's mode. Promoted
+assets are always added to `SHA256SUMS.txt`, cosign and provenance signing and
+the GitHub/Forgejo upload, even when `checksum_globs` is restrictive.
+
+`{version}` is the only placeholder. `archive` and `asset` are bare file names,
+`member` is a relative path without `..`, and archives end in `.zip`, `.tar.gz`
+or `.tgz`. Names may not contain quotes, `$`, backslashes or glob characters,
+asset names must be unique and may not equal an archive, and generated
+integrity file names are reserved. Crow release workflows reject the option.
+
 Release candidate validation commands:
 
 ```sh

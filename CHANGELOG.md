@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Added: `[[release.artifacts.extract]]` promotes a member of a release archive
+  (`.zip`, `.tar.gz`, `.tgz`) to a standalone release asset before checksums,
+  so it is hashed, signed, attested and uploaded like every other asset even
+  with a restrictive `checksum_globs`. Crow release workflows reject it.
 - Added: `[ci] qualified_by = "owner/repo"` marks a component repository as
   qualified by a superproject. `simit init ci` then generates only the Pages
   workflow, `--check` reports simit-generated qualification workflows
