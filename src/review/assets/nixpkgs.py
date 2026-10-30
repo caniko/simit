@@ -50,8 +50,8 @@ class SelectOnly(Review):
             raise RuntimeError("changed-package detector returned unexpected systems")
         # Retain upstream discovery even when it produced no system entry. Never
         # substitute only_packages, which bypasses changed-package discovery.
-        changed = set(packages_per_system.get(self.selected_system, set()))
         request = self.plan.get("request", {})
+        changed = set() if request.get("skip_discovery") else set(packages_per_system.get(self.selected_system, set()))
         packages = set(request.get("packages", []))
         checks = set(request.get("checks", []))
         additions = packages | checks
@@ -131,11 +131,15 @@ def main():
     # Warning-name resolution belongs to final selection on the tested checkout:
     # an explicit addition need not exist in the base revision.
     extra_config = "{  }"
+    request = plan.get("request", {})
+    # skip_discovery: upstream's only_packages bypasses the (memory-heavy) whole-tree
+    # changed-package evaluation; the requested attributes are then the whole selection.
+    only = set(request.get("packages", [])) | set(request.get("checks", [])) if request.get("skip_discovery") else None
     with Buildenv(False, extra_config) as config, Builddir("exact-" + plan["digest"]) as builddir:
         review = SelectOnly(plan, selected_system, output, builddir=builddir, build_args="", no_shell=True, run="", remote="",
                             systems=[selected_system], allow=allow, build_graph="nix",
                             nixpkgs_config=config, extra_nixpkgs_config=extra_config, eval_type="local",
-                            checkout=CheckoutOption.COMMIT, num_parallel_evals=1)
+                            checkout=CheckoutOption.COMMIT, num_parallel_evals=1, only_packages=only)
         # Passing the tested SHA in merge_commit bypasses git_merge in upstream.
         # Use that same SHA as head_commit so COMMIT cannot switch to another tree.
         review.build_commit(plan["pr"]["base"], plan["target"]["commit"], plan["target"]["commit"])

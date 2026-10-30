@@ -179,6 +179,13 @@ explicit attribute that does not evaluate to a usable derivation fails selection
 it cannot silently turn into a successful no-change result. Attributes in `checks`
 retain test identity through frozen selection, realization, and collection.
 
+Set `"skip_discovery": true` (nixpkgs backend, at least one of `packages` or
+`checks`) to build exactly the listed attributes. Upstream's whole-tree
+changed-package evaluation is skipped, so the selection report has an empty
+`changed_attributes`. Attribute paths such as
+`nixosTests.postgresql.postgresql.postgresql_18` are accepted; Nix expressions
+are not.
+
 The optional `nixpkgs_broken_warnings` array contains only explicitly requested
 top-level package attributes. For example, these request fields add a package and its
 packaging test while applying the warning only to that package:
