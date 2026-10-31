@@ -32,6 +32,9 @@
       SIMIT_TRUSTED_GIT = "${pkgs.git}/bin/git";
       SIMIT_TRUSTED_CA_BUNDLE = "${pkgs.cacert}/etc/ssl/certs/ca-bundle.crt";
       nativeBuildInputs = [pkgs.makeWrapper pkgs.perl];
+      # The HTTP transport tests bind loopback sockets, which the macOS sandbox
+      # denies (EPERM) unless the derivation opts in to local networking only.
+      __darwinAllowLocalNetworking = true;
       # The full Simit suite invokes release preflight in temporary Cargo
       # projects, so its nested quality commands need the matching toolchain.
       nativeCheckInputs = [pkgs.git pkgs.gnupg pkgs.clippy pkgs.rustfmt pkgs.nodejs pkgs.jq actionlint pkgs.python3] ++ pkgs.lib.optionals pkgs.stdenv.hostPlatform.isLinux [pkgs.bubblewrap pkgs.nix pkgs.sqlite];

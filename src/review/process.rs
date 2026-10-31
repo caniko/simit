@@ -48,6 +48,24 @@ pub fn run(
     run_command(command(program, args, cwd), log)
 }
 
+// The realization bound must fit inside the 360 minute hosted job.
+const BUILD_TIMEOUT_SECONDS: u64 = 19800;
+const _: () = assert!(BUILD_TIMEOUT_SECONDS < 360 * 60);
+
+/// Realizing a target (for example headless VTK/ParaView) outlasts the 35 minute
+/// default; bound it to fit inside the 360 minute hosted job, with a larger log.
+pub fn run_build(args: &[String], log: Option<&Path>) -> Result<String> {
+    run_command_with_limits(
+        command("nix", args, None),
+        log,
+        CommandLimits {
+            timeout: Duration::from_secs(BUILD_TIMEOUT_SECONDS),
+            stdout_bytes: 16 * 1024 * 1024,
+            stderr_bytes: 256 * 1024 * 1024,
+        },
+    )
+}
+
 #[derive(Clone, Copy)]
 pub struct CommandLimits {
     pub timeout: Duration,
@@ -154,10 +172,10 @@ pub fn nix_args(values: &[&str]) -> Vec<String> {
         "2",
         "--option",
         "max-silent-time",
-        "600",
+        "7200",
         "--option",
         "timeout",
-        "1800",
+        "18000",
         "--option",
         "eval-cache",
         "false",
@@ -168,6 +186,23 @@ pub fn nix_args(values: &[&str]) -> Vec<String> {
 #[cfg(all(test, unix))]
 mod tests {
     use super::*;
+
+    #[test]
+    fn build_bounds_fit_inside_the_hosted_review_job() {
+        let job = include_str!("assets/review-repository.yml");
+        assert!(job.contains("    timeout-minutes: 360\n"));
+        assert!(nix_args(&[]).windows(2).any(|w| w == ["timeout", "18000"]));
+        // Release-profile compiles and LTO links stay silent for over 10 minutes;
+        // Hydra's 7200 s applies. The generated action and the engine must agree.
+        assert!(
+            nix_args(&[])
+                .windows(2)
+                .any(|w| w == ["max-silent-time", "7200"])
+        );
+        let setup = include_str!("assets/setup-nix.yml");
+        assert!(setup.contains("timeout = 18000\n"));
+        assert!(setup.contains("max-silent-time = 7200\n"));
+    }
 
     fn limits() -> CommandLimits {
         CommandLimits {

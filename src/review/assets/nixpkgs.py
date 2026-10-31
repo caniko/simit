@@ -125,7 +125,7 @@ def main():
     selected_system = sys.argv[2]
     output = Path(sys.argv[3])
     # Fixed administrator-owned limits for upstream subprocesses, not request config.
-    os.environ["NIX_CONFIG"] = "accept-flake-config = false\nallow-import-from-derivation = false\nbuilders =\nmax-jobs = 2\ncores = 2\ntimeout = 1800\nmax-silent-time = 600\n"
+    os.environ["NIX_CONFIG"] = "accept-flake-config = false\nallow-import-from-derivation = false\nbuilders =\nmax-jobs = 2\ncores = 2\ntimeout = 1800\nmax-silent-time = 7200\n"
     allow = AllowedFeatures([])
     # Discovery compares both source revisions using upstream's normal policy.
     # Warning-name resolution belongs to final selection on the tested checkout:
