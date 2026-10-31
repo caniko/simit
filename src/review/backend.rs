@@ -3,7 +3,7 @@ use super::{
     artifact, canonical_digest,
     contract::*,
     github,
-    process::{args, nix_args, run},
+    process::{args, nix_args, run, run_build},
     read_json, write_json,
 };
 use anyhow::{Result, bail, ensure};
@@ -354,7 +354,7 @@ pub fn build_with_cache_opt_in(
             let log = out.join(format!("build-{index}.log"));
             let mut arguments = nix_args(&["build", "--no-link", "--json", "-L", &selected]);
             arguments.extend(cache_arguments.clone());
-            let success = run("nix", &arguments, None, Some(&log)).is_ok();
+            let success = run_build(&arguments, Some(&log)).is_ok();
             let mut outcome = if success {
                 Outcome::Passed
             } else {
@@ -366,13 +366,7 @@ pub fn build_with_cache_opt_in(
                     let mut arguments =
                         nix_args(&["build", "--no-link", "--rebuild", "-L", &selected]);
                     arguments.extend(cache_arguments.clone());
-                    if run(
-                        "nix",
-                        &arguments,
-                        None,
-                        Some(&out.join(format!("test-{index}.log"))),
-                    )
-                    .is_err()
+                    if run_build(&arguments, Some(&out.join(format!("test-{index}.log")))).is_err()
                     {
                         outcome = Outcome::Failed;
                     }
