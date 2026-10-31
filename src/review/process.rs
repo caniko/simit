@@ -194,7 +194,11 @@ mod tests {
         assert!(nix_args(&[]).windows(2).any(|w| w == ["timeout", "18000"]));
         // Release-profile compiles and LTO links stay silent for over 10 minutes;
         // Hydra's 7200 s applies. The generated action and the engine must agree.
-        assert!(nix_args(&[]).windows(2).any(|w| w == ["max-silent-time", "7200"]));
+        assert!(
+            nix_args(&[])
+                .windows(2)
+                .any(|w| w == ["max-silent-time", "7200"])
+        );
         let setup = include_str!("assets/setup-nix.yml");
         assert!(setup.contains("timeout = 18000\n"));
         assert!(setup.contains("max-silent-time = 7200\n"));
