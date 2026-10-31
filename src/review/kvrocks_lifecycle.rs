@@ -341,7 +341,7 @@ mod tests {
         );
         assert!(
             plan.systemd_args
-                .contains(&"--property=RuntimeMaxSec=3660s".to_owned())
+                .contains(&"--property=RuntimeMaxSec=21660s".to_owned())
         );
         assert_eq!(
             plan.systemd_args.last().unwrap(),

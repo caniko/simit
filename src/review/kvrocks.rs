@@ -23,7 +23,7 @@ pub(crate) const HOST_STARTUP_SECONDS: u64 = 240;
 // Launcher identity/frame/managed-start handoff, then response delivery.
 #[cfg(target_os = "linux")]
 pub(crate) const WORKER_STARTUP_SECONDS: u64 = HOST_STARTUP_SECONDS + 3 * STARTUP_FRAME_SECONDS + 5;
-const BUILD_WINDOW_SECONDS: u32 = 60 * 60;
+const BUILD_WINDOW_SECONDS: u32 = 360 * 60;
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
