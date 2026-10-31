@@ -172,7 +172,7 @@ pub fn nix_args(values: &[&str]) -> Vec<String> {
         "2",
         "--option",
         "max-silent-time",
-        "600",
+        "7200",
         "--option",
         "timeout",
         "18000",
@@ -192,6 +192,12 @@ mod tests {
         let job = include_str!("assets/review-repository.yml");
         assert!(job.contains("    timeout-minutes: 360\n"));
         assert!(nix_args(&[]).windows(2).any(|w| w == ["timeout", "18000"]));
+        // Release-profile compiles and LTO links stay silent for over 10 minutes;
+        // Hydra's 7200 s applies. The generated action and the engine must agree.
+        assert!(nix_args(&[]).windows(2).any(|w| w == ["max-silent-time", "7200"]));
+        let setup = include_str!("assets/setup-nix.yml");
+        assert!(setup.contains("timeout = 18000\n"));
+        assert!(setup.contains("max-silent-time = 7200\n"));
     }
 
     fn limits() -> CommandLimits {
