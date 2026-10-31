@@ -48,6 +48,10 @@ pub fn run(
     run_command(command(program, args, cwd), log)
 }
 
+// The realization bound must fit inside the 360 minute hosted job.
+const BUILD_TIMEOUT_SECONDS: u64 = 19800;
+const _: () = assert!(BUILD_TIMEOUT_SECONDS < 360 * 60);
+
 /// Realizing a target (for example headless VTK/ParaView) outlasts the 35 minute
 /// default; bound it to fit inside the 360 minute hosted job, with a larger log.
 pub fn run_build(args: &[String], log: Option<&Path>) -> Result<String> {
@@ -55,7 +59,7 @@ pub fn run_build(args: &[String], log: Option<&Path>) -> Result<String> {
         command("nix", args, None),
         log,
         CommandLimits {
-            timeout: Duration::from_secs(19800),
+            timeout: Duration::from_secs(BUILD_TIMEOUT_SECONDS),
             stdout_bytes: 16 * 1024 * 1024,
             stderr_bytes: 256 * 1024 * 1024,
         },
@@ -188,7 +192,6 @@ mod tests {
         let job = include_str!("assets/review-repository.yml");
         assert!(job.contains("    timeout-minutes: 360\n"));
         assert!(nix_args(&[]).windows(2).any(|w| w == ["timeout", "18000"]));
-        assert!(19800 < 360 * 60);
     }
 
     fn limits() -> CommandLimits {
