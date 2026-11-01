@@ -86,6 +86,17 @@ pub fn release_backend(
     {
         bail!("[release.artifacts].netrc_secret requires the effective GitHub Actions backend");
     }
+    if cfg
+        .release
+        .windows_signing
+        .as_ref()
+        .is_some_and(|windows| windows.is_signpath())
+        && (provider != CiProvider::Actions || platform != Platform::Github)
+    {
+        bail!(
+            "[release.windows_signing] provider = \"signpath\" requires the effective GitHub Actions backend (SignPath verifies GitHub-hosted builds)"
+        );
+    }
     // PyPI trusts GitHub's OIDC issuer, not Forgejo's.
     if cfg
         .release

@@ -344,23 +344,32 @@ pub fn credential_contract(inputs: &ReleaseWorkflowInputs<'_>) -> Vec<ReleaseCre
             "GitHub token for submitting winget manifests.",
         ));
     }
-    if let Some(windows) = inputs.windows_signing {
+    if let Some(windows) = inputs.windows_signing.filter(|w| w.is_signpath()) {
         credentials.push(ReleaseCredential::secret(
-            &windows.pfx_secret,
+            windows.api_token_secret(),
+            ReleaseCredentialScope::Repo,
+            "windows-signing",
+            false,
+            "Optional SignPath API token; releases stay unsigned while it is unset.",
+        ));
+    }
+    if let Some(windows) = inputs.windows_signing.filter(|w| !w.is_signpath()) {
+        credentials.push(ReleaseCredential::secret(
+            windows.pfx_secret(),
             ReleaseCredentialScope::Repo,
             "windows-signing",
             false,
             "Optional Authenticode PKCS#12 certificate.",
         ));
         credentials.push(ReleaseCredential::secret(
-            &windows.pass_secret,
+            windows.pass_secret(),
             ReleaseCredentialScope::Repo,
             "windows-signing",
             false,
             "Optional Authenticode certificate passphrase.",
         ));
         credentials.push(ReleaseCredential::secret(
-            &windows.subject_secret,
+            windows.subject_secret(),
             ReleaseCredentialScope::Repo,
             "windows-signing",
             false,
@@ -625,6 +634,10 @@ pub fn render(inputs: &ReleaseWorkflowInputs<'_>) -> String {
             } else {
                 "read\n"
             });
+            // The SignPath action reads this run's artifacts with GITHUB_TOKEN.
+            if inputs.windows_signing.is_some_and(|w| w.is_signpath()) {
+                w.push_str("      actions: read\n");
+            }
             w.push_str("      id-token: write\n");
         }
         Platform::Forgejo => w.push_str("    enable-openid-connect: true\n"),
@@ -677,7 +690,11 @@ pub fn render(inputs: &ReleaseWorkflowInputs<'_>) -> String {
         push_build_debs(&mut w, apt);
     }
     if let Some(windows) = inputs.windows_signing {
-        push_windows_signing(&mut w, windows);
+        if windows.is_signpath() {
+            push_signpath_signing(&mut w, windows);
+        } else {
+            push_windows_signing(&mut w, windows);
+        }
     }
     push_promote_assets(&mut w, inputs.artifacts);
     push_checksums(&mut w, inputs.artifacts);
@@ -1107,11 +1124,20 @@ fn push_secrets_header(w: &mut String, inputs: &ReleaseWorkflowInputs<'_>) {
         )
         .expect("write");
     }
-    if let Some(windows) = inputs.windows_signing {
+    if let Some(windows) = inputs.windows_signing.filter(|w| w.is_signpath()) {
+        writeln!(
+            w,
+            "# - {}: optional SignPath API token (unsigned release while unset).",
+            windows.api_token_secret()
+        )
+        .expect("write");
+    }
+    if let Some(windows) = inputs.windows_signing.filter(|w| !w.is_signpath()) {
         writeln!(
             w,
             "# - {}, {}: optional Authenticode PKCS#12 cert + passphrase.",
-            windows.pfx_secret, windows.pass_secret
+            windows.pfx_secret(),
+            windows.pass_secret()
         )
         .expect("write");
     }
@@ -2706,27 +2732,133 @@ fn push_sbom(w: &mut String, commands: &[String]) {
     }
 }
 
+/// SignPath Foundation signing of finished release archives (GitHub Actions
+/// only; `release_backend` rejects other backends). Runs before the promote and
+/// checksum steps, so extracted exes, checksums, signatures and package hashes
+/// all cover the signed bytes. Every step after the gate is skipped, with a
+/// warning, while the API-token secret is empty.
+fn push_signpath_signing(w: &mut String, windows: &WindowsSigningConfig) {
+    const ENABLED: &str = "        if: ${{ steps.signpath_gate.outputs.enabled == 'true' }}\n";
+    let token = windows.api_token_secret();
+    let archive = |a: &str| ExtractAssetConfig::shell_word(a);
+    w.push_str("      - name: Check SignPath signing availability\n        id: signpath_gate\n        env:\n");
+    writeln!(w, "          TOKEN: ${{{{ secrets.{token} }}}}").expect("write");
+    w.push_str("        run: |\n          set -euo pipefail\n          if [ -n \"${TOKEN:-}\" ]; then\n            . ./release-env\n");
+    for (i, a) in windows.archives.iter().enumerate() {
+        let a = archive(a);
+        writeln!(w, "            test -f \"release/{a}\" || {{ echo \"release archive missing: {a}\" >&2; exit 1; }}").expect("write");
+        writeln!(
+            w,
+            "            echo \"archive{i}=release/{a}\" >> \"$GITHUB_OUTPUT\""
+        )
+        .expect("write");
+    }
+    w.push_str("            echo enabled=true >> \"$GITHUB_OUTPUT\"\n          else\n");
+    writeln!(w, "            echo '::warning::SignPath signing skipped: {token} is not set; publishing unsigned Windows executables.'").expect("write");
+    w.push_str("            echo enabled=false >> \"$GITHUB_OUTPUT\"\n          fi\n");
+    let upload = github_action_ref("actions/upload-artifact", "v7.0.2");
+    let submit = github_action_ref("signpath/github-action-submit-signing-request", "v3.0");
+    let value = |v: &str| shell_quote(v);
+    for (i, a) in windows.archives.iter().enumerate() {
+        writeln!(
+            w,
+            "      - name: Upload unsigned {} for SignPath\n        id: signpath_upload_{i}",
+            archive(a)
+        )
+        .expect("write");
+        w.push_str(ENABLED);
+        writeln!(w, "        uses: {upload}\n        with:\n          path: ${{{{ steps.signpath_gate.outputs.archive{i} }}}}\n          archive: false\n          if-no-files-found: error\n          retention-days: 1").expect("write");
+        writeln!(
+            w,
+            "      - name: Sign {} with SignPath\n        id: signpath_submit_{i}",
+            archive(a)
+        )
+        .expect("write");
+        w.push_str(ENABLED);
+        writeln!(
+            w,
+            "        uses: {submit}\n        with:\n          api-token: ${{{{ secrets.{token} }}}}"
+        )
+        .expect("write");
+        writeln!(
+            w,
+            "          organization-id: {}",
+            value(windows.organization_id.as_deref().unwrap_or_default())
+        )
+        .expect("write");
+        writeln!(
+            w,
+            "          project-slug: {}",
+            value(windows.project_slug.as_deref().unwrap_or_default())
+        )
+        .expect("write");
+        writeln!(
+            w,
+            "          signing-policy-slug: {}",
+            value(windows.signing_policy_slug.as_deref().unwrap_or_default())
+        )
+        .expect("write");
+        if let Some(slug) = &windows.artifact_configuration_slug {
+            writeln!(w, "          artifact-configuration-slug: {}", value(slug)).expect("write");
+        }
+        writeln!(w, "          github-artifact-id: ${{{{ steps.signpath_upload_{i}.outputs.artifact-id }}}}\n          wait-for-completion: true\n          wait-for-completion-timeout-in-seconds: {}\n          output-artifact-directory: ${{{{ runner.temp }}}}/signpath-signed/{i}\n          skip-decompress: true", windows.wait_timeout_seconds()).expect("write");
+    }
+    w.push_str("      - name: Install signed archives and verify Authenticode signatures\n");
+    w.push_str(ENABLED);
+    w.push_str("        run: |\n          set -euo pipefail\n          nix shell nixpkgs#osslsigncode nixpkgs#libarchive -c bash <<'SCRIPT'\n");
+    w.push_str("          set -euo pipefail\n          . ./release-env\n");
+    w.push_str("          ca=\"${SSL_CERT_FILE:-/etc/ssl/certs/ca-certificates.crt}\"\n");
+    w.push_str("          tmp=\"$(mktemp -d)\"; trap 'rm -rf \"$tmp\"' EXIT\n");
+    w.push_str("          install_signed() {\n            idx=\"$1\"; archive=\"$2\"; shift 2\n            signed=\"$RUNNER_TEMP/signpath-signed/$idx/$archive\"\n");
+    w.push_str("            test -s \"$signed\" || { echo \"SignPath returned no $archive\" >&2; exit 1; }\n");
+    w.push_str("            diff <(bsdtar -tf \"release/$archive\" | grep -v '/$' | LC_ALL=C sort) <(bsdtar -tf \"$signed\" | grep -v '/$' | LC_ALL=C sort) >&2 || { echo \"signed $archive has a different member list\" >&2; exit 1; }\n");
+    w.push_str(
+        "            dir=\"$(mktemp -d \"$tmp/x.XXXXXX\")\"\n            for pe in \"$@\"; do\n",
+    );
+    w.push_str("              bsdtar -xpf \"$signed\" -C \"$dir\" -- \"$pe\"\n");
+    w.push_str("              osslsigncode verify -CAfile \"$ca\" -TSA-CAfile \"$ca\" -in \"$dir/$pe\"\n            done\n");
+    w.push_str("            cp \"$signed\" \"release/$archive\"\n          }\n");
+    let pes = windows
+        .pe_files
+        .iter()
+        .map(|pe| format!("\"{pe}\""))
+        .collect::<Vec<_>>()
+        .join(" ");
+    for (i, a) in windows.archives.iter().enumerate() {
+        writeln!(w, "          install_signed {i} \"{}\" {pes}", archive(a)).expect("write");
+    }
+    w.push_str("          SCRIPT\n");
+}
+
 fn push_windows_signing(w: &mut String, windows: &WindowsSigningConfig) {
-    let dir = &windows.dir;
-    let tar = windows.tar_archive.replace("{version}", "${VERSION}");
-    let zip = windows.zip_archive.replace("{version}", "${VERSION}");
+    let dir = windows.dir();
+    let tar = windows
+        .tar_archive
+        .as_deref()
+        .unwrap_or_default()
+        .replace("{version}", "${VERSION}");
+    let zip = windows
+        .zip_archive
+        .as_deref()
+        .unwrap_or_default()
+        .replace("{version}", "${VERSION}");
     w.push_str("      - name: Sign Windows Authenticode artifacts\n        env:\n");
     writeln!(
         w,
         "          WINDOWS_SIGNING_PFX: ${{{{ secrets.{} }}}}",
-        windows.pfx_secret
+        windows.pfx_secret()
     )
     .expect("write");
     writeln!(
         w,
         "          WINDOWS_SIGNING_PASS: ${{{{ secrets.{} }}}}",
-        windows.pass_secret
+        windows.pass_secret()
     )
     .expect("write");
     writeln!(
         w,
         "          WINDOWS_SIGNING_SUBJECT: ${{{{ secrets.{} }}}}",
-        windows.subject_secret
+        windows.subject_secret()
     )
     .expect("write");
     w.push_str("        run: |\n          set -euo pipefail\n          . ./release-env\n");
@@ -2751,9 +2883,9 @@ fn push_windows_signing(w: &mut String, windows: &WindowsSigningConfig) {
     writeln!(
         w,
         "              -n {} -i {} -ts {} \\",
-        shell_quote(&windows.sign_name),
-        shell_quote(&windows.sign_url),
-        shell_quote(&windows.timestamp_url)
+        shell_quote(windows.sign_name.as_deref().unwrap_or_default()),
+        shell_quote(windows.sign_url.as_deref().unwrap_or_default()),
+        shell_quote(windows.timestamp_url())
     )
     .expect("write");
     w.push_str("              -in \"$exe\" -out \"${exe}.signed\"\n");
@@ -2781,6 +2913,8 @@ fn push_windows_signing(w: &mut String, windows: &WindowsSigningConfig) {
     // Individual signed .exe assets, e.g. modde-${VERSION}-x86_64-windows.exe.
     let platform_suffix = windows
         .zip_archive
+        .as_deref()
+        .unwrap_or_default()
         .split_once("{version}")
         .map(|(_, rest)| rest.trim_end_matches(".zip"))
         .unwrap_or("");
@@ -3359,6 +3493,7 @@ fn nix_path_info_arg(link: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::WindowsSigningProvider;
     use crate::config::{
         AurFlavors, ChocolateyPushConfig, HomebrewPlatformsConfig, ReleaseProvider,
         ReleasePublishConfig, ReleasePublisherEnforcement, ReleasePublisherPolicy, ScoopArchSet,
@@ -3411,16 +3546,17 @@ mod tests {
 
     fn windows_signing() -> WindowsSigningConfig {
         WindowsSigningConfig {
-            dir: "release/windows-x86_64".to_owned(),
+            dir: Some("release/windows-x86_64".to_owned()),
             binaries: vec!["modde".to_owned(), "modde-ui".to_owned()],
-            sign_name: "modde".to_owned(),
-            sign_url: "https://modde.tartanoglu.com".to_owned(),
-            timestamp_url: "http://timestamp.digicert.com".to_owned(),
-            tar_archive: "modde-{version}-x86_64-windows.tar.gz".to_owned(),
-            zip_archive: "modde-{version}-x86_64-windows.zip".to_owned(),
-            pfx_secret: "WINDOWS_SIGNING_PFX".to_owned(),
-            pass_secret: "WINDOWS_SIGNING_PASS".to_owned(),
-            subject_secret: "WINDOWS_SIGNING_SUBJECT".to_owned(),
+            sign_name: Some("modde".to_owned()),
+            sign_url: Some("https://modde.tartanoglu.com".to_owned()),
+            timestamp_url: Some("http://timestamp.digicert.com".to_owned()),
+            tar_archive: Some("modde-{version}-x86_64-windows.tar.gz".to_owned()),
+            zip_archive: Some("modde-{version}-x86_64-windows.zip".to_owned()),
+            pfx_secret: Some("WINDOWS_SIGNING_PFX".to_owned()),
+            pass_secret: Some("WINDOWS_SIGNING_PASS".to_owned()),
+            subject_secret: Some("WINDOWS_SIGNING_SUBJECT".to_owned()),
+            ..WindowsSigningConfig::default()
         }
     }
 
@@ -4290,6 +4426,15 @@ esac"#,
         provider: ReleaseProvider,
         prebuild: Option<&PrebuildConfig>,
     ) -> String {
+        extract_workflow_signed(platform, provider, prebuild, None)
+    }
+
+    fn extract_workflow_signed(
+        platform: Platform,
+        provider: ReleaseProvider,
+        prebuild: Option<&PrebuildConfig>,
+        windows_signing: Option<&WindowsSigningConfig>,
+    ) -> String {
         let mut release = codeberg();
         release.provider = provider;
         if provider == ReleaseProvider::Github {
@@ -4324,7 +4469,7 @@ esac"#,
             homebrew: None,
             scoop: None,
             chocolatey: None,
-            windows_signing: None,
+            windows_signing,
             flatpak: None,
             winget: None,
             announce: None,
@@ -4371,6 +4516,175 @@ esac"#,
             assert!(w[publish..].contains(&format!("files+=(\"release/{asset}\")")));
             assert!(!w[sums..sign].contains("*.exe"), "globs stay restrictive");
         }
+    }
+
+    fn signpath_signing() -> WindowsSigningConfig {
+        WindowsSigningConfig {
+            provider: WindowsSigningProvider::Signpath,
+            organization_id: Some("00000000-0000-0000-0000-000000000000".to_owned()),
+            project_slug: Some("sorrel".to_owned()),
+            signing_policy_slug: Some("release-signing".to_owned()),
+            archives: vec!["sorrel-{version}-x86_64-windows.zip".to_owned()],
+            pe_files: vec!["sorrel.exe".to_owned(), "sorrelw.exe".to_owned()],
+            ..WindowsSigningConfig::default()
+        }
+    }
+
+    #[test]
+    fn signpath_steps_are_ordered_gated_and_precede_promote_and_checksums() {
+        let signing = signpath_signing();
+        let w = extract_workflow_signed(
+            Platform::Github,
+            ReleaseProvider::Github,
+            None,
+            Some(&signing),
+        );
+        serde_yaml::from_str::<serde_yaml::Value>(&w).expect("valid YAML");
+        let at = |name: &str| {
+            w.find(&format!("      - name: {name}\n"))
+                .unwrap_or_else(|| panic!("no step {name}"))
+        };
+        let build = at("Build release artifacts");
+        let gate = at("Check SignPath signing availability");
+        let upload = at("Upload unsigned sorrel-${VERSION}-x86_64-windows.zip for SignPath");
+        let submit = at("Sign sorrel-${VERSION}-x86_64-windows.zip with SignPath");
+        let install = at("Install signed archives and verify Authenticode signatures");
+        let promote = at("Promote archive members to release assets");
+        let sums = at("Generate release checksums");
+        assert!(build < gate && gate < upload && upload < submit && submit < install);
+        assert!(install < promote && promote < sums);
+
+        // The gate tests the secret; every later SignPath step is conditional on it.
+        assert!(w[gate..upload].contains("TOKEN: ${{ secrets.SIGNPATH_API_TOKEN }}"));
+        assert!(w[gate..upload].contains("[ -n \"${TOKEN:-}\" ]"));
+        assert!(
+            w[gate..upload]
+                .contains("::warning::SignPath signing skipped: SIGNPATH_API_TOKEN is not set")
+        );
+        let gated = "        if: ${{ steps.signpath_gate.outputs.enabled == 'true' }}\n";
+        for (from, to) in [(upload, submit), (submit, install), (install, promote)] {
+            assert!(w[from..to].contains(gated));
+        }
+        assert!(!w[gate..upload].contains("if: "), "the gate always runs");
+
+        // Pinned action, in-place zip signing, bounded wait, extra permission.
+        assert!(w.contains(
+            "signpath/github-action-submit-signing-request@f6d04783b4569d051e0c80105fe66e82819d0092 # v3.0"
+        ));
+        assert!(w[upload..submit].contains("archive: false"));
+        assert!(w[submit..install].contains("skip-decompress: true"));
+        assert!(w[submit..install].contains("wait-for-completion: true"));
+        assert!(w[submit..install].contains("wait-for-completion-timeout-in-seconds: 3600"));
+        assert!(
+            w[submit..install].contains("organization-id: '00000000-0000-0000-0000-000000000000'")
+        );
+        assert!(!w[submit..install].contains("artifact-configuration-slug"));
+        assert!(w[install..promote].contains("osslsigncode verify"));
+        assert!(w[install..promote].contains(
+            "install_signed 0 \"sorrel-${VERSION}-x86_64-windows.zip\" \"sorrel.exe\" \"sorrelw.exe\""
+        ));
+        assert!(w.contains("      actions: read\n"));
+
+        // Neither the permission nor any SignPath step leaks into other configs.
+        let plain = extract_workflow(Platform::Github, ReleaseProvider::Github, None);
+        assert!(!plain.contains("actions: read") && !plain.contains("signpath"));
+        let ossl = windows_signing();
+        let mut step = String::new();
+        push_windows_signing(&mut step, &ossl);
+        assert!(!step.contains("signpath"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn signpath_install_script_replaces_only_verified_archives_with_the_same_members() {
+        use std::os::unix::fs::PermissionsExt;
+        if !["bash", "bsdtar"].iter().all(|tool| {
+            std::process::Command::new(tool)
+                .arg("--version")
+                .output()
+                .is_ok_and(|o| o.status.success())
+        }) {
+            eprintln!("skipping: bash and bsdtar are required");
+            return;
+        }
+        let mut step = String::new();
+        push_signpath_signing(&mut step, &signpath_signing());
+        let body = step.split_once("<<'SCRIPT'\n").expect("heredoc").1;
+        let body = body.split_once("          SCRIPT\n").expect("end").0;
+        let script: String = body
+            .lines()
+            .map(|line| format!("{}\n", line.strip_prefix("          ").unwrap_or(line)))
+            .collect();
+        let zip = |path: &std::path::Path, members: &[&str], payload: &[u8]| {
+            let mut writer = zip::ZipWriter::new(std::fs::File::create(path).unwrap());
+            for member in members {
+                writer
+                    .start_file(*member, zip::write::SimpleFileOptions::default())
+                    .unwrap();
+                std::io::Write::write_all(&mut writer, payload).unwrap();
+            }
+            writer.finish().unwrap();
+        };
+        let dir = tempfile::tempdir().unwrap();
+        let work = dir.path();
+        std::fs::create_dir_all(work.join("release")).unwrap();
+        std::fs::create_dir_all(work.join("temp/signpath-signed/0")).unwrap();
+        std::fs::create_dir_all(work.join("bin")).unwrap();
+        std::fs::write(work.join("release-env"), "VERSION=1.2.3\n").unwrap();
+        // Fake verifier: fails for any PE whose bytes contain "bad".
+        let verifier = work.join("bin/osslsigncode");
+        std::fs::write(
+            &verifier,
+            "#!/bin/sh\nfor a; do f=\"$a\"; done\n! grep -q bad \"$f\"\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&verifier, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let release = work.join("release/sorrel-1.2.3-x86_64-windows.zip");
+        let signed = work.join("temp/signpath-signed/0/sorrel-1.2.3-x86_64-windows.zip");
+        let run = || {
+            let path = format!(
+                "{}:{}",
+                work.join("bin").display(),
+                std::env::var("PATH").unwrap()
+            );
+            std::process::Command::new("bash")
+                .arg("-c")
+                .arg(&script)
+                .current_dir(work)
+                .env("PATH", path)
+                .env("RUNNER_TEMP", work.join("temp"))
+                .output()
+                .unwrap()
+        };
+        let both = ["sorrel.exe", "sorrelw.exe"];
+
+        // A signed archive with a different member list is refused.
+        zip(&release, &both, b"unsigned");
+        let before = std::fs::read(&release).unwrap();
+        zip(&signed, &["sorrel.exe"], b"signed");
+        let out = run();
+        assert!(!out.status.success());
+        assert!(String::from_utf8_lossy(&out.stderr).contains("different member list"));
+        // A PE that does not verify is refused.
+        zip(&signed, &both, b"bad");
+        assert!(!run().status.success());
+        assert_eq!(std::fs::read(&release).unwrap(), before);
+        // A matching, verifying archive replaces the original.
+        zip(&signed, &both, b"signed");
+        let out = run();
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        assert_eq!(
+            std::fs::read(&release).unwrap(),
+            std::fs::read(&signed).unwrap()
+        );
+        assert_ne!(std::fs::read(&release).unwrap(), before);
+        // No SignPath output at all fails closed.
+        std::fs::remove_file(&signed).unwrap();
+        assert!(!run().status.success());
     }
 
     #[test]
