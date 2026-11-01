@@ -293,6 +293,22 @@ pub struct WingetConfig {
     /// Written as `Dependencies.PackageDependencies` in the installer manifest.
     #[serde(default)]
     pub dependencies: Vec<String>,
+    /// Nested installer files of the zip. When non-empty they replace the single
+    /// `binary`/`command` entry, one `NestedInstallerFiles` item per file.
+    #[serde(default)]
+    pub files: Vec<WingetFile>,
+}
+
+/// One `[[winget.files]]` entry: a portable executable inside the zip.
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct WingetFile {
+    /// Path of the executable inside the zip (`RelativeFilePath`).
+    pub path: String,
+    /// `PortableCommandAlias`; omitted when unset (winget then links the file
+    /// name).
+    #[serde(default)]
+    pub alias: Option<String>,
 }
 
 /// winget-pkgs `ShortDescription` schema bounds.
@@ -500,6 +516,35 @@ pub struct TargetSmoke {
     pub artifacts: Option<RequiredGateArtifacts>,
 }
 
+/// `[[ci.native_tests]]`: run `cargo test` natively (no Nix) on a hosted
+/// runner such as `windows-2025`. Renders one job per entry in
+/// `native-tests.yaml` (GitHub Actions only).
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct NativeTest {
+    pub id: String,
+    /// Runner label the tests run on.
+    pub runner: String,
+    /// Arguments after `cargo test`.
+    #[serde(default = "default_native_test_args")]
+    pub args: String,
+    #[serde(default)]
+    pub env: BTreeMap<String, String>,
+    #[serde(default = "default_native_test_timeout_minutes")]
+    pub timeout_minutes: u64,
+    /// Rust toolchain; defaults to the `rust-toolchain.toml` channel, else `stable`.
+    #[serde(default)]
+    pub toolchain: Option<String>,
+}
+
+fn default_native_test_args() -> String {
+    "--workspace --locked".to_owned()
+}
+
+fn default_native_test_timeout_minutes() -> u64 {
+    60
+}
+
 fn default_gate_artifact_retention_days() -> u64 {
     7
 }
@@ -702,6 +747,9 @@ pub struct CiConfig {
     /// Nix-cross-built artifacts smoke-tested on real target-OS runners.
     #[serde(default)]
     pub target_smokes: Vec<TargetSmoke>,
+    /// Native `cargo test` runs on hosted runners (e.g. Windows).
+    #[serde(default)]
+    pub native_tests: Vec<NativeTest>,
     /// Whether generated Rust checks should pass `--all-features`.
     #[serde(default)]
     pub all_features: Option<bool>,
@@ -791,6 +839,11 @@ impl CiConfig {
             && (provider != CiProvider::Actions || platform != Platform::Github)
         {
             bail!("[[ci.target_smokes]] requires the effective GitHub Actions backend");
+        }
+        if !self.native_tests.is_empty()
+            && (provider != CiProvider::Actions || platform != Platform::Github)
+        {
+            bail!("[[ci.native_tests]] requires the effective GitHub Actions backend");
         }
         if self.separate_events && !self.push_branches.is_empty() {
             bail!(
@@ -2108,6 +2161,30 @@ pub struct ChocolateyConfig {
     /// Chocolatey packages this package depends on (nuspec `<dependencies>`).
     #[serde(default)]
     pub dependencies: Vec<ChocolateyDependency>,
+
+    /// Start menu shortcuts created after the unzip and removed on uninstall.
+    #[serde(default)]
+    pub shortcuts: Vec<ChocolateyShortcut>,
+
+    /// Executables inside the zip that get a GUI shim (an empty `<exe>.gui`
+    /// marker), so launching them from a shell does not wait for the window.
+    #[serde(default)]
+    pub gui_exes: Vec<String>,
+}
+
+/// One Start menu shortcut in `chocolateyInstall.ps1`.
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct ChocolateyShortcut {
+    /// Shortcut name, without `.lnk` or any path separator.
+    pub name: String,
+    /// Path of the target inside the zip, relative to the tools directory.
+    pub target: String,
+    #[serde(default)]
+    pub arguments: Option<String>,
+    /// Icon path inside the zip, optionally followed by `,<index>`.
+    #[serde(default)]
+    pub icon: Option<String>,
 }
 
 /// One nuspec `<dependency>`: package id and optional version (range).
@@ -2652,6 +2729,8 @@ pub struct ResolvedChocolatey {
     pub api_key_secret: String,
     pub api_key_from_runner: bool,
     pub dependencies: Vec<ChocolateyDependency>,
+    pub shortcuts: Vec<ChocolateyShortcut>,
+    pub gui_exes: Vec<String>,
 }
 
 /// `[winget]` with Cargo-metadata fallbacks applied, for the generated
@@ -2671,6 +2750,8 @@ pub struct ResolvedWinget {
     pub binary: String,
     pub command: String,
     pub dependencies: Vec<String>,
+    /// Empty means the single `binary`/`command` entry.
+    pub files: Vec<WingetFile>,
 }
 
 #[derive(Debug, Clone, Copy, Default)]
@@ -3143,6 +3224,7 @@ impl ProjectConfig {
         }
         validate_required_gates(&self.ci)?;
         validate_target_smokes(&self.ci)?;
+        validate_native_tests(&self.ci)?;
         validate_local_gate_steps(&self.ci)?;
         if self
             .ci
@@ -3560,6 +3642,7 @@ impl ProjectConfig {
                 )?;
             }
         }
+        validate_chocolatey_shortcuts(&chocolatey.shortcuts, &chocolatey.gui_exes)?;
 
         Ok(())
     }
@@ -3711,7 +3794,9 @@ impl ProjectConfig {
                 .unwrap_or_else(|| format!("{}.exe", package.name)),
             command: cfg.command.clone().unwrap_or_else(|| package.name.clone()),
             dependencies: cfg.dependencies.clone(),
+            files: cfg.files.clone(),
         };
+        validate_winget_files(&resolved.files)?;
         for id in &resolved.dependencies {
             validate_dependency_id("simit project config: [winget].dependencies", id)?;
         }
@@ -3892,6 +3977,12 @@ impl ProjectConfig {
             api_key_from_runner: cfg.is_some_and(|chocolatey| chocolatey.api_key_from_runner),
             dependencies: cfg
                 .map(|chocolatey| chocolatey.dependencies.clone())
+                .unwrap_or_default(),
+            shortcuts: cfg
+                .map(|chocolatey| chocolatey.shortcuts.clone())
+                .unwrap_or_default(),
+            gui_exes: cfg
+                .map(|chocolatey| chocolatey.gui_exes.clone())
                 .unwrap_or_default(),
         })
     }
@@ -4567,6 +4658,91 @@ fn validate_dependency_id(name: &str, id: &str) -> Result<()> {
     Ok(())
 }
 
+/// A path inside an extracted archive: relative, no `..`, drive letter or
+/// empty segment. Both separators count, because the consumer is Windows.
+fn validate_archive_path(name: &str, path: &str) -> Result<()> {
+    if path.is_empty()
+        || path.contains(|c: char| c.is_control() || c == ':')
+        || path.starts_with(['/', '\\'])
+        || path
+            .split(['/', '\\'])
+            .any(|part| matches!(part, "" | "." | ".."))
+    {
+        bail!("{name} must be a relative path without `..`, `:` or empty segments (got {path:?})");
+    }
+    Ok(())
+}
+
+fn validate_winget_files(files: &[WingetFile]) -> Result<()> {
+    let mut paths = std::collections::BTreeSet::new();
+    let mut aliases = std::collections::BTreeSet::new();
+    for file in files {
+        validate_archive_path("simit project config: [[winget.files]] path", &file.path)?;
+        if !paths.insert(file.path.as_str()) {
+            bail!(
+                "simit project config: [[winget.files]] path {:?} is listed twice",
+                file.path
+            );
+        }
+        let Some(alias) = &file.alias else { continue };
+        // winget's PortableCommandAlias is 1-40 characters and must stay in the link directory.
+        if alias.is_empty()
+            || alias.chars().count() > 40
+            || alias.contains(|c: char| c.is_control() || matches!(c, '/' | '\\' | ':'))
+        {
+            bail!(
+                "simit project config: [[winget.files]] alias must be 1-40 characters without path separators (got {alias:?})"
+            );
+        }
+        if !aliases.insert(alias.to_ascii_lowercase()) {
+            bail!("simit project config: [[winget.files]] alias {alias:?} is not unique");
+        }
+    }
+    Ok(())
+}
+
+fn validate_chocolatey_shortcuts(
+    shortcuts: &[ChocolateyShortcut],
+    gui_exes: &[String],
+) -> Result<()> {
+    const WHAT: &str = "simit project config: [chocolatey]";
+    let mut names = std::collections::BTreeSet::new();
+    for shortcut in shortcuts {
+        let name = &shortcut.name;
+        if name.trim().is_empty()
+            || name.trim() != name
+            || name.ends_with('.')
+            || name.contains(|c: char| c.is_control() || "/\\:*?\"<>|".contains(c))
+        {
+            bail!(
+                "{WHAT}.shortcuts name must be a file name without path separators or `:*?\"<>|` (got {name:?})"
+            );
+        }
+        if !names.insert(name.to_lowercase()) {
+            bail!("{WHAT}.shortcuts name {name:?} is not unique");
+        }
+        validate_archive_path(&format!("{WHAT}.shortcuts target"), &shortcut.target)?;
+        if let Some(icon) = &shortcut.icon {
+            validate_archive_path(&format!("{WHAT}.shortcuts icon"), icon)?;
+        }
+        if shortcut
+            .arguments
+            .as_deref()
+            .is_some_and(|args| args.contains(|c: char| c.is_control()))
+        {
+            bail!("{WHAT}.shortcuts arguments must be a single line");
+        }
+    }
+    let mut exes = std::collections::BTreeSet::new();
+    for exe in gui_exes {
+        validate_archive_path(&format!("{WHAT}.gui_exes"), exe)?;
+        if !exe.to_ascii_lowercase().ends_with(".exe") || !exes.insert(exe.to_ascii_lowercase()) {
+            bail!("{WHAT}.gui_exes entries must be unique paths ending in .exe (got {exe:?})");
+        }
+    }
+    Ok(())
+}
+
 fn validate_nonempty_string(name: &str, value: &str) -> Result<()> {
     if value.trim().is_empty() {
         bail!("{name} must not be empty");
@@ -4791,6 +4967,85 @@ fn validate_target_smokes(ci: &CiConfig) -> Result<()> {
         }
     }
     Ok(())
+}
+
+fn validate_native_tests(ci: &CiConfig) -> Result<()> {
+    let mut jobs = std::collections::BTreeSet::new();
+    for test in &ci.native_tests {
+        let id = test.id.trim();
+        let table = format!("[[ci.native_tests]] `{id}`");
+        if id.is_empty()
+            || !id
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+        {
+            bail!("simit project config: [[ci.native_tests]] id `{id}` must match [a-zA-Z0-9_-]+");
+        }
+        let sanitized = crate::render::ci::sanitize_gate_id(id);
+        if !jobs.insert(sanitized.clone()) {
+            bail!(
+                "simit project config: [[ci.native_tests]] id `{id}` is a duplicate (ids collide after sanitization to `{sanitized}`)"
+            );
+        }
+        validate_runner_label(&test.runner)
+            .map_err(|err| anyhow!("simit project config: {table} runner: {err}"))?;
+        if test.args.contains(['\n', '\r']) {
+            bail!("simit project config: {table} args must be a single line");
+        }
+        // The job adds 15 minutes of checkout and toolchain overhead to this limit.
+        if test.timeout_minutes == 0 || test.timeout_minutes > 345 {
+            bail!("simit project config: {table} timeout_minutes must be 1..=345");
+        }
+        if let Some(toolchain) = &test.toolchain
+            && !crate::render::ci::is_toolchain_name(toolchain)
+        {
+            bail!(
+                "simit project config: {table} toolchain must be a rustup toolchain name such as stable, 1.85.0 or nightly-2026-01-01"
+            );
+        }
+        for (key, value) in &test.env {
+            if key.trim().is_empty() || key.contains(['\n', '\r', ' ', '=']) {
+                bail!(
+                    "simit project config: {table} env keys must be non-empty without whitespace or `=`"
+                );
+            }
+            if value.contains(['\n', '\r']) {
+                bail!("simit project config: {table} env value for `{key}` must be single-line");
+            }
+        }
+    }
+    Ok(())
+}
+
+fn set_native_tests_table(table: &mut Table, tests: &[NativeTest]) {
+    if tests.is_empty() {
+        table.remove("native_tests");
+        return;
+    }
+    let mut array = Array::new();
+    for test in tests {
+        let mut item = InlineTable::default();
+        item.insert("id", Value::from(test.id.as_str()));
+        item.insert("runner", Value::from(test.runner.as_str()));
+        if test.args != default_native_test_args() {
+            item.insert("args", Value::from(test.args.as_str()));
+        }
+        if test.timeout_minutes != default_native_test_timeout_minutes() {
+            item.insert("timeout_minutes", Value::from(test.timeout_minutes as i64));
+        }
+        if let Some(toolchain) = &test.toolchain {
+            item.insert("toolchain", Value::from(toolchain.as_str()));
+        }
+        if !test.env.is_empty() {
+            let mut env = InlineTable::default();
+            for (key, value) in &test.env {
+                env.insert(key.as_str(), Value::from(value.as_str()));
+            }
+            item.insert("env", Value::InlineTable(env));
+        }
+        array.push(Value::InlineTable(item));
+    }
+    table["native_tests"] = Item::Value(Value::Array(array));
 }
 
 fn set_target_smokes_table(table: &mut Table, smokes: &[TargetSmoke]) {
@@ -5230,6 +5485,7 @@ fn set_ci_table(table: &mut Table, ci: &CiConfig) {
     set_required_gates_table(table, "required_gates", &ci.required_gates);
     set_required_gates_table(table, "manual_gates", &ci.manual_gates);
     set_target_smokes_table(table, &ci.target_smokes);
+    set_native_tests_table(table, &ci.native_tests);
     set_string_array(table, "extra_setup", &ci.extra_setup);
     set_string_map(table, "extra_env", &ci.extra_env);
     set_string_map(table, "workflow_templates", &ci.workflow_templates);

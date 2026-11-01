@@ -174,3 +174,107 @@ naming the fields. `WINGET_PAT` is still a classic token with `public_repo`.
 `simit dist winget submit --version X` runs the same script locally (needs
 `bash`, `curl`, `jq`): it downloads the zip for its checksum and submits.
 `--wine`, `--wingetcreate` and `--wingetcreate-url` were removed.
+
+### Multiple files
+
+By default the installer manifest has one `NestedInstallerFiles` entry from
+`binary` and `command`. A zip that holds more than one portable executable
+lists them with `[[winget.files]]`:
+
+```toml
+[winget]
+package_id = "Caniko.Sorrel"
+download_repo = "caniko/sorrel"
+zip_archive = "sorrel-{version}-x86_64-windows.zip"
+
+[[winget.files]]
+path = "sorrel.exe"
+alias = "sorrel"
+
+[[winget.files]]
+path = "sorrelw.exe"
+```
+
+Each entry becomes one item, and `PortableCommandAlias` is written only when
+`alias` is set:
+
+```yaml
+Installers:
+  - Architecture: x64
+    NestedInstallerFiles:
+      - RelativeFilePath: "sorrel.exe"
+        PortableCommandAlias: "sorrel"
+      - RelativeFilePath: "sorrelw.exe"
+```
+
+When `files` is set it replaces `binary` and `command`; when empty, the single
+entry is rendered exactly as before. Paths are relative, with no `..`, drive
+letter or empty segment, and unique; aliases are non-empty, at most 40
+characters (the schema limit), free of path separators and unique ignoring case.
+
+**Schema 1.12 findings.** In `manifest.installer.1.12.0.schema.json`,
+`NestedInstallerFiles` items require only `RelativeFilePath`
+(1-512 characters); `PortableCommandAlias` is optional (string or null,
+1-40 characters), up to 1024 items. A portable zip may therefore contain files
+without an alias. The winget client (`PortableFlow.cpp`) then uses the file's
+own name as the command: a symlink `sorrelw.exe` is placed in the links
+directory, so `sorrelw` is on `PATH`. With an alias that differs from the file
+name, the client hard-links the exe under the alias and links that instead.
+
+## Chocolatey Shortcuts and GUI Shims
+
+A zip that ships a console exe and a GUI launcher needs two things the default
+package does not do: a Start menu entry and a GUI shim for the launcher.
+
+```toml
+[chocolatey]
+gui_exes = ["sorrelw.exe"]
+
+[[chocolatey.shortcuts]]
+name = "Sorrel"
+target = "sorrelw.exe"
+# arguments = "--some-flag"
+# icon = "sorrelw.exe,0"
+```
+
+| Field                   | Meaning                                                                     |
+| ----------------------- | --------------------------------------------------------------------------- |
+| `shortcuts[].name`      | Shortcut name (`<name>.lnk`); a file name, no path separators or `:*?"<>\|` |
+| `shortcuts[].target`    | Path inside the zip, relative to the tools directory                        |
+| `shortcuts[].arguments` | Optional single-line argument string                                        |
+| `shortcuts[].icon`      | Optional path inside the zip, optionally `,<index>` (e.g. `app.exe,0`)      |
+| `gui_exes`              | Executables inside the zip that get a GUI shim                              |
+
+Targets, icons and `gui_exes` are relative paths with no `..`, drive letter or
+empty segment; names are unique case-insensitively. Every value is emitted as a
+PowerShell single-quoted string with `'` doubled, and paths are joined to
+`$toolsDir`, never concatenated into a quoted path.
+
+After `Install-ChocolateyZipPackage`, `chocolateyInstall.ps1` creates an empty
+`<exe>.gui` marker for each `gui_exes` entry and calls
+`Install-ChocolateyShortcut` per shortcut; `chocolateyUninstall.ps1` removes
+the `.lnk` files with `Remove-Item -Force -ErrorAction SilentlyContinue`. With
+neither option set the scripts are unchanged. On 32-bit Windows (when
+`x86` archives are published) the same steps run before the early return.
+
+**Programs folder.** Shortcuts go to
+`[Environment]::GetFolderPath('CommonPrograms')`, the all-users Start menu.
+Chocolatey installs machine-wide, normally from an elevated shell, into
+`C:\ProgramData\chocolatey\lib\<id>\tools`, so an all-users entry matches the
+install scope, and install and uninstall resolve the same folder. The per-user
+`Programs` folder would resolve to the elevated account's profile, which can
+differ from the user who launches the app. The Chocolatey docs for
+`Install-ChocolateyShortcut` do not name a folder; they only say that failures
+(for instance under the SYSTEM account) are warnings, not install failures.
+
+**GUI shim or `.ignore`.** Chocolatey shims every `.exe` in the package. A
+console shim of a GUI exe makes a shell wait until the window closes, so such
+an exe needs either a `.gui` marker (a shim that returns at once) or an
+`.ignore` marker (no shim). simit writes `.gui`: it keeps `sorrelw` available
+from a terminal or Win+R, consistent with how winget links alias-less portable
+files (see [above](#multiple-files)), and shimgen's own detection is documented
+as not always accurate. Match the exe's case exactly; the docs warn that
+`BOB.exe.gui` may not work for `bob.exe`. If a project would rather not expose
+the launcher on `PATH`, drop it from `gui_exes` and ship the `.ignore` marker in
+the zip. The Start menu shortcut targets the real exe in the tools directory,
+not the shim, so it is unaffected by this choice.

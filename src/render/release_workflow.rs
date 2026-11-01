@@ -20,7 +20,7 @@ use crate::config::{
     PrebuildConfig, PypiReleaseConfig, ReleaseNotesSource, ReleaseProvider, ReleasePublishConfig,
     ReleasePublisherEnforcement, ReleasePublisherPolicy, RequiredGate, ResolvedApt, ResolvedAur,
     ResolvedChocolatey, ResolvedCopr, ResolvedHomebrew, ResolvedReleaseTarget, ResolvedScoop,
-    ResolvedWinget, WindowsSigningConfig,
+    ResolvedWinget, WindowsSigningConfig, WingetFile,
 };
 use crate::project::GeneratedFile;
 use crate::render::ci::{forgejo_action_ref, github_action_ref, immutable_action_ref};
@@ -3059,7 +3059,28 @@ fn push_winget_manifests(
             .collect();
         format!("echo 'Dependencies:'; echo '  PackageDependencies:'; printf '%s\\n' {ids}; ")
     };
-    writeln!(w, "{{ hdr installer; f PackageIdentifier {id}; f PackageVersion \"$VERSION\"; echo 'InstallerType: zip'; echo 'NestedInstallerType: portable'; {deps}echo 'Installers:'; echo '- Architecture: x64'; echo '  NestedInstallerFiles:'; printf '%s\\n' \"  - RelativeFilePath: $(yaml {})\" \"    PortableCommandAlias: $(yaml {})\"; printf '%s\\n' \"  InstallerUrl: $(yaml \"$ZIP_URL\")\" \"  InstallerSha256: $sha\"; echo 'ManifestType: installer'; echo 'ManifestVersion: {mv}'; }} > {}", q(&winget.binary), q(&winget.command), file("installer.")).expect("write");
+    // One entry per file; no files means the single binary/command entry. The
+    // alias line is optional per file in the 1.12 schema, so it is omitted unset.
+    let single = [WingetFile {
+        path: winget.binary.clone(),
+        alias: Some(winget.command.clone()),
+    }];
+    let files = if winget.files.is_empty() {
+        &single[..]
+    } else {
+        &winget.files
+    };
+    let nested = files
+        .iter()
+        .map(|file| {
+            let alias = file.alias.as_ref().map_or_else(String::new, |alias| {
+                format!(" \"    PortableCommandAlias: $(yaml {})\"", q(alias))
+            });
+            format!("\"  - RelativeFilePath: $(yaml {})\"{alias}", q(&file.path))
+        })
+        .collect::<Vec<_>>()
+        .join(" ");
+    writeln!(w, "{{ hdr installer; f PackageIdentifier {id}; f PackageVersion \"$VERSION\"; echo 'InstallerType: zip'; echo 'NestedInstallerType: portable'; {deps}echo 'Installers:'; echo '- Architecture: x64'; echo '  NestedInstallerFiles:'; printf '%s\\n' {nested}; printf '%s\\n' \"  InstallerUrl: $(yaml \"$ZIP_URL\")\" \"  InstallerSha256: $sha\"; echo 'ManifestType: installer'; echo 'ManifestVersion: {mv}'; }} > {}", file("installer.")).expect("write");
     // default-locale manifest
     let mut locale = format!(
         "hdr defaultLocale; f PackageIdentifier {id}; f PackageVersion \"$VERSION\"; echo 'PackageLocale: en-US'; f Publisher {}; f PublisherUrl {}; f PackageName {}; f PackageUrl {}; f License {};",
@@ -3381,6 +3402,8 @@ mod tests {
             api_key_secret: "chocolatey_api_key".to_owned(),
             api_key_from_runner: false,
             dependencies: Vec::new(),
+            shortcuts: Vec::new(),
+            gui_exes: Vec::new(),
             nix_tool: "github:caniko/nixpkgs/add-chocolatey-scoop#chocolatey git+https://github.com/caniko/simit.git"
                 .to_owned(),
         }
@@ -3429,6 +3452,7 @@ mod tests {
             binary: "modde.exe".to_owned(),
             command: "modde".to_owned(),
             dependencies: Vec::new(),
+            files: Vec::new(),
         }
     }
 
@@ -4521,6 +4545,7 @@ esac"#,
             binary: "sorrel.exe".to_owned(),
             command: "sorrel".to_owned(),
             dependencies: Vec::new(),
+            files: Vec::new(),
         }
     }
 
@@ -5059,6 +5084,32 @@ cat "$FAKE/code"
         };
         let Some(body) = body_of(&with) else { return };
         assert!(body.contains("NestedInstallerType: portable\\nDependencies:\\n  PackageDependencies:\\n  - PackageIdentifier: \\\"astral-sh.uv\\\"\\n  - PackageIdentifier: \\\"Foo.Bar\\\"\\nInstallers:\\n"), "{body}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn winget_installer_manifest_lists_every_file_and_aliases_only_when_set() {
+        let with = ResolvedWinget {
+            files: vec![
+                WingetFile {
+                    path: "sorrel.exe".to_owned(),
+                    alias: Some("sorrel".to_owned()),
+                },
+                WingetFile {
+                    path: "bin/sorrelw.exe".to_owned(),
+                    alias: None,
+                },
+            ],
+            ..sorrel_winget()
+        };
+        let fake = Fake::new();
+        let Some(out) = fake.run_with(None, &with) else {
+            return;
+        };
+        assert!(out.status.success());
+        let body = fake.log("body.log");
+        assert!(body.contains("Architecture: x64\\n  NestedInstallerFiles:\\n  - RelativeFilePath: \\\"sorrel.exe\\\"\\n    PortableCommandAlias: \\\"sorrel\\\"\\n  - RelativeFilePath: \\\"bin/sorrelw.exe\\\"\\n  InstallerUrl:"), "{body}");
+        assert_eq!(body.matches("PortableCommandAlias").count(), 1, "{body}");
     }
 
     #[cfg(unix)]

@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Added: `[[ci.native_tests]]` renders a `cargo test` job per entry in
+  `native-tests.yaml` on a hosted runner such as `windows-2025`, without Nix:
+  pinned checkout, pinned `dtolnay/rust-toolchain` (toolchain from
+  `rust-toolchain.toml`, else `stable`), `args` (default `--workspace
+--locked`), scoped `env` and a bounded timeout. GitHub Actions only; other
+  backends and Python uv CI reject it.
+- Added: `[[winget.files]]` (`path`, optional `alias`) lists several nested
+  portable executables in the winget installer manifest; `PortableCommandAlias`
+  is written only for files with an alias. Without it the single
+  `binary`/`command` entry is unchanged.
+- Added: `[chocolatey] shortcuts` (`name`, `target`, optional `arguments` and
+  `icon`) creates all-users Start menu shortcuts with `Install-ChocolateyShortcut`
+  after the unzip and removes them in `chocolateyUninstall.ps1`, and
+  `gui_exes` writes `<exe>.gui` markers so Chocolatey builds GUI shims.
 - Added: `[[release.artifacts.extract]]` promotes a member of a release archive
   (`.zip`, `.tar.gz`, `.tgz`) to a standalone release asset before checksums,
   so it is hashed, signed, attested and uploaded like every other asset even

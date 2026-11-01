@@ -526,6 +526,13 @@ pub fn run(command: InitCiCommand) -> Result<()> {
             &cfg.ci.target_smokes,
         )?);
     }
+    if !command.primary_only && !cfg.ci.native_tests.is_empty() {
+        files.push(ci::native_tests_file(
+            &options.push_branches,
+            ci::rust_toolchain_channel(workspace_root).as_deref(),
+            &cfg.ci.native_tests,
+        )?);
+    }
     files.extend(prebuild_files(&cfg, cfg.ci.crow.format)?);
     if !command.primary_only
         && resolved.with_pypi_publish
@@ -1287,6 +1294,13 @@ fn run_nix_only_at(command: InitCiCommand, workspace_root: &Path) -> Result<()> 
             &cfg.ci.target_smokes,
         )?);
     }
+    if !command.primary_only && !cfg.ci.native_tests.is_empty() {
+        files.push(ci::native_tests_file(
+            &cfg.ci.push_branches,
+            ci::rust_toolchain_channel(workspace_root).as_deref(),
+            &cfg.ci.native_tests,
+        )?);
+    }
     files.extend(prebuild_files(&cfg, cfg.ci.crow.format)?);
     if let Some(pages) = &pages {
         files.push(ci::codeberg_pages_file(
@@ -1395,6 +1409,9 @@ fn run_python(command: InitCiCommand) -> Result<()> {
     }
     if !cfg.ci.target_smokes.is_empty() {
         bail!("[[ci.target_smokes]] is not supported for Python uv CI");
+    }
+    if !cfg.ci.native_tests.is_empty() {
+        bail!("[[ci.native_tests]] is not supported for Python uv CI");
     }
     if command.with_homebrew
         || command.with_chocolatey
@@ -2824,6 +2841,7 @@ pub(crate) fn is_ci_managed_workflow_name(name: &std::ffi::OsStr) -> bool {
             | "producer-custody.yaml"
             | "manual-gates.yaml"
             | "target-smokes.yaml"
+            | "native-tests.yaml"
             | "prebuild.yaml"
             | "prebuild.yml"
             | "prebuild.jsonnet"
