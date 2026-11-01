@@ -3435,10 +3435,17 @@ pub fn native_tests_file(
             .unwrap_or("stable");
         workflow.push_str(&format!("\n  native-test-{id}:\n    runs-on: "));
         workflow.push_str(&runs_on(&runner));
-        // Checkout and toolchain installation get 15 minutes on top of `cargo test`.
+        // Checkout and toolchain installation get 15 minutes on top of `cargo test`,
+        // and the setup step its own limit.
+        let overhead = 15
+            + if test.setup.is_some() {
+                crate::config::NATIVE_TEST_SETUP_MINUTES
+            } else {
+                0
+            };
         workflow.push_str(&format!(
             "\n    timeout-minutes: {}\n",
-            test.timeout_minutes + 15
+            test.timeout_minutes + overhead
         ));
         push_job_github_read_permissions(&mut workflow, platform);
         workflow.push_str("    steps:\n");
@@ -3448,6 +3455,21 @@ pub fn native_tests_file(
         workflow.push_str(&format!(
             "\n        with:\n          toolchain: {toolchain}\n\n"
         ));
+        if let Some(setup) = &test.setup {
+            workflow.push_str(&format!(
+                "      - name: Setup {}\n        shell: bash\n        timeout-minutes: {}\n        run: |\n",
+                test.id,
+                crate::config::NATIVE_TEST_SETUP_MINUTES
+            ));
+            for line in setup.trim().lines() {
+                if line.trim().is_empty() {
+                    workflow.push('\n');
+                } else {
+                    workflow.push_str(&format!("          {}\n", line.trim_end()));
+                }
+            }
+            workflow.push('\n');
+        }
         workflow.push_str(&format!(
             "      - name: Native tests {}\n        shell: bash\n        timeout-minutes: {}\n",
             test.id, test.timeout_minutes

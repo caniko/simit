@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Added: `setup` on `[[ci.native_tests]]` runs bash commands once before
+  `cargo test`, as its own `Setup <id>` step (15 minute limit, added to the job
+  limit), e.g. to fetch a pinned driver and export its path through
+  `$GITHUB_ENV`.
+
 - Added: `[release.windows_signing] provider = "signpath"` signs Windows release
   archives with free SignPath Foundation Authenticode certificates (GitHub
   Actions only; Forgejo, GitLab and Crow reject it). The release job checks the
