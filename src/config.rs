@@ -293,6 +293,22 @@ pub struct WingetConfig {
     /// Written as `Dependencies.PackageDependencies` in the installer manifest.
     #[serde(default)]
     pub dependencies: Vec<String>,
+    /// Nested installer files of the zip. When non-empty they replace the single
+    /// `binary`/`command` entry, one `NestedInstallerFiles` item per file.
+    #[serde(default)]
+    pub files: Vec<WingetFile>,
+}
+
+/// One `[[winget.files]]` entry: a portable executable inside the zip.
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct WingetFile {
+    /// Path of the executable inside the zip (`RelativeFilePath`).
+    pub path: String,
+    /// `PortableCommandAlias`; omitted when unset (winget then links the file
+    /// name).
+    #[serde(default)]
+    pub alias: Option<String>,
 }
 
 /// winget-pkgs `ShortDescription` schema bounds.
@@ -500,6 +516,43 @@ pub struct TargetSmoke {
     pub artifacts: Option<RequiredGateArtifacts>,
 }
 
+/// `[[ci.native_tests]]`: run `cargo test` natively (no Nix) on a hosted
+/// runner such as `windows-2025`. Renders one job per entry in
+/// `native-tests.yaml` (GitHub Actions only).
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct NativeTest {
+    pub id: String,
+    /// Runner label the tests run on.
+    pub runner: String,
+    /// Arguments after `cargo test`.
+    #[serde(default = "default_native_test_args")]
+    pub args: String,
+    #[serde(default)]
+    pub env: BTreeMap<String, String>,
+    #[serde(default = "default_native_test_timeout_minutes")]
+    pub timeout_minutes: u64,
+    /// Rust toolchain; defaults to the `rust-toolchain.toml` channel, else `stable`.
+    #[serde(default)]
+    pub toolchain: Option<String>,
+    /// Shell commands (bash) run once before `cargo test`, after the toolchain
+    /// install, e.g. to fetch a pinned driver. They can export variables to the
+    /// test step through `$GITHUB_ENV`.
+    #[serde(default)]
+    pub setup: Option<String>,
+}
+
+/// Minutes the `setup` step may take; the job limit grows by the same amount.
+pub(crate) const NATIVE_TEST_SETUP_MINUTES: u64 = 15;
+
+fn default_native_test_args() -> String {
+    "--workspace --locked".to_owned()
+}
+
+fn default_native_test_timeout_minutes() -> u64 {
+    60
+}
+
 fn default_gate_artifact_retention_days() -> u64 {
     7
 }
@@ -702,6 +755,9 @@ pub struct CiConfig {
     /// Nix-cross-built artifacts smoke-tested on real target-OS runners.
     #[serde(default)]
     pub target_smokes: Vec<TargetSmoke>,
+    /// Native `cargo test` runs on hosted runners (e.g. Windows).
+    #[serde(default)]
+    pub native_tests: Vec<NativeTest>,
     /// Whether generated Rust checks should pass `--all-features`.
     #[serde(default)]
     pub all_features: Option<bool>,
@@ -791,6 +847,11 @@ impl CiConfig {
             && (provider != CiProvider::Actions || platform != Platform::Github)
         {
             bail!("[[ci.target_smokes]] requires the effective GitHub Actions backend");
+        }
+        if !self.native_tests.is_empty()
+            && (provider != CiProvider::Actions || platform != Platform::Github)
+        {
+            bail!("[[ci.native_tests]] requires the effective GitHub Actions backend");
         }
         if self.separate_events && !self.push_branches.is_empty() {
             bail!(
@@ -1564,48 +1625,206 @@ fn default_matrix_room_secret() -> String {
     "MATRIX_ROOM".to_owned()
 }
 
-/// `[release.windows_signing]` — Authenticode-sign and package Windows `.exe`s.
-#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
-pub struct WindowsSigningConfig {
-    /// Directory holding the built `.exe`s, relative to the workspace.
-    #[serde(default = "default_windows_dir")]
-    pub dir: String,
-    /// Binary basenames (without `.exe`).
-    pub binaries: Vec<String>,
-    /// osslsigncode `-n` program name.
-    pub sign_name: String,
-    /// osslsigncode `-i` info URL.
-    pub sign_url: String,
-    /// RFC3161 timestamp URL.
-    #[serde(default = "default_timestamp_url")]
-    pub timestamp_url: String,
-    /// tar.gz archive name with `{version}` placeholder.
-    pub tar_archive: String,
-    /// zip archive name with `{version}` placeholder.
-    pub zip_archive: String,
-    #[serde(default = "default_windows_pfx_secret")]
-    pub pfx_secret: String,
-    #[serde(default = "default_windows_pass_secret")]
-    pub pass_secret: String,
-    #[serde(default = "default_windows_subject_secret")]
-    pub subject_secret: String,
+/// How `[release.windows_signing]` produces Authenticode signatures.
+#[derive(Debug, Clone, Copy, Default, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum WindowsSigningProvider {
+    /// Sign loose `.exe`s with osslsigncode and a PFX secret, then package them.
+    #[default]
+    Osslsigncode,
+    /// Submit finished release archives to SignPath (GitHub Actions only).
+    Signpath,
 }
 
-fn default_windows_dir() -> String {
-    "release/windows-x86_64".to_owned()
+/// `[release.windows_signing]` — Authenticode-sign Windows `.exe`s.
+///
+/// `provider = "osslsigncode"` (default) uses `dir`, `binaries`, `sign_*`,
+/// `timestamp_url`, the archive names and the PFX secrets. `provider =
+/// "signpath"` uses the SignPath fields instead; mixing is rejected by
+/// [`Self::validate`].
+#[derive(Debug, Clone, Default, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct WindowsSigningConfig {
+    #[serde(default)]
+    pub provider: WindowsSigningProvider,
+    /// osslsigncode: directory holding the built `.exe`s, relative to the workspace.
+    pub dir: Option<String>,
+    /// osslsigncode: binary basenames (without `.exe`).
+    #[serde(default)]
+    pub binaries: Vec<String>,
+    /// osslsigncode: `-n` program name.
+    pub sign_name: Option<String>,
+    /// osslsigncode: `-i` info URL.
+    pub sign_url: Option<String>,
+    /// osslsigncode: RFC3161 timestamp URL.
+    pub timestamp_url: Option<String>,
+    /// osslsigncode: tar.gz archive name with `{version}` placeholder.
+    pub tar_archive: Option<String>,
+    /// osslsigncode: zip archive name with `{version}` placeholder.
+    pub zip_archive: Option<String>,
+    pub pfx_secret: Option<String>,
+    pub pass_secret: Option<String>,
+    pub subject_secret: Option<String>,
+    /// SignPath: organization ID.
+    pub organization_id: Option<String>,
+    /// SignPath: project slug.
+    pub project_slug: Option<String>,
+    /// SignPath: signing policy slug, e.g. `release-signing`.
+    pub signing_policy_slug: Option<String>,
+    /// SignPath: artifact configuration slug; the project default when unset.
+    pub artifact_configuration_slug: Option<String>,
+    /// SignPath: Actions secret holding the API token (default `SIGNPATH_API_TOKEN`).
+    pub api_token_secret: Option<String>,
+    /// SignPath: release archives (`.zip`, `{version}` allowed) to submit.
+    #[serde(default)]
+    pub archives: Vec<String>,
+    /// SignPath: PE files inside each archive that must end up signed.
+    #[serde(default)]
+    pub pe_files: Vec<String>,
+    /// SignPath: seconds to wait per request, including manual approval
+    /// (default 3600, at most 21600).
+    pub wait_timeout_seconds: Option<u32>,
 }
-fn default_timestamp_url() -> String {
-    "http://timestamp.digicert.com".to_owned()
-}
-fn default_windows_pfx_secret() -> String {
-    "WINDOWS_SIGNING_PFX".to_owned()
-}
-fn default_windows_pass_secret() -> String {
-    "WINDOWS_SIGNING_PASS".to_owned()
-}
-fn default_windows_subject_secret() -> String {
-    "WINDOWS_SIGNING_SUBJECT".to_owned()
+
+impl WindowsSigningConfig {
+    pub fn dir(&self) -> &str {
+        self.dir.as_deref().unwrap_or("release/windows-x86_64")
+    }
+    pub fn timestamp_url(&self) -> &str {
+        self.timestamp_url
+            .as_deref()
+            .unwrap_or("http://timestamp.digicert.com")
+    }
+    pub fn pfx_secret(&self) -> &str {
+        self.pfx_secret.as_deref().unwrap_or("WINDOWS_SIGNING_PFX")
+    }
+    pub fn pass_secret(&self) -> &str {
+        self.pass_secret
+            .as_deref()
+            .unwrap_or("WINDOWS_SIGNING_PASS")
+    }
+    pub fn subject_secret(&self) -> &str {
+        self.subject_secret
+            .as_deref()
+            .unwrap_or("WINDOWS_SIGNING_SUBJECT")
+    }
+    pub fn api_token_secret(&self) -> &str {
+        self.api_token_secret
+            .as_deref()
+            .unwrap_or("SIGNPATH_API_TOKEN")
+    }
+    pub fn wait_timeout_seconds(&self) -> u32 {
+        self.wait_timeout_seconds.unwrap_or(3600)
+    }
+    pub fn is_signpath(&self) -> bool {
+        self.provider == WindowsSigningProvider::Signpath
+    }
+
+    /// Check that exactly the fields of the selected provider are set.
+    pub fn validate(&self) -> Result<()> {
+        const P: &str = "simit project config: [release.windows_signing]";
+        let ossl_set = [
+            ("dir", self.dir.is_some()),
+            ("binaries", !self.binaries.is_empty()),
+            ("sign_name", self.sign_name.is_some()),
+            ("sign_url", self.sign_url.is_some()),
+            ("timestamp_url", self.timestamp_url.is_some()),
+            ("tar_archive", self.tar_archive.is_some()),
+            ("zip_archive", self.zip_archive.is_some()),
+            ("pfx_secret", self.pfx_secret.is_some()),
+            ("pass_secret", self.pass_secret.is_some()),
+            ("subject_secret", self.subject_secret.is_some()),
+        ];
+        let signpath_set = [
+            ("organization_id", self.organization_id.is_some()),
+            ("project_slug", self.project_slug.is_some()),
+            ("signing_policy_slug", self.signing_policy_slug.is_some()),
+            (
+                "artifact_configuration_slug",
+                self.artifact_configuration_slug.is_some(),
+            ),
+            ("api_token_secret", self.api_token_secret.is_some()),
+            ("archives", !self.archives.is_empty()),
+            ("pe_files", !self.pe_files.is_empty()),
+            ("wait_timeout_seconds", self.wait_timeout_seconds.is_some()),
+        ];
+        let (foreign, provider, other) = if self.is_signpath() {
+            (&ossl_set[..], "signpath", "osslsigncode")
+        } else {
+            (&signpath_set[..], "osslsigncode", "signpath")
+        };
+        if let Some((name, _)) = foreign.iter().find(|(_, set)| *set) {
+            bail!(
+                "{P}.{name} belongs to provider = \"{other}\" and cannot be used with provider = \"{provider}\""
+            );
+        }
+        if !self.is_signpath() {
+            for (name, value) in [
+                ("sign_name", &self.sign_name),
+                ("sign_url", &self.sign_url),
+                ("tar_archive", &self.tar_archive),
+                ("zip_archive", &self.zip_archive),
+            ] {
+                if value.as_deref().is_none_or(|v| v.trim().is_empty()) {
+                    bail!("{P}.{name} is required for provider = \"osslsigncode\"");
+                }
+            }
+            if self.binaries.is_empty() {
+                bail!("{P}.binaries is required for provider = \"osslsigncode\"");
+            }
+            return Ok(());
+        }
+        let ident = |name: &str, value: &Option<String>, required: bool| -> Result<()> {
+            match value {
+                None if required => bail!("{P}.{name} is required for provider = \"signpath\""),
+                Some(v)
+                    if v.is_empty()
+                        || !v
+                            .chars()
+                            .all(|c| c.is_ascii_alphanumeric() || "-_.".contains(c)) =>
+                {
+                    bail!(
+                        "{P}.{name} {v:?} must be non-empty ASCII letters, digits, '-', '_' or '.'"
+                    )
+                }
+                _ => Ok(()),
+            }
+        };
+        ident("organization_id", &self.organization_id, true)?;
+        ident("project_slug", &self.project_slug, true)?;
+        ident("signing_policy_slug", &self.signing_policy_slug, true)?;
+        ident(
+            "artifact_configuration_slug",
+            &self.artifact_configuration_slug,
+            false,
+        )?;
+        if let Some(secret) = &self.api_token_secret {
+            validate_github_actions_secret_identifier(&format!("{P}.api_token_secret"), secret)?;
+        }
+        if self.archives.is_empty() || self.pe_files.is_empty() {
+            bail!(
+                "{P}.archives and .pe_files must each list at least one entry for provider = \"signpath\""
+            );
+        }
+        for archive in &self.archives {
+            validate_extract_text("[release.windows_signing].archives", archive)?;
+            if archive.contains('/') || !archive.ends_with(".zip") {
+                bail!("{P}.archives {archive:?} must be a bare file name ending in .zip");
+            }
+        }
+        for pe in &self.pe_files {
+            validate_extract_text("[release.windows_signing].pe_files", pe)?;
+            if pe.starts_with('/') || pe.split('/').any(|part| part == "..") || pe.contains('{') {
+                bail!(
+                    "{P}.pe_files {pe:?} must be a relative path inside the archive without `..` or placeholders"
+                );
+            }
+        }
+        if !(60..=21600).contains(&self.wait_timeout_seconds()) {
+            bail!("{P}.wait_timeout_seconds must be between 60 and 21600");
+        }
+        Ok(())
+    }
 }
 
 /// `[release.artifacts]` — release workflow build + signing configuration.
@@ -2108,6 +2327,30 @@ pub struct ChocolateyConfig {
     /// Chocolatey packages this package depends on (nuspec `<dependencies>`).
     #[serde(default)]
     pub dependencies: Vec<ChocolateyDependency>,
+
+    /// Start menu shortcuts created after the unzip and removed on uninstall.
+    #[serde(default)]
+    pub shortcuts: Vec<ChocolateyShortcut>,
+
+    /// Executables inside the zip that get a GUI shim (an empty `<exe>.gui`
+    /// marker), so launching them from a shell does not wait for the window.
+    #[serde(default)]
+    pub gui_exes: Vec<String>,
+}
+
+/// One Start menu shortcut in `chocolateyInstall.ps1`.
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct ChocolateyShortcut {
+    /// Shortcut name, without `.lnk` or any path separator.
+    pub name: String,
+    /// Path of the target inside the zip, relative to the tools directory.
+    pub target: String,
+    #[serde(default)]
+    pub arguments: Option<String>,
+    /// Icon path inside the zip, optionally followed by `,<index>`.
+    #[serde(default)]
+    pub icon: Option<String>,
 }
 
 /// One nuspec `<dependency>`: package id and optional version (range).
@@ -2652,6 +2895,8 @@ pub struct ResolvedChocolatey {
     pub api_key_secret: String,
     pub api_key_from_runner: bool,
     pub dependencies: Vec<ChocolateyDependency>,
+    pub shortcuts: Vec<ChocolateyShortcut>,
+    pub gui_exes: Vec<String>,
 }
 
 /// `[winget]` with Cargo-metadata fallbacks applied, for the generated
@@ -2671,6 +2916,8 @@ pub struct ResolvedWinget {
     pub binary: String,
     pub command: String,
     pub dependencies: Vec<String>,
+    /// Empty means the single `binary`/`command` entry.
+    pub files: Vec<WingetFile>,
 }
 
 #[derive(Debug, Clone, Copy, Default)]
@@ -2970,6 +3217,9 @@ impl ProjectConfig {
             )?;
         }
         self.release.artifacts.validate_extract()?;
+        if let Some(windows) = &self.release.windows_signing {
+            windows.validate()?;
+        }
         if let Some(netrc_secret) = &self.release.artifacts.netrc_secret {
             validate_github_actions_secret_identifier(
                 "simit project config: [release.artifacts].netrc_secret",
@@ -3143,6 +3393,7 @@ impl ProjectConfig {
         }
         validate_required_gates(&self.ci)?;
         validate_target_smokes(&self.ci)?;
+        validate_native_tests(&self.ci)?;
         validate_local_gate_steps(&self.ci)?;
         if self
             .ci
@@ -3560,6 +3811,7 @@ impl ProjectConfig {
                 )?;
             }
         }
+        validate_chocolatey_shortcuts(&chocolatey.shortcuts, &chocolatey.gui_exes)?;
 
         Ok(())
     }
@@ -3711,7 +3963,9 @@ impl ProjectConfig {
                 .unwrap_or_else(|| format!("{}.exe", package.name)),
             command: cfg.command.clone().unwrap_or_else(|| package.name.clone()),
             dependencies: cfg.dependencies.clone(),
+            files: cfg.files.clone(),
         };
+        validate_winget_files(&resolved.files)?;
         for id in &resolved.dependencies {
             validate_dependency_id("simit project config: [winget].dependencies", id)?;
         }
@@ -3892,6 +4146,12 @@ impl ProjectConfig {
             api_key_from_runner: cfg.is_some_and(|chocolatey| chocolatey.api_key_from_runner),
             dependencies: cfg
                 .map(|chocolatey| chocolatey.dependencies.clone())
+                .unwrap_or_default(),
+            shortcuts: cfg
+                .map(|chocolatey| chocolatey.shortcuts.clone())
+                .unwrap_or_default(),
+            gui_exes: cfg
+                .map(|chocolatey| chocolatey.gui_exes.clone())
                 .unwrap_or_default(),
         })
     }
@@ -4567,6 +4827,91 @@ fn validate_dependency_id(name: &str, id: &str) -> Result<()> {
     Ok(())
 }
 
+/// A path inside an extracted archive: relative, no `..`, drive letter or
+/// empty segment. Both separators count, because the consumer is Windows.
+fn validate_archive_path(name: &str, path: &str) -> Result<()> {
+    if path.is_empty()
+        || path.contains(|c: char| c.is_control() || c == ':')
+        || path.starts_with(['/', '\\'])
+        || path
+            .split(['/', '\\'])
+            .any(|part| matches!(part, "" | "." | ".."))
+    {
+        bail!("{name} must be a relative path without `..`, `:` or empty segments (got {path:?})");
+    }
+    Ok(())
+}
+
+fn validate_winget_files(files: &[WingetFile]) -> Result<()> {
+    let mut paths = std::collections::BTreeSet::new();
+    let mut aliases = std::collections::BTreeSet::new();
+    for file in files {
+        validate_archive_path("simit project config: [[winget.files]] path", &file.path)?;
+        if !paths.insert(file.path.as_str()) {
+            bail!(
+                "simit project config: [[winget.files]] path {:?} is listed twice",
+                file.path
+            );
+        }
+        let Some(alias) = &file.alias else { continue };
+        // winget's PortableCommandAlias is 1-40 characters and must stay in the link directory.
+        if alias.is_empty()
+            || alias.chars().count() > 40
+            || alias.contains(|c: char| c.is_control() || matches!(c, '/' | '\\' | ':'))
+        {
+            bail!(
+                "simit project config: [[winget.files]] alias must be 1-40 characters without path separators (got {alias:?})"
+            );
+        }
+        if !aliases.insert(alias.to_ascii_lowercase()) {
+            bail!("simit project config: [[winget.files]] alias {alias:?} is not unique");
+        }
+    }
+    Ok(())
+}
+
+fn validate_chocolatey_shortcuts(
+    shortcuts: &[ChocolateyShortcut],
+    gui_exes: &[String],
+) -> Result<()> {
+    const WHAT: &str = "simit project config: [chocolatey]";
+    let mut names = std::collections::BTreeSet::new();
+    for shortcut in shortcuts {
+        let name = &shortcut.name;
+        if name.trim().is_empty()
+            || name.trim() != name
+            || name.ends_with('.')
+            || name.contains(|c: char| c.is_control() || "/\\:*?\"<>|".contains(c))
+        {
+            bail!(
+                "{WHAT}.shortcuts name must be a file name without path separators or `:*?\"<>|` (got {name:?})"
+            );
+        }
+        if !names.insert(name.to_lowercase()) {
+            bail!("{WHAT}.shortcuts name {name:?} is not unique");
+        }
+        validate_archive_path(&format!("{WHAT}.shortcuts target"), &shortcut.target)?;
+        if let Some(icon) = &shortcut.icon {
+            validate_archive_path(&format!("{WHAT}.shortcuts icon"), icon)?;
+        }
+        if shortcut
+            .arguments
+            .as_deref()
+            .is_some_and(|args| args.contains(|c: char| c.is_control()))
+        {
+            bail!("{WHAT}.shortcuts arguments must be a single line");
+        }
+    }
+    let mut exes = std::collections::BTreeSet::new();
+    for exe in gui_exes {
+        validate_archive_path(&format!("{WHAT}.gui_exes"), exe)?;
+        if !exe.to_ascii_lowercase().ends_with(".exe") || !exes.insert(exe.to_ascii_lowercase()) {
+            bail!("{WHAT}.gui_exes entries must be unique paths ending in .exe (got {exe:?})");
+        }
+    }
+    Ok(())
+}
+
 fn validate_nonempty_string(name: &str, value: &str) -> Result<()> {
     if value.trim().is_empty() {
         bail!("{name} must not be empty");
@@ -4791,6 +5136,102 @@ fn validate_target_smokes(ci: &CiConfig) -> Result<()> {
         }
     }
     Ok(())
+}
+
+fn validate_native_tests(ci: &CiConfig) -> Result<()> {
+    let mut jobs = std::collections::BTreeSet::new();
+    for test in &ci.native_tests {
+        let id = test.id.trim();
+        let table = format!("[[ci.native_tests]] `{id}`");
+        if id.is_empty()
+            || !id
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+        {
+            bail!("simit project config: [[ci.native_tests]] id `{id}` must match [a-zA-Z0-9_-]+");
+        }
+        let sanitized = crate::render::ci::sanitize_gate_id(id);
+        if !jobs.insert(sanitized.clone()) {
+            bail!(
+                "simit project config: [[ci.native_tests]] id `{id}` is a duplicate (ids collide after sanitization to `{sanitized}`)"
+            );
+        }
+        validate_runner_label(&test.runner)
+            .map_err(|err| anyhow!("simit project config: {table} runner: {err}"))?;
+        if test.args.contains(['\n', '\r']) {
+            bail!("simit project config: {table} args must be a single line");
+        }
+        // The job adds 15 minutes of checkout and toolchain overhead (plus the
+        // setup step's own limit) to this limit; GitHub caps a job at 360.
+        let max_minutes = 345
+            - if test.setup.is_some() {
+                NATIVE_TEST_SETUP_MINUTES
+            } else {
+                0
+            };
+        if test.timeout_minutes == 0 || test.timeout_minutes > max_minutes {
+            bail!("simit project config: {table} timeout_minutes must be 1..={max_minutes}");
+        }
+        if let Some(setup) = &test.setup
+            && (setup.trim().is_empty() || setup.contains('\r'))
+        {
+            bail!(
+                "simit project config: {table} setup must be non-empty shell commands without carriage returns"
+            );
+        }
+        if let Some(toolchain) = &test.toolchain
+            && !crate::render::ci::is_toolchain_name(toolchain)
+        {
+            bail!(
+                "simit project config: {table} toolchain must be a rustup toolchain name such as stable, 1.85.0 or nightly-2026-01-01"
+            );
+        }
+        for (key, value) in &test.env {
+            if key.trim().is_empty() || key.contains(['\n', '\r', ' ', '=']) {
+                bail!(
+                    "simit project config: {table} env keys must be non-empty without whitespace or `=`"
+                );
+            }
+            if value.contains(['\n', '\r']) {
+                bail!("simit project config: {table} env value for `{key}` must be single-line");
+            }
+        }
+    }
+    Ok(())
+}
+
+fn set_native_tests_table(table: &mut Table, tests: &[NativeTest]) {
+    if tests.is_empty() {
+        table.remove("native_tests");
+        return;
+    }
+    let mut array = Array::new();
+    for test in tests {
+        let mut item = InlineTable::default();
+        item.insert("id", Value::from(test.id.as_str()));
+        item.insert("runner", Value::from(test.runner.as_str()));
+        if test.args != default_native_test_args() {
+            item.insert("args", Value::from(test.args.as_str()));
+        }
+        if test.timeout_minutes != default_native_test_timeout_minutes() {
+            item.insert("timeout_minutes", Value::from(test.timeout_minutes as i64));
+        }
+        if let Some(toolchain) = &test.toolchain {
+            item.insert("toolchain", Value::from(toolchain.as_str()));
+        }
+        if let Some(setup) = &test.setup {
+            item.insert("setup", Value::from(setup.as_str()));
+        }
+        if !test.env.is_empty() {
+            let mut env = InlineTable::default();
+            for (key, value) in &test.env {
+                env.insert(key.as_str(), Value::from(value.as_str()));
+            }
+            item.insert("env", Value::InlineTable(env));
+        }
+        array.push(Value::InlineTable(item));
+    }
+    table["native_tests"] = Item::Value(Value::Array(array));
 }
 
 fn set_target_smokes_table(table: &mut Table, smokes: &[TargetSmoke]) {
@@ -5230,6 +5671,7 @@ fn set_ci_table(table: &mut Table, ci: &CiConfig) {
     set_required_gates_table(table, "required_gates", &ci.required_gates);
     set_required_gates_table(table, "manual_gates", &ci.manual_gates);
     set_target_smokes_table(table, &ci.target_smokes);
+    set_native_tests_table(table, &ci.native_tests);
     set_string_array(table, "extra_setup", &ci.extra_setup);
     set_string_map(table, "extra_env", &ci.extra_env);
     set_string_map(table, "workflow_templates", &ci.workflow_templates);
@@ -5878,5 +6320,77 @@ asset = "sorrel-{version}-x86_64-windows.exe"
             );
         }
         check(vec![ok()]).unwrap();
+    }
+}
+
+#[cfg(test)]
+mod windows_signing_tests {
+    use super::*;
+
+    fn parse(toml: &str) -> Result<WindowsSigningConfig> {
+        let config: WindowsSigningConfig = toml_edit::de::from_str(toml)?;
+        config.validate()?;
+        Ok(config)
+    }
+
+    const SIGNPATH: &str = "provider='signpath'\norganization_id='0000-1'\nproject_slug='sorrel'\nsigning_policy_slug='release-signing'\narchives=['sorrel-{version}-x86_64-windows.zip']\npe_files=['sorrel.exe','sorrelw.exe']\n";
+    const OSSL: &str = "binaries=['a']\nsign_name='a'\nsign_url='https://a'\ntar_archive='a-{version}.tar.gz'\nzip_archive='a-{version}.zip'\n";
+
+    #[test]
+    fn accepts_both_providers_and_defaults_to_osslsigncode() {
+        let ossl = parse(OSSL).unwrap();
+        assert_eq!(ossl.provider, WindowsSigningProvider::Osslsigncode);
+        assert_eq!(ossl.pfx_secret(), "WINDOWS_SIGNING_PFX");
+        assert_eq!(ossl.dir(), "release/windows-x86_64");
+        let signpath = parse(SIGNPATH).unwrap();
+        assert!(signpath.is_signpath());
+        assert_eq!(signpath.api_token_secret(), "SIGNPATH_API_TOKEN");
+        assert_eq!(signpath.wait_timeout_seconds(), 3600);
+    }
+
+    #[test]
+    fn rejects_mixed_missing_and_unsafe_fields() {
+        let cases = [
+            (format!("{SIGNPATH}sign_name='x'\n"), "belongs to provider"),
+            (format!("{SIGNPATH}pfx_secret='X'\n"), "belongs to provider"),
+            (format!("{OSSL}project_slug='x'\n"), "belongs to provider"),
+            (format!("{OSSL}archives=['a.zip']\n"), "belongs to provider"),
+            ("binaries=['a']\n".to_owned(), "sign_name is required"),
+            (
+                "provider='signpath'\n".to_owned(),
+                "organization_id is required",
+            ),
+            (
+                SIGNPATH.replace("pe_files=['sorrel.exe','sorrelw.exe']", "pe_files=[]"),
+                "at least one entry",
+            ),
+            (
+                SIGNPATH.replace("sorrel-{version}-x86_64-windows.zip", "a.tar.gz"),
+                "ending in .zip",
+            ),
+            (
+                SIGNPATH.replace("sorrel-{version}-x86_64-windows.zip", "x/a.zip"),
+                "bare file name",
+            ),
+            (SIGNPATH.replace("sorrel.exe'", "../x.exe'"), "without `..`"),
+            (SIGNPATH.replace("sorrel.exe'", "a$(b).exe'"), "pe_files"),
+            (
+                SIGNPATH.replace("release-signing", "a b"),
+                "signing_policy_slug",
+            ),
+            (
+                format!("{SIGNPATH}api_token_secret='GITHUB_X'\n"),
+                "GITHUB_",
+            ),
+            (
+                format!("{SIGNPATH}wait_timeout_seconds=5\n"),
+                "between 60 and 21600",
+            ),
+        ];
+        for (toml, expected) in cases {
+            let err = parse(&toml).expect_err(&toml).to_string();
+            assert!(err.contains(expected), "{toml}: {err}");
+        }
+        assert!(parse(&format!("{SIGNPATH}typo=1\n")).is_err());
     }
 }

@@ -1227,3 +1227,162 @@ arm64 = false
 
     assert!(format!("{err:#}").contains("all architectures disabled"));
 }
+
+const WINGET_BASE: &str = "[winget]\npackage_id = \"Caniko.Sorrel\"\ndownload_repo = \"caniko/sorrel\"\nzip_archive = \"sorrel-{version}-x86_64-windows.zip\"\n";
+
+fn resolve_winget_files(files: &str) -> anyhow::Result<simit::config::ResolvedWinget> {
+    load_toml(&format!("{WINGET_BASE}{files}"))?.resolve_winget(&package())
+}
+
+#[test]
+fn winget_files_accept_optional_aliases_and_default_to_empty() {
+    assert!(resolve_winget_files("").unwrap().files.is_empty());
+    let resolved = resolve_winget_files(
+        "[[winget.files]]\npath = \"sorrel.exe\"\nalias = \"sorrel\"\n[[winget.files]]\npath = \"bin/sorrelw.exe\"\n",
+    )
+    .unwrap();
+    assert_eq!(resolved.files.len(), 2);
+    assert_eq!(resolved.files[0].alias.as_deref(), Some("sorrel"));
+    assert_eq!(resolved.files[1].alias, None);
+}
+
+#[test]
+fn winget_files_reject_unsafe_paths_and_bad_aliases() {
+    let file = |body: &str| format!("[[winget.files]]\n{body}\n");
+    let cases = [
+        (file("path = \"../x.exe\""), "relative path"),
+        (file("path = \"a/../x.exe\""), "relative path"),
+        (file("path = \"a\\\\..\\\\x.exe\""), "relative path"),
+        (file("path = \"/x.exe\""), "relative path"),
+        (file("path = \"C:\\\\x.exe\""), "relative path"),
+        (file("path = \"\""), "relative path"),
+        (file("path = \"x.exe\"\nalias = \"\""), "alias"),
+        (file("path = \"x.exe\"\nalias = \"a/b\""), "alias"),
+        (
+            file(&format!("path = \"x.exe\"\nalias = \"{}\"", "a".repeat(41))),
+            "alias",
+        ),
+        (
+            format!(
+                "{}{}",
+                file("path = \"a.exe\"\nalias = \"x\""),
+                file("path = \"b.exe\"\nalias = \"X\"")
+            ),
+            "not unique",
+        ),
+        (
+            format!("{}{}", file("path = \"a.exe\""), file("path = \"a.exe\"")),
+            "twice",
+        ),
+    ];
+    for (files, needle) in cases {
+        let err = resolve_winget_files(&files).unwrap_err();
+        assert!(format!("{err:#}").contains(needle), "{needle}: {err:#}");
+    }
+}
+
+const CHOCOLATEY_BASE: &str = "[chocolatey]\ndownload_repo = \"caniko/sorrel\"\n";
+
+fn chocolatey_with(extra: &str) -> anyhow::Result<()> {
+    load_toml(&format!("{CHOCOLATEY_BASE}{extra}"))?.validate_chocolatey()
+}
+
+#[test]
+fn chocolatey_shortcuts_and_gui_exes_resolve() {
+    let cfg = load_toml(&format!(
+        "{CHOCOLATEY_BASE}gui_exes = [\"sorrelw.exe\"]\n[[chocolatey.shortcuts]]\nname = \"Sorrel\"\ntarget = \"sorrelw.exe\"\narguments = \"--gui\"\nicon = \"sorrelw.exe,0\"\n"
+    ))
+    .unwrap();
+    let resolved = cfg
+        .resolve_chocolatey(ChocolateyOverrides::default(), &package())
+        .unwrap();
+    assert_eq!(resolved.gui_exes, ["sorrelw.exe"]);
+    assert_eq!(resolved.shortcuts[0].name, "Sorrel");
+    assert_eq!(resolved.shortcuts[0].icon.as_deref(), Some("sorrelw.exe,0"));
+    let plain = load_toml(CHOCOLATEY_BASE)
+        .unwrap()
+        .resolve_chocolatey(ChocolateyOverrides::default(), &package())
+        .unwrap();
+    assert!(plain.shortcuts.is_empty() && plain.gui_exes.is_empty());
+}
+
+#[test]
+fn chocolatey_shortcuts_and_gui_exes_reject_unsafe_values() {
+    let shortcut = |body: &str| format!("[[chocolatey.shortcuts]]\ntarget = \"a.exe\"\n{body}\n");
+    let cases = [
+        (shortcut("name = \"\""), "name"),
+        (shortcut("name = \"a/b\""), "name"),
+        (shortcut("name = \"a\\\\b\""), "name"),
+        (shortcut("name = \"a:b\""), "name"),
+        (shortcut("name = \" a\""), "name"),
+        (
+            format!("{}{}", shortcut("name = \"A\""), shortcut("name = \"a\"")),
+            "not unique",
+        ),
+        (
+            "[[chocolatey.shortcuts]]\nname = \"A\"\ntarget = \"..\\\\a.exe\"\n".to_owned(),
+            "target",
+        ),
+        (
+            "[[chocolatey.shortcuts]]\nname = \"A\"\ntarget = \"C:\\\\a.exe\"\n".to_owned(),
+            "target",
+        ),
+        (shortcut("name = \"A\"\nicon = \"/etc/x\""), "icon"),
+        (shortcut("name = \"A\"\narguments = \"a\\nb\""), "arguments"),
+        ("gui_exes = [\"../w.exe\"]\n".to_owned(), "gui_exes"),
+        ("gui_exes = [\"w.txt\"]\n".to_owned(), "gui_exes"),
+        ("gui_exes = [\"w.exe\", \"W.EXE\"]\n".to_owned(), "gui_exes"),
+    ];
+    for (extra, needle) in cases {
+        let err = chocolatey_with(&extra).unwrap_err();
+        assert!(format!("{err:#}").contains(needle), "{needle}: {err:#}");
+    }
+}
+
+fn native_tests_config(extra: &str) -> anyhow::Result<ProjectConfig> {
+    load_toml(&format!(
+        "[ci]\nplatform = \"github\"\nprovider = \"actions\"\n[[ci.native_tests]]\nid = \"windows\"\nrunner = \"windows-2025\"\n{extra}"
+    ))
+}
+
+#[test]
+fn native_tests_defaults_and_validation() {
+    let test = &native_tests_config("").unwrap().ci.native_tests[0];
+    assert_eq!(test.args, "--workspace --locked");
+    assert_eq!(test.timeout_minutes, 60);
+    assert!(test.toolchain.is_none() && test.env.is_empty() && test.setup.is_none());
+    native_tests_config("setup = \"echo hi\"\ntimeout_minutes = 330\n").unwrap();
+    native_tests_config("toolchain = \"1.85.0\"\nargs = \"-p core\"\ntimeout_minutes = 90\nenv = { RUST_LOG = \"info\" }\n")
+        .unwrap();
+    let cases = [
+        ("timeout_minutes = 0\n", "timeout_minutes"),
+        ("timeout_minutes = 400\n", "timeout_minutes"),
+        ("setup = \"echo\"\ntimeout_minutes = 331\n", "1..=330"),
+        ("setup = \" \\n\"\n", "setup"),
+        ("setup = \"a\\r\\nb\"\n", "setup"),
+        ("runner = \"\"\n", "runner"),
+        ("toolchain = \"stable\\nx\"\n", "toolchain"),
+        ("toolchain = \"a b\"\n", "toolchain"),
+        ("args = \"--lib\\nrm -rf /\"\n", "args"),
+        ("env = { \"A B\" = \"x\" }\n", "env keys"),
+        ("env = { A = \"x\\ny\" }\n", "single-line"),
+        (
+            "[[ci.native_tests]]\nid = \"Windows\"\nrunner = \"windows-2022\"\n",
+            "duplicate",
+        ),
+        (
+            "[[ci.native_tests]]\nid = \"bad id\"\nrunner = \"windows-2022\"\n",
+            "must match",
+        ),
+    ];
+    for (extra, needle) in cases {
+        // A repeated `runner` key is a TOML error, so override it by rebuilding the table.
+        let result = if extra.starts_with("runner") {
+            load_toml("[[ci.native_tests]]\nid = \"w\"\nrunner = \"\"\n")
+        } else {
+            native_tests_config(extra)
+        };
+        let err = result.unwrap_err();
+        assert!(format!("{err:#}").contains(needle), "{needle}: {err:#}");
+    }
+}

@@ -112,6 +112,7 @@ fn resolve(
         binary: None,
         command: None,
         dependencies: Vec::new(),
+        files: Vec::new(),
     });
     for (flag, value, slot, name) in [
         (

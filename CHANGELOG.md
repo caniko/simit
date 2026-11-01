@@ -7,6 +7,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Added: `setup` on `[[ci.native_tests]]` runs bash commands once before
+  `cargo test`, as its own `Setup <id>` step (15 minute limit, added to the job
+  limit), e.g. to fetch a pinned driver and export its path through
+  `$GITHUB_ENV`.
+
+- Added: `[release.windows_signing] provider = "signpath"` signs Windows release
+  archives with free SignPath Foundation Authenticode certificates (GitHub
+  Actions only; Forgejo, GitLab and Crow reject it). The release job checks the
+  `SIGNPATH_API_TOKEN` secret, uploads each listed archive, submits it with the
+  pinned `signpath/github-action-submit-signing-request` (`v3.0`), waits a
+  bounded time, then swaps in the signed zip after checking its member list and
+  `osslsigncode verify` on each PE, all before promotion and checksums. An
+  unset secret warns and publishes unsigned. The default
+  `provider = "osslsigncode"` renders as before; its fields are now optional in
+  TOML and checked by validation instead of serde.
+- Added: `[[ci.native_tests]]` renders a `cargo test` job per entry in
+  `native-tests.yaml` on a hosted runner such as `windows-2025`, without Nix:
+  pinned checkout, pinned `dtolnay/rust-toolchain` (toolchain from
+  `rust-toolchain.toml`, else `stable`), `args` (default `--workspace
+--locked`), scoped `env` and a bounded timeout. GitHub Actions only; other
+  backends and Python uv CI reject it.
+- Added: `[[winget.files]]` (`path`, optional `alias`) lists several nested
+  portable executables in the winget installer manifest; `PortableCommandAlias`
+  is written only for files with an alias. Without it the single
+  `binary`/`command` entry is unchanged.
+- Added: `[chocolatey] shortcuts` (`name`, `target`, optional `arguments` and
+  `icon`) creates all-users Start menu shortcuts with `Install-ChocolateyShortcut`
+  after the unzip and removes them in `chocolateyUninstall.ps1`, and
+  `gui_exes` writes `<exe>.gui` markers so Chocolatey builds GUI shims.
 - Added: `[[release.artifacts.extract]]` promotes a member of a release archive
   (`.zip`, `.tar.gz`, `.tgz`) to a standalone release asset before checksums,
   so it is hashed, signed, attested and uploaded like every other asset even

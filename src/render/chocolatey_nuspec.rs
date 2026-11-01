@@ -159,6 +159,7 @@ pub fn render_install_script(opts: &ChocolateyRenderOptions<'_>, checksums: &Sha
         .include_x86
         .then(|| archive_url(resolved, opts.version, Architecture::X86));
 
+    let post_unzip = post_unzip_steps(resolved);
     let mut out = String::new();
     out.push_str("$ErrorActionPreference = 'Stop'\n\n");
     line_var(&mut out, "packageName", &resolved.id);
@@ -184,6 +185,9 @@ pub fn render_install_script(opts: &ChocolateyRenderOptions<'_>, checksums: &Sha
             out.push_str(" `\n    -Checksum $checksum `\n    -ChecksumType 'sha256'");
         }
         out.push('\n');
+        for line in post_unzip.lines() {
+            writeln!(out, "  {line}").expect("write to String cannot fail");
+        }
         out.push_str("  return\n");
     } else {
         out.push_str("  throw \"$packageName requires a 64-bit Windows install.\"\n");
@@ -198,11 +202,70 @@ pub fn render_install_script(opts: &ChocolateyRenderOptions<'_>, checksums: &Sha
         out.push_str(" `\n  -Checksum $checksum64 `\n  -ChecksumType 'sha256' `\n  -Checksum64 $checksum64 `\n  -ChecksumType64 'sha256'");
     }
     out.push('\n');
+    out.push_str(&post_unzip);
     out
 }
 
-pub fn render_uninstall_script(_opts: &ChocolateyRenderOptions<'_>) -> String {
-    "# No uninstall action is required for the default zip package layout.\n".to_owned()
+/// GUI shim markers and Start menu shortcuts, run after the zip is unpacked.
+///
+/// `<exe>.gui` makes Chocolatey's shimgen build a GUI shim, so the shim returns
+/// at once instead of holding the console until the window closes. Shortcuts
+/// go to the all-users Programs folder (`CommonPrograms`): Chocolatey installs
+/// machine-wide, from an elevated shell, into `ProgramData`.
+fn post_unzip_steps(resolved: &ResolvedChocolatey) -> String {
+    let mut out = String::new();
+    for exe in &resolved.gui_exes {
+        let marker = ps_single_quoted(&format!("{}.gui", windows_path(exe)));
+        out.push_str(&format!(
+            "\nNew-Item -ItemType File -Force -Path (Join-Path $toolsDir '{marker}') | Out-Null\n"
+        ));
+    }
+    if !resolved.shortcuts.is_empty() {
+        out.push_str("\n$programs = [Environment]::GetFolderPath('CommonPrograms')\n");
+    }
+    for shortcut in &resolved.shortcuts {
+        let lnk = ps_single_quoted(&format!("{}.lnk", shortcut.name));
+        let target = ps_single_quoted(&windows_path(&shortcut.target));
+        out.push_str(&format!(
+            "Install-ChocolateyShortcut `\n  -ShortcutFilePath (Join-Path $programs '{lnk}') `\n  -TargetPath (Join-Path $toolsDir '{target}')"
+        ));
+        if let Some(arguments) = &shortcut.arguments {
+            out.push_str(&format!(
+                " `\n  -Arguments '{}'",
+                ps_single_quoted(arguments)
+            ));
+        }
+        if let Some(icon) = &shortcut.icon {
+            out.push_str(&format!(
+                " `\n  -IconLocation (Join-Path $toolsDir '{}')",
+                ps_single_quoted(&windows_path(icon))
+            ));
+        }
+        out.push('\n');
+    }
+    out
+}
+
+fn windows_path(path: &str) -> String {
+    path.replace('/', "\\")
+}
+
+pub fn render_uninstall_script(opts: &ChocolateyRenderOptions<'_>) -> String {
+    let shortcuts = &opts.resolved.shortcuts;
+    if shortcuts.is_empty() {
+        return "# No uninstall action is required for the default zip package layout.\n"
+            .to_owned();
+    }
+    let mut out = String::from(
+        "$ErrorActionPreference = 'Stop'\n\n$programs = [Environment]::GetFolderPath('CommonPrograms')\n",
+    );
+    for shortcut in shortcuts {
+        out.push_str(&format!(
+            "Remove-Item -LiteralPath (Join-Path $programs '{}') -Force -ErrorAction SilentlyContinue\n",
+            ps_single_quoted(&format!("{}.lnk", shortcut.name))
+        ));
+    }
+    out
 }
 
 pub fn archive_file_name(
@@ -255,7 +318,9 @@ fn ps_single_quoted(value: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::xml_escape;
+    use super::*;
+    use crate::cli::Platform;
+    use crate::config::{ChocolateyPushConfig, ChocolateyShortcut};
 
     #[test]
     fn xml_escape_handles_special_chars() {
@@ -263,5 +328,103 @@ mod tests {
             xml_escape("a & <b> \"c\" 'd'"),
             "a &amp; &lt;b&gt; &quot;c&quot; &apos;d&apos;"
         );
+    }
+
+    fn resolved() -> ResolvedChocolatey {
+        ResolvedChocolatey {
+            tag_prefix: crate::release_identity::TagPrefix::None,
+            platform: Platform::Github,
+            name: "sorrel".to_owned(),
+            id: "sorrel".to_owned(),
+            title: "Sorrel".to_owned(),
+            authors: Some("Caniko".to_owned()),
+            description: "Spike sorting curation".to_owned(),
+            summary: None,
+            project_url: "https://example.com".to_owned(),
+            license_url: None,
+            icon_url: None,
+            package_source_url: None,
+            docs_url: None,
+            bug_tracker_url: None,
+            project_source_url: None,
+            tags: None,
+            release_notes_url: None,
+            download_repo: "caniko/sorrel".to_owned(),
+            archive_pattern: "{name}-{version}-{arch}-windows.zip".to_owned(),
+            push: ChocolateyPushConfig::default(),
+            nix_tool: String::new(),
+            api_key_env: String::new(),
+            api_key_secret: String::new(),
+            api_key_from_runner: false,
+            dependencies: Vec::new(),
+            shortcuts: Vec::new(),
+            gui_exes: Vec::new(),
+        }
+    }
+
+    fn scripts(resolved: &ResolvedChocolatey, include_x86: bool) -> (String, String) {
+        let opts = ChocolateyRenderOptions {
+            resolved,
+            version: "1.2.3",
+            include_x86,
+        };
+        (
+            render_install_script(&opts, &Sha256Set::all_no_check()),
+            render_uninstall_script(&opts),
+        )
+    }
+
+    #[test]
+    fn scripts_without_shortcuts_or_gui_exes_are_unchanged() {
+        let (install, uninstall) = scripts(&resolved(), false);
+        assert!(!install.contains("Shortcut") && !install.contains(".gui"));
+        assert!(
+            install.ends_with("  -UnzipLocation $toolsDir\n"),
+            "{install}"
+        );
+        assert_eq!(
+            uninstall,
+            "# No uninstall action is required for the default zip package layout.\n"
+        );
+    }
+
+    #[test]
+    fn shortcuts_and_gui_exes_render_after_unzip_and_are_removed() {
+        let resolved = ResolvedChocolatey {
+            shortcuts: vec![
+                ChocolateyShortcut {
+                    name: "Sorrel".to_owned(),
+                    target: "sorrelw.exe".to_owned(),
+                    arguments: Some("--it's".to_owned()),
+                    icon: Some("res/sorrel.ico".to_owned()),
+                },
+                ChocolateyShortcut {
+                    name: "Sorrel CLI".to_owned(),
+                    target: "sorrel.exe".to_owned(),
+                    arguments: None,
+                    icon: None,
+                },
+            ],
+            gui_exes: vec!["sorrelw.exe".to_owned()],
+            ..resolved()
+        };
+        let (install, uninstall) = scripts(&resolved, true);
+        let unzip = install.rfind("Install-ChocolateyZipPackage").unwrap();
+        // Both the 64-bit path and the 32-bit early return get the post-unzip steps.
+        assert_eq!(install.matches("Install-ChocolateyShortcut").count(), 4);
+        assert!(install.rfind("Install-ChocolateyShortcut").unwrap() > unzip);
+        assert!(install.contains("[Environment]::GetFolderPath('CommonPrograms')"));
+        assert!(install.contains(
+            "New-Item -ItemType File -Force -Path (Join-Path $toolsDir 'sorrelw.exe.gui') | Out-Null"
+        ));
+        assert!(install.contains("-ShortcutFilePath (Join-Path $programs 'Sorrel.lnk')"));
+        assert!(install.contains("-TargetPath (Join-Path $toolsDir 'sorrelw.exe')"));
+        assert!(install.contains("-Arguments '--it''s'"), "{install}");
+        assert!(install.contains("-IconLocation (Join-Path $toolsDir 'res\\sorrel.ico')"));
+        assert!(install.contains("'Sorrel CLI.lnk'"));
+        assert!(uninstall.contains(
+            "Remove-Item -LiteralPath (Join-Path $programs 'Sorrel.lnk') -Force -ErrorAction SilentlyContinue"
+        ));
+        assert!(uninstall.contains("'Sorrel CLI.lnk'"));
     }
 }

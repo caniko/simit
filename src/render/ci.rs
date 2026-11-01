@@ -3390,6 +3390,108 @@ pub fn target_smokes_file(
     })
 }
 
+/// A rustup toolchain name: `stable`, `1.85.0`, `nightly-2026-01-01`.
+pub(crate) fn is_toolchain_name(name: &str) -> bool {
+    !name.is_empty()
+        && name.len() <= 64
+        && name
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'-' | b'_'))
+}
+
+/// The `[toolchain].channel` of `rust-toolchain.toml`, when it is a plain toolchain name.
+pub fn rust_toolchain_channel(root: &std::path::Path) -> Option<String> {
+    let text = std::fs::read_to_string(root.join("rust-toolchain.toml")).ok()?;
+    let doc = text.parse::<toml_edit::DocumentMut>().ok()?;
+    let channel = doc.get("toolchain")?.get("channel")?.as_str()?;
+    is_toolchain_name(channel).then(|| channel.to_owned())
+}
+
+/// `[[ci.native_tests]]`: for each entry, one job on the configured hosted
+/// runner checks the repository out, installs the Rust toolchain and runs
+/// `cargo test`. Same triggers, concurrency and read-only permission as
+/// ordinary CI; no Nix is involved.
+pub fn native_tests_file(
+    push_branches: &[String],
+    default_toolchain: Option<&str>,
+    tests: &[crate::config::NativeTest],
+) -> Result<GeneratedFile> {
+    let platform = Platform::Github;
+    let mut workflow = String::new();
+    push_generated_workflow_header(&mut workflow);
+    workflow.push_str("name: Native tests\n\non:\n  push:\n");
+    push_ci_branches(&mut workflow, push_branches);
+    workflow.push_str("    tags-ignore: [\"**\"]\n  pull_request:\n\n");
+    push_github_read_permissions(&mut workflow, platform);
+    push_github_concurrency(&mut workflow);
+    workflow.push_str("jobs:");
+    for test in tests {
+        let id = sanitize_gate_id(&test.id);
+        let runner = ResolvedRunner::literal(&test.runner)?;
+        let toolchain = test
+            .toolchain
+            .as_deref()
+            .or(default_toolchain)
+            .unwrap_or("stable");
+        workflow.push_str(&format!("\n  native-test-{id}:\n    runs-on: "));
+        workflow.push_str(&runs_on(&runner));
+        // Checkout and toolchain installation get 15 minutes on top of `cargo test`,
+        // and the setup step its own limit.
+        let overhead = 15
+            + if test.setup.is_some() {
+                crate::config::NATIVE_TEST_SETUP_MINUTES
+            } else {
+                0
+            };
+        workflow.push_str(&format!(
+            "\n    timeout-minutes: {}\n",
+            test.timeout_minutes + overhead
+        ));
+        push_job_github_read_permissions(&mut workflow, platform);
+        workflow.push_str("    steps:\n");
+        push_checkout_step(&mut workflow, platform, &runner);
+        workflow.push_str("      - name: Install Rust\n        uses: ");
+        workflow.push_str(&github_action_ref("dtolnay/rust-toolchain", "stable"));
+        workflow.push_str(&format!(
+            "\n        with:\n          toolchain: {toolchain}\n\n"
+        ));
+        if let Some(setup) = &test.setup {
+            workflow.push_str(&format!(
+                "      - name: Setup {}\n        shell: bash\n        timeout-minutes: {}\n        run: |\n",
+                test.id,
+                crate::config::NATIVE_TEST_SETUP_MINUTES
+            ));
+            for line in setup.trim().lines() {
+                if line.trim().is_empty() {
+                    workflow.push('\n');
+                } else {
+                    workflow.push_str(&format!("          {}\n", line.trim_end()));
+                }
+            }
+            workflow.push('\n');
+        }
+        workflow.push_str(&format!(
+            "      - name: Native tests {}\n        shell: bash\n        timeout-minutes: {}\n",
+            test.id, test.timeout_minutes
+        ));
+        if !test.env.is_empty() {
+            workflow.push_str("        env:\n");
+            for (key, value) in &test.env {
+                workflow.push_str(&format!(
+                    "          {key}: \"{}\"\n",
+                    yaml_double_quote(value)
+                ));
+            }
+        }
+        workflow.push_str(&format!("        run: cargo test {}\n", test.args.trim()));
+    }
+    trim_trailing_blank_lines(&mut workflow);
+    Ok(GeneratedFile {
+        relative_path: PathBuf::from(Platform::Github.workflow_dir()).join("native-tests.yaml"),
+        content: workflow,
+    })
+}
+
 pub(crate) fn push_required_gate_artifacts(
     workflow: &mut String,
     gate: &crate::config::RequiredGate,

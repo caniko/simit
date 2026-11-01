@@ -838,3 +838,41 @@ fn disabled_pypi_channel_does_not_gate_the_release_backend() {
     );
     assert!(!workflow.contains("PyPI"), "{workflow}");
 }
+
+const SIGNPATH: &str = "[release.windows_signing]\nprovider='signpath'\norganization_id='00000000-0000-0000-0000-000000000000'\nproject_slug='player'\nsigning_policy_slug='release-signing'\narchives=['player-{version}-x86_64-windows.zip']\npe_files=['player.exe']\n";
+
+#[test]
+fn signpath_signing_renders_on_github_and_is_rejected_elsewhere() {
+    let github = "[ci]\nplatform='github'\n[release.github]\nrepo='example/player'\n[release.artifacts]\nrunner='ubuntu-24.04'\nprebuild_binaries=true\nsign=false\n";
+    let workflow = render(project(&format!("{github}{SIGNPATH}")).path());
+    let yaml: serde_yaml::Value = serde_yaml::from_str(&workflow).unwrap();
+    assert_eq!(yaml["jobs"]["release"]["permissions"]["actions"], "read");
+    assert!(
+        workflow.contains("name: Check SignPath signing availability"),
+        "{workflow}"
+    );
+
+    for (config, expected) in [
+        (
+            format!("{HOSTED}{SIGNPATH}"),
+            "requires the effective GitHub Actions backend",
+        ),
+        (
+            format!("{github}{SIGNPATH}sign_name='x'\n"),
+            "belongs to provider = \"osslsigncode\"",
+        ),
+    ] {
+        let dir = project(&config);
+        let output = common::simit()
+            .current_dir(dir.path())
+            .env("XDG_CONFIG_HOME", dir.path().join(".xdg"))
+            .args(["init", "release", "--print"])
+            .output()
+            .unwrap();
+        assert!(!output.status.success(), "{config}");
+        assert!(
+            String::from_utf8_lossy(&output.stderr).contains(expected),
+            "{output:?}"
+        );
+    }
+}

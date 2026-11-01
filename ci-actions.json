@@ -22,6 +22,11 @@
       "sha": "cf430e030ddbb5b0abf93d22962f4752f3646cd9"
     },
     {
+      "name": "https://github.com/signpath/github-action-submit-signing-request",
+      "version": "v3.0",
+      "sha": "f6d04783b4569d051e0c80105fe66e82819d0092"
+    },
+    {
       "name": "https://github.com/actions/download-artifact",
       "version": "v8.0.2",
       "sha": "9000827ccba6bdab643e8b6fd33ac0654aef8333"

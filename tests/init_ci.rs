@@ -7728,6 +7728,168 @@ fn target_smokes_render_for_nix_only_ci() {
     );
 }
 
+const NATIVE_TESTS_CONFIG: &str = r#"[ci]
+platform = "github"
+provider = "actions"
+runtime = "nix"
+push_branches = ["trunk"]
+
+[[ci.native_tests]]
+id = "windows"
+runner = "windows-2025"
+env = { RUST_BACKTRACE = "1" }
+timeout_minutes = 45
+setup = """
+echo "FETCHED=1" >> "$GITHUB_ENV"
+
+if true; then
+  echo nested
+fi
+"""
+
+[[ci.native_tests]]
+id = "macos"
+runner = "macos-15"
+args = "-p core --locked"
+toolchain = "1.85.0"
+"#;
+
+#[test]
+fn native_tests_render_a_job_per_entry_and_round_trip() {
+    let temp = init_package(true);
+    fs::write(
+        temp.path().join("rust-toolchain.toml"),
+        "[toolchain]\nchannel = \"1.90.0\"\n",
+    )
+    .unwrap();
+    fs::write(temp.path().join("simit.toml"), NATIVE_TESTS_CONFIG).unwrap();
+    let output = simit()
+        .current_dir(temp.path())
+        .args(["init", "ci"])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let path = temp.path().join(".github/workflows/native-tests.yaml");
+    let text = fs::read_to_string(&path).unwrap();
+    let yaml: serde_yaml::Value = serde_yaml::from_str(&text).unwrap();
+    assert_eq!(yaml["on"]["push"]["branches"][0].as_str(), Some("trunk"));
+    assert!(yaml["on"]["pull_request"].is_null());
+    assert_eq!(yaml["permissions"]["contents"].as_str(), Some("read"));
+    assert!(yaml["concurrency"]["cancel-in-progress"].as_bool().unwrap());
+    assert_eq!(yaml["jobs"].as_mapping().unwrap().len(), 2);
+
+    let windows = &yaml["jobs"]["native-test-windows"];
+    assert_eq!(windows["runs-on"].as_str(), Some("windows-2025"));
+    // 45 + 15 for checkout and toolchain + 15 for the setup step.
+    assert_eq!(windows["timeout-minutes"].as_u64(), Some(75));
+    assert_eq!(windows["permissions"]["contents"].as_str(), Some("read"));
+    let steps = windows["steps"].as_sequence().unwrap();
+    assert!(
+        steps[0]["uses"]
+            .as_str()
+            .unwrap()
+            .starts_with("actions/checkout@")
+    );
+    assert!(
+        steps[1]["uses"]
+            .as_str()
+            .unwrap()
+            .starts_with("dtolnay/rust-toolchain@")
+    );
+    // The default toolchain comes from rust-toolchain.toml.
+    assert_eq!(steps[1]["with"]["toolchain"].as_str(), Some("1.90.0"));
+    // `setup` runs between the toolchain install and the tests, in bash, verbatim.
+    assert_eq!(steps[2]["name"].as_str(), Some("Setup windows"));
+    assert_eq!(steps[2]["shell"].as_str(), Some("bash"));
+    assert_eq!(steps[2]["timeout-minutes"].as_u64(), Some(15));
+    assert_eq!(
+        steps[2]["run"].as_str(),
+        Some("echo \"FETCHED=1\" >> \"$GITHUB_ENV\"\n\nif true; then\n  echo nested\nfi\n")
+    );
+    assert!(steps[2]["env"].is_null());
+    assert_eq!(
+        steps[3]["run"].as_str(),
+        Some("cargo test --workspace --locked")
+    );
+    assert_eq!(steps[3]["timeout-minutes"].as_u64(), Some(45));
+    assert_eq!(steps[3]["env"]["RUST_BACKTRACE"].as_str(), Some("1"));
+    assert_eq!(steps.len(), 4);
+
+    let mac = &yaml["jobs"]["native-test-macos"];
+    assert_eq!(
+        mac["steps"][1]["with"]["toolchain"].as_str(),
+        Some("1.85.0")
+    );
+    assert_eq!(
+        mac["steps"][2]["run"].as_str(),
+        Some("cargo test -p core --locked")
+    );
+    assert_eq!(mac["steps"].as_sequence().unwrap().len(), 3);
+    for line in text
+        .lines()
+        .filter(|line| line.trim_start().starts_with("uses:"))
+    {
+        let (_, pinned) = line.split_once('@').expect(line);
+        assert!(
+            pinned.len() > 40 && pinned[..40].bytes().all(|b| b.is_ascii_hexdigit()),
+            "{line}"
+        );
+    }
+
+    // Ordinary CI is untouched; the config round-trips, drift is caught, and
+    // removing the config removes the workflow.
+    let ci = fs::read_to_string(temp.path().join(".github/workflows/ci.yaml")).unwrap();
+    assert!(!ci.contains("native-test"), "{ci}");
+    let config = fs::read_to_string(temp.path().join("simit.toml")).unwrap();
+    assert!(config.contains("native_tests"), "{config}");
+    let check = || {
+        simit()
+            .current_dir(temp.path())
+            .args(["init", "ci", "--check"])
+            .output()
+            .unwrap()
+    };
+    assert!(check().status.success());
+    fs::write(&path, format!("{text}# drift\n")).unwrap();
+    assert!(!check().status.success());
+    fs::write(
+        temp.path().join("simit.toml"),
+        "[ci]\nplatform = \"github\"\nprovider = \"actions\"\nruntime = \"nix\"\n",
+    )
+    .unwrap();
+    assert!(
+        simit()
+            .current_dir(temp.path())
+            .args(["init", "ci"])
+            .status()
+            .unwrap()
+            .success()
+    );
+    assert!(!path.exists());
+}
+
+#[test]
+fn native_tests_reject_unsupported_backends_instead_of_ignoring_them() {
+    for backend in [
+        "platform = \"forgejo\"\nprovider = \"actions\"",
+        "platform = \"forgejo\"\nprovider = \"crow\"",
+    ] {
+        let config =
+            NATIVE_TESTS_CONFIG.replace("platform = \"github\"\nprovider = \"actions\"", backend);
+        let (_temp, output) = init_target_smokes(&config, &[]);
+        assert!(!output.status.success(), "{backend}");
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            stderr.contains("[[ci.native_tests]]"),
+            "{backend}: {stderr}"
+        );
+    }
+}
+
 const QUALIFIED_CONFIG: &str = r#"[ci]
 platform = "github"
 provider = "actions"

@@ -1499,6 +1499,54 @@ Crow cannot run it and fail with an error instead of ignoring it. The table
 persists in `simit.toml` like the other `[ci]` options and is drift-checked by
 `simit init ci --check`; removing it deletes the generated workflow.
 
+## Native Tests on Hosted Runners
+
+Nix CI runs `cargo test` on Linux. Code with OS-specific behaviour (file
+locking, path semantics, memory-mapped files) needs a real run on its OS.
+`[[ci.native_tests]]` runs `cargo test` natively, without Nix, on a hosted
+runner:
+
+```toml
+[[ci.native_tests]]
+id = "windows"
+runner = "windows-2025"
+args = "--workspace --locked"
+timeout_minutes = 60
+toolchain = "stable"
+env = { RUST_BACKTRACE = "1" }
+setup = """
+curl -fsSL -o driver.zip https://example.com/driver.zip
+echo "DRIVER_DIR=$PWD/driver" >> "$GITHUB_ENV"
+"""
+```
+
+| Field             | Default                                                      | Meaning                                        |
+| ----------------- | ------------------------------------------------------------ | ---------------------------------------------- |
+| `id`              | required                                                     | Unique, `[a-zA-Z0-9_-]+`; names the job        |
+| `runner`          | required                                                     | Runner label (same rules as `[ci].runner`)     |
+| `args`            | `--workspace --locked`                                       | Single-line arguments after `cargo test`       |
+| `timeout_minutes` | `60`                                                         | Limit for `cargo test`, 1-345; the job adds 15 |
+| `toolchain`       | `channel` of `rust-toolchain.toml` if present, else `stable` | rustup toolchain name, e.g. `1.85.0`           |
+| `env`             | `{}`                                                         | Environment for `cargo test` only              |
+| `setup`           | none                                                         | Bash commands run once before `cargo test`     |
+
+Each entry renders job `native-test-<id>` in `native-tests.yaml`, on the same
+push (honouring `push_branches`) and pull-request triggers, concurrency and
+read-only `contents` permission as ordinary CI. The job checks the repository
+out, installs the toolchain with the pinned `dtolnay/rust-toolchain` action and
+runs `cargo test <args>` under `bash` (Git Bash on Windows) with the step
+timeout. A `setup` script becomes its own `Setup <id>` step between the two,
+also under `bash`, with a 15 minute limit that is added to the job limit (so
+`timeout_minutes` is then capped at 330). It is the place to fetch a pinned
+driver or tool; export variables to the test step by appending `NAME=value`
+lines to `$GITHUB_ENV`. Pin and checksum whatever it downloads: the step runs
+with the job's read-only `contents` permission and no secrets. Mark `native-test-<id>` as a required status check. No dependency
+cache is configured, so a cold Windows build is the usual cost; raise
+`timeout_minutes` for large workspaces. Native tests are GitHub Actions only:
+Python uv CI, Forgejo, GitLab and Crow reject the option with an error instead
+of ignoring it. The table persists in `simit.toml` and is drift-checked by
+`simit init ci --check`; removing it deletes the generated workflow.
+
 ## Coordinated Workspace Publication
 
 Member-scoped publishing (`publish-crate-<crate>.yaml`) has no cross-crate
