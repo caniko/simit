@@ -694,7 +694,7 @@ secret names are configurable with `[aur].ssh_key_secret`,
 `[release.github].token_secret`,
 `[flatpak].token_secret`, `[winget].token_secret`,
 `[release.announce].*_secret`,
-`[release.windows_signing].*_secret`, and `[release.pypi].token_secret`.
+`[release.windows_signing].*_secret` (including SignPath `api_token_secret`), and `[release.pypi].token_secret`.
 
 APT uses a repository-backed Pages branch rather than rebuilding a fresh
 repository tree on every release:

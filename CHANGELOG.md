@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Added: `[release.windows_signing] provider = "signpath"` signs Windows release
+  archives with free SignPath Foundation Authenticode certificates (GitHub
+  Actions only; Forgejo, GitLab and Crow reject it). The release job checks the
+  `SIGNPATH_API_TOKEN` secret, uploads each listed archive, submits it with the
+  pinned `signpath/github-action-submit-signing-request` (`v3.0`), waits a
+  bounded time, then swaps in the signed zip after checking its member list and
+  `osslsigncode verify` on each PE, all before promotion and checksums. An
+  unset secret warns and publishes unsigned. The default
+  `provider = "osslsigncode"` renders as before; its fields are now optional in
+  TOML and checked by validation instead of serde.
 - Added: `[[ci.native_tests]]` renders a `cargo test` job per entry in
   `native-tests.yaml` on a hosted runner such as `windows-2025`, without Nix:
   pinned checkout, pinned `dtolnay/rust-toolchain` (toolchain from

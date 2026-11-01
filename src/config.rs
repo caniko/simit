@@ -1617,48 +1617,206 @@ fn default_matrix_room_secret() -> String {
     "MATRIX_ROOM".to_owned()
 }
 
-/// `[release.windows_signing]` — Authenticode-sign and package Windows `.exe`s.
-#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
-pub struct WindowsSigningConfig {
-    /// Directory holding the built `.exe`s, relative to the workspace.
-    #[serde(default = "default_windows_dir")]
-    pub dir: String,
-    /// Binary basenames (without `.exe`).
-    pub binaries: Vec<String>,
-    /// osslsigncode `-n` program name.
-    pub sign_name: String,
-    /// osslsigncode `-i` info URL.
-    pub sign_url: String,
-    /// RFC3161 timestamp URL.
-    #[serde(default = "default_timestamp_url")]
-    pub timestamp_url: String,
-    /// tar.gz archive name with `{version}` placeholder.
-    pub tar_archive: String,
-    /// zip archive name with `{version}` placeholder.
-    pub zip_archive: String,
-    #[serde(default = "default_windows_pfx_secret")]
-    pub pfx_secret: String,
-    #[serde(default = "default_windows_pass_secret")]
-    pub pass_secret: String,
-    #[serde(default = "default_windows_subject_secret")]
-    pub subject_secret: String,
+/// How `[release.windows_signing]` produces Authenticode signatures.
+#[derive(Debug, Clone, Copy, Default, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum WindowsSigningProvider {
+    /// Sign loose `.exe`s with osslsigncode and a PFX secret, then package them.
+    #[default]
+    Osslsigncode,
+    /// Submit finished release archives to SignPath (GitHub Actions only).
+    Signpath,
 }
 
-fn default_windows_dir() -> String {
-    "release/windows-x86_64".to_owned()
+/// `[release.windows_signing]` — Authenticode-sign Windows `.exe`s.
+///
+/// `provider = "osslsigncode"` (default) uses `dir`, `binaries`, `sign_*`,
+/// `timestamp_url`, the archive names and the PFX secrets. `provider =
+/// "signpath"` uses the SignPath fields instead; mixing is rejected by
+/// [`Self::validate`].
+#[derive(Debug, Clone, Default, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct WindowsSigningConfig {
+    #[serde(default)]
+    pub provider: WindowsSigningProvider,
+    /// osslsigncode: directory holding the built `.exe`s, relative to the workspace.
+    pub dir: Option<String>,
+    /// osslsigncode: binary basenames (without `.exe`).
+    #[serde(default)]
+    pub binaries: Vec<String>,
+    /// osslsigncode: `-n` program name.
+    pub sign_name: Option<String>,
+    /// osslsigncode: `-i` info URL.
+    pub sign_url: Option<String>,
+    /// osslsigncode: RFC3161 timestamp URL.
+    pub timestamp_url: Option<String>,
+    /// osslsigncode: tar.gz archive name with `{version}` placeholder.
+    pub tar_archive: Option<String>,
+    /// osslsigncode: zip archive name with `{version}` placeholder.
+    pub zip_archive: Option<String>,
+    pub pfx_secret: Option<String>,
+    pub pass_secret: Option<String>,
+    pub subject_secret: Option<String>,
+    /// SignPath: organization ID.
+    pub organization_id: Option<String>,
+    /// SignPath: project slug.
+    pub project_slug: Option<String>,
+    /// SignPath: signing policy slug, e.g. `release-signing`.
+    pub signing_policy_slug: Option<String>,
+    /// SignPath: artifact configuration slug; the project default when unset.
+    pub artifact_configuration_slug: Option<String>,
+    /// SignPath: Actions secret holding the API token (default `SIGNPATH_API_TOKEN`).
+    pub api_token_secret: Option<String>,
+    /// SignPath: release archives (`.zip`, `{version}` allowed) to submit.
+    #[serde(default)]
+    pub archives: Vec<String>,
+    /// SignPath: PE files inside each archive that must end up signed.
+    #[serde(default)]
+    pub pe_files: Vec<String>,
+    /// SignPath: seconds to wait per request, including manual approval
+    /// (default 3600, at most 21600).
+    pub wait_timeout_seconds: Option<u32>,
 }
-fn default_timestamp_url() -> String {
-    "http://timestamp.digicert.com".to_owned()
-}
-fn default_windows_pfx_secret() -> String {
-    "WINDOWS_SIGNING_PFX".to_owned()
-}
-fn default_windows_pass_secret() -> String {
-    "WINDOWS_SIGNING_PASS".to_owned()
-}
-fn default_windows_subject_secret() -> String {
-    "WINDOWS_SIGNING_SUBJECT".to_owned()
+
+impl WindowsSigningConfig {
+    pub fn dir(&self) -> &str {
+        self.dir.as_deref().unwrap_or("release/windows-x86_64")
+    }
+    pub fn timestamp_url(&self) -> &str {
+        self.timestamp_url
+            .as_deref()
+            .unwrap_or("http://timestamp.digicert.com")
+    }
+    pub fn pfx_secret(&self) -> &str {
+        self.pfx_secret.as_deref().unwrap_or("WINDOWS_SIGNING_PFX")
+    }
+    pub fn pass_secret(&self) -> &str {
+        self.pass_secret
+            .as_deref()
+            .unwrap_or("WINDOWS_SIGNING_PASS")
+    }
+    pub fn subject_secret(&self) -> &str {
+        self.subject_secret
+            .as_deref()
+            .unwrap_or("WINDOWS_SIGNING_SUBJECT")
+    }
+    pub fn api_token_secret(&self) -> &str {
+        self.api_token_secret
+            .as_deref()
+            .unwrap_or("SIGNPATH_API_TOKEN")
+    }
+    pub fn wait_timeout_seconds(&self) -> u32 {
+        self.wait_timeout_seconds.unwrap_or(3600)
+    }
+    pub fn is_signpath(&self) -> bool {
+        self.provider == WindowsSigningProvider::Signpath
+    }
+
+    /// Check that exactly the fields of the selected provider are set.
+    pub fn validate(&self) -> Result<()> {
+        const P: &str = "simit project config: [release.windows_signing]";
+        let ossl_set = [
+            ("dir", self.dir.is_some()),
+            ("binaries", !self.binaries.is_empty()),
+            ("sign_name", self.sign_name.is_some()),
+            ("sign_url", self.sign_url.is_some()),
+            ("timestamp_url", self.timestamp_url.is_some()),
+            ("tar_archive", self.tar_archive.is_some()),
+            ("zip_archive", self.zip_archive.is_some()),
+            ("pfx_secret", self.pfx_secret.is_some()),
+            ("pass_secret", self.pass_secret.is_some()),
+            ("subject_secret", self.subject_secret.is_some()),
+        ];
+        let signpath_set = [
+            ("organization_id", self.organization_id.is_some()),
+            ("project_slug", self.project_slug.is_some()),
+            ("signing_policy_slug", self.signing_policy_slug.is_some()),
+            (
+                "artifact_configuration_slug",
+                self.artifact_configuration_slug.is_some(),
+            ),
+            ("api_token_secret", self.api_token_secret.is_some()),
+            ("archives", !self.archives.is_empty()),
+            ("pe_files", !self.pe_files.is_empty()),
+            ("wait_timeout_seconds", self.wait_timeout_seconds.is_some()),
+        ];
+        let (foreign, provider, other) = if self.is_signpath() {
+            (&ossl_set[..], "signpath", "osslsigncode")
+        } else {
+            (&signpath_set[..], "osslsigncode", "signpath")
+        };
+        if let Some((name, _)) = foreign.iter().find(|(_, set)| *set) {
+            bail!(
+                "{P}.{name} belongs to provider = \"{other}\" and cannot be used with provider = \"{provider}\""
+            );
+        }
+        if !self.is_signpath() {
+            for (name, value) in [
+                ("sign_name", &self.sign_name),
+                ("sign_url", &self.sign_url),
+                ("tar_archive", &self.tar_archive),
+                ("zip_archive", &self.zip_archive),
+            ] {
+                if value.as_deref().is_none_or(|v| v.trim().is_empty()) {
+                    bail!("{P}.{name} is required for provider = \"osslsigncode\"");
+                }
+            }
+            if self.binaries.is_empty() {
+                bail!("{P}.binaries is required for provider = \"osslsigncode\"");
+            }
+            return Ok(());
+        }
+        let ident = |name: &str, value: &Option<String>, required: bool| -> Result<()> {
+            match value {
+                None if required => bail!("{P}.{name} is required for provider = \"signpath\""),
+                Some(v)
+                    if v.is_empty()
+                        || !v
+                            .chars()
+                            .all(|c| c.is_ascii_alphanumeric() || "-_.".contains(c)) =>
+                {
+                    bail!(
+                        "{P}.{name} {v:?} must be non-empty ASCII letters, digits, '-', '_' or '.'"
+                    )
+                }
+                _ => Ok(()),
+            }
+        };
+        ident("organization_id", &self.organization_id, true)?;
+        ident("project_slug", &self.project_slug, true)?;
+        ident("signing_policy_slug", &self.signing_policy_slug, true)?;
+        ident(
+            "artifact_configuration_slug",
+            &self.artifact_configuration_slug,
+            false,
+        )?;
+        if let Some(secret) = &self.api_token_secret {
+            validate_github_actions_secret_identifier(&format!("{P}.api_token_secret"), secret)?;
+        }
+        if self.archives.is_empty() || self.pe_files.is_empty() {
+            bail!(
+                "{P}.archives and .pe_files must each list at least one entry for provider = \"signpath\""
+            );
+        }
+        for archive in &self.archives {
+            validate_extract_text("[release.windows_signing].archives", archive)?;
+            if archive.contains('/') || !archive.ends_with(".zip") {
+                bail!("{P}.archives {archive:?} must be a bare file name ending in .zip");
+            }
+        }
+        for pe in &self.pe_files {
+            validate_extract_text("[release.windows_signing].pe_files", pe)?;
+            if pe.starts_with('/') || pe.split('/').any(|part| part == "..") || pe.contains('{') {
+                bail!(
+                    "{P}.pe_files {pe:?} must be a relative path inside the archive without `..` or placeholders"
+                );
+            }
+        }
+        if !(60..=21600).contains(&self.wait_timeout_seconds()) {
+            bail!("{P}.wait_timeout_seconds must be between 60 and 21600");
+        }
+        Ok(())
+    }
 }
 
 /// `[release.artifacts]` — release workflow build + signing configuration.
@@ -3051,6 +3209,9 @@ impl ProjectConfig {
             )?;
         }
         self.release.artifacts.validate_extract()?;
+        if let Some(windows) = &self.release.windows_signing {
+            windows.validate()?;
+        }
         if let Some(netrc_secret) = &self.release.artifacts.netrc_secret {
             validate_github_actions_secret_identifier(
                 "simit project config: [release.artifacts].netrc_secret",
@@ -6134,5 +6295,77 @@ asset = "sorrel-{version}-x86_64-windows.exe"
             );
         }
         check(vec![ok()]).unwrap();
+    }
+}
+
+#[cfg(test)]
+mod windows_signing_tests {
+    use super::*;
+
+    fn parse(toml: &str) -> Result<WindowsSigningConfig> {
+        let config: WindowsSigningConfig = toml_edit::de::from_str(toml)?;
+        config.validate()?;
+        Ok(config)
+    }
+
+    const SIGNPATH: &str = "provider='signpath'\norganization_id='0000-1'\nproject_slug='sorrel'\nsigning_policy_slug='release-signing'\narchives=['sorrel-{version}-x86_64-windows.zip']\npe_files=['sorrel.exe','sorrelw.exe']\n";
+    const OSSL: &str = "binaries=['a']\nsign_name='a'\nsign_url='https://a'\ntar_archive='a-{version}.tar.gz'\nzip_archive='a-{version}.zip'\n";
+
+    #[test]
+    fn accepts_both_providers_and_defaults_to_osslsigncode() {
+        let ossl = parse(OSSL).unwrap();
+        assert_eq!(ossl.provider, WindowsSigningProvider::Osslsigncode);
+        assert_eq!(ossl.pfx_secret(), "WINDOWS_SIGNING_PFX");
+        assert_eq!(ossl.dir(), "release/windows-x86_64");
+        let signpath = parse(SIGNPATH).unwrap();
+        assert!(signpath.is_signpath());
+        assert_eq!(signpath.api_token_secret(), "SIGNPATH_API_TOKEN");
+        assert_eq!(signpath.wait_timeout_seconds(), 3600);
+    }
+
+    #[test]
+    fn rejects_mixed_missing_and_unsafe_fields() {
+        let cases = [
+            (format!("{SIGNPATH}sign_name='x'\n"), "belongs to provider"),
+            (format!("{SIGNPATH}pfx_secret='X'\n"), "belongs to provider"),
+            (format!("{OSSL}project_slug='x'\n"), "belongs to provider"),
+            (format!("{OSSL}archives=['a.zip']\n"), "belongs to provider"),
+            ("binaries=['a']\n".to_owned(), "sign_name is required"),
+            (
+                "provider='signpath'\n".to_owned(),
+                "organization_id is required",
+            ),
+            (
+                SIGNPATH.replace("pe_files=['sorrel.exe','sorrelw.exe']", "pe_files=[]"),
+                "at least one entry",
+            ),
+            (
+                SIGNPATH.replace("sorrel-{version}-x86_64-windows.zip", "a.tar.gz"),
+                "ending in .zip",
+            ),
+            (
+                SIGNPATH.replace("sorrel-{version}-x86_64-windows.zip", "x/a.zip"),
+                "bare file name",
+            ),
+            (SIGNPATH.replace("sorrel.exe'", "../x.exe'"), "without `..`"),
+            (SIGNPATH.replace("sorrel.exe'", "a$(b).exe'"), "pe_files"),
+            (
+                SIGNPATH.replace("release-signing", "a b"),
+                "signing_policy_slug",
+            ),
+            (
+                format!("{SIGNPATH}api_token_secret='GITHUB_X'\n"),
+                "GITHUB_",
+            ),
+            (
+                format!("{SIGNPATH}wait_timeout_seconds=5\n"),
+                "between 60 and 21600",
+            ),
+        ];
+        for (toml, expected) in cases {
+            let err = parse(&toml).expect_err(&toml).to_string();
+            assert!(err.contains(expected), "{toml}: {err}");
+        }
+        assert!(parse(&format!("{SIGNPATH}typo=1\n")).is_err());
     }
 }

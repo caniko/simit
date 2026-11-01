@@ -76,6 +76,126 @@ The same artifact workflow verifies signed release tags and emits signed
 checksums plus SLSA provenance. See [Release Integrity](release-integrity.md)
 for the required `keys/maintainers.gpg` and `keys/minisign.pub` trust roots.
 
+## Free Authenticode signing with SignPath Foundation
+
+`[release.windows_signing]` has two providers. The default,
+`provider = "osslsigncode"`, signs loose `.exe`s with a PFX secret. With
+`provider = "signpath"` the release job submits finished release archives (for
+example the Nix-built `sorrel-<v>-x86_64-windows.zip`) to
+[SignPath Foundation](https://signpath.org/), which signs OSI-licensed open
+source projects for free and is named as the certificate holder. SignPath
+signs the PE files inside the zip in place, so no repacking is needed.
+
+```toml
+[release.windows_signing]
+provider = "signpath"
+organization_id = "<SignPath organization ID>"
+project_slug = "sorrel"
+signing_policy_slug = "release-signing"
+# artifact_configuration_slug = "windows-zip"   # project default when unset
+# api_token_secret = "SIGNPATH_API_TOKEN"       # the default
+# wait_timeout_seconds = 3600                   # per archive, includes manual approval
+archives = ["sorrel-{version}-x86_64-windows.zip"]
+pe_files = ["sorrel.exe", "sorrelw.exe"]       # members that must end up signed
+```
+
+GitHub Actions only: `simit init release` rejects the provider on Forgejo,
+GitLab and Crow, and rejects `dir`, `binaries`, `sign_*`, `*_archive` and the
+`pfx`/`pass`/`subject` secrets alongside it (and SignPath fields with
+osslsigncode). The release job additionally gets `actions: read`.
+
+### Rendered steps
+
+All steps run before `[[release.artifacts.extract]]` promotion and the
+checksums, so promoted exes, `SHA256SUMS`, cosign/minisign signatures and the
+winget and Chocolatey hashes cover the signed bytes.
+
+1. **Check SignPath signing availability** tests that the API-token secret is
+   non-empty. When it is empty the step prints
+   `::warning::SignPath signing skipped: SIGNPATH_API_TOKEN is not set` and the
+   release continues unsigned; every later SignPath step is conditional on the
+   step's `enabled` output.
+2. `actions/upload-artifact` uploads each archive unarchived (`archive: false`),
+   so the SignPath artifact is the zip itself.
+3. `signpath/github-action-submit-signing-request` (pinned to a commit)
+   submits it with `wait-for-completion: true` and a bounded timeout, and saves
+   the signed zip (`skip-decompress: true`) to a temporary directory.
+4. The signed zip replaces `release/<archive>` only after it has the same file
+   list as the original and `osslsigncode verify` accepts every `pe_files`
+   entry. Any mismatch fails the release.
+
+Because SignPath Foundation requires a manual approval for every release, the
+job waits for a team member to approve the request in SignPath;
+`wait_timeout_seconds` bounds that wait and a timeout or rejection fails the
+release before anything is published.
+
+### One-time setup
+
+1. Check eligibility and apply at <https://signpath.org/apply>. The project
+   needs an OSI-approved license without proprietary components, a released
+   and maintained application with some verifiable reputation, and a public
+   repository. See the [OSS program terms](https://signpath.org/terms).
+2. Once accepted, in SignPath add the **GitHub.com** trusted build system to
+   the organization and link it to the project, create an artifact
+   configuration (below) and a signing policy such as `release-signing`
+   (release signing requires manual approval), and create a CI user with an API
+   token permitted to submit to that policy.
+3. In the GitHub repository set the secret `SIGNPATH_API_TOKEN`
+   (or the name in `api_token_secret`), then add the config above using the
+   organization ID, project slug and policy slug shown in SignPath.
+4. Run `simit init release` and commit the workflow.
+
+Until the secret exists the workflow is inert: releases publish unsigned with
+the warning above.
+
+### Artifact configuration
+
+Create this configuration in SignPath for a zip containing `sorrel.exe` and
+`sorrelw.exe` at the archive root (use it as the project default or set
+`artifact_configuration_slug`):
+
+```xml
+<artifact-configuration xmlns="http://signpath.io/artifact-configuration/v1">
+  <zip-file>
+    <pe-file path="sorrel.exe">
+      <authenticode-sign/>
+    </pe-file>
+    <pe-file path="sorrelw.exe">
+      <authenticode-sign/>
+    </pe-file>
+  </zip-file>
+</artifact-configuration>
+```
+
+The root is `<zip-file>` because the release archive is submitted directly.
+Keep `pe_files` identical to the `path`s listed here.
+
+### Program obligations
+
+The free certificate comes with duties the generated workflow cannot meet for
+you:
+
+- Build provenance: SignPath checks that the artifact came from a
+  GitHub-hosted-runner build of the public repository. Set
+  `[release.artifacts].runner` (or `[ci].runner`) to a GitHub-hosted label such
+  as `ubuntu-24.04`, not a self-hosted runner, and build the archives in that
+  same workflow (or the `prebuild` workflow it calls). Only sign artifacts
+  built from the project's own source.
+- A code signing policy page on the project home and download pages: the phrase
+  "Code signing policy", the line "Free code signing provided by SignPath.io,
+  certificate by SignPath Foundation", and the team roles with their members.
+- A privacy policy (or a statement that the program does not transfer
+  information to other systems unless the user asks).
+- Multi-factor authentication for every team member on both SignPath and the
+  source repository.
+- Product name and version metadata on the signed binaries, and manual
+  approval of each release signing request.
+
+Sources: [SignPath OSS terms](https://signpath.org/terms),
+[GitHub Actions trusted build system](https://docs.signpath.io/trusted-build-systems/github),
+[artifact configuration syntax](https://docs.signpath.io/artifact-configuration/syntax),
+[`signpath/github-action-submit-signing-request`](https://github.com/SignPath/github-action-submit-signing-request).
+
 ## Local Render and Bump
 
 ```sh
