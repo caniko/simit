@@ -1514,6 +1514,10 @@ args = "--workspace --locked"
 timeout_minutes = 60
 toolchain = "stable"
 env = { RUST_BACKTRACE = "1" }
+setup = """
+curl -fsSL -o driver.zip https://example.com/driver.zip
+echo "DRIVER_DIR=$PWD/driver" >> "$GITHUB_ENV"
+"""
 ```
 
 | Field             | Default                                                      | Meaning                                        |
@@ -1524,13 +1528,19 @@ env = { RUST_BACKTRACE = "1" }
 | `timeout_minutes` | `60`                                                         | Limit for `cargo test`, 1-345; the job adds 15 |
 | `toolchain`       | `channel` of `rust-toolchain.toml` if present, else `stable` | rustup toolchain name, e.g. `1.85.0`           |
 | `env`             | `{}`                                                         | Environment for `cargo test` only              |
+| `setup`           | none                                                         | Bash commands run once before `cargo test`     |
 
 Each entry renders job `native-test-<id>` in `native-tests.yaml`, on the same
 push (honouring `push_branches`) and pull-request triggers, concurrency and
 read-only `contents` permission as ordinary CI. The job checks the repository
 out, installs the toolchain with the pinned `dtolnay/rust-toolchain` action and
 runs `cargo test <args>` under `bash` (Git Bash on Windows) with the step
-timeout. Mark `native-test-<id>` as a required status check. No dependency
+timeout. A `setup` script becomes its own `Setup <id>` step between the two,
+also under `bash`, with a 15 minute limit that is added to the job limit (so
+`timeout_minutes` is then capped at 330). It is the place to fetch a pinned
+driver or tool; export variables to the test step by appending `NAME=value`
+lines to `$GITHUB_ENV`. Pin and checksum whatever it downloads: the step runs
+with the job's read-only `contents` permission and no secrets. Mark `native-test-<id>` as a required status check. No dependency
 cache is configured, so a cold Windows build is the usual cost; raise
 `timeout_minutes` for large workspaces. Native tests are GitHub Actions only:
 Python uv CI, Forgejo, GitLab and Crow reject the option with an error instead

@@ -535,7 +535,15 @@ pub struct NativeTest {
     /// Rust toolchain; defaults to the `rust-toolchain.toml` channel, else `stable`.
     #[serde(default)]
     pub toolchain: Option<String>,
+    /// Shell commands (bash) run once before `cargo test`, after the toolchain
+    /// install, e.g. to fetch a pinned driver. They can export variables to the
+    /// test step through `$GITHUB_ENV`.
+    #[serde(default)]
+    pub setup: Option<String>,
 }
+
+/// Minutes the `setup` step may take; the job limit grows by the same amount.
+pub(crate) const NATIVE_TEST_SETUP_MINUTES: u64 = 15;
 
 fn default_native_test_args() -> String {
     "--workspace --locked".to_owned()
@@ -5153,9 +5161,23 @@ fn validate_native_tests(ci: &CiConfig) -> Result<()> {
         if test.args.contains(['\n', '\r']) {
             bail!("simit project config: {table} args must be a single line");
         }
-        // The job adds 15 minutes of checkout and toolchain overhead to this limit.
-        if test.timeout_minutes == 0 || test.timeout_minutes > 345 {
-            bail!("simit project config: {table} timeout_minutes must be 1..=345");
+        // The job adds 15 minutes of checkout and toolchain overhead (plus the
+        // setup step's own limit) to this limit; GitHub caps a job at 360.
+        let max_minutes = 345
+            - if test.setup.is_some() {
+                NATIVE_TEST_SETUP_MINUTES
+            } else {
+                0
+            };
+        if test.timeout_minutes == 0 || test.timeout_minutes > max_minutes {
+            bail!("simit project config: {table} timeout_minutes must be 1..={max_minutes}");
+        }
+        if let Some(setup) = &test.setup
+            && (setup.trim().is_empty() || setup.contains('\r'))
+        {
+            bail!(
+                "simit project config: {table} setup must be non-empty shell commands without carriage returns"
+            );
         }
         if let Some(toolchain) = &test.toolchain
             && !crate::render::ci::is_toolchain_name(toolchain)
@@ -5196,6 +5218,9 @@ fn set_native_tests_table(table: &mut Table, tests: &[NativeTest]) {
         }
         if let Some(toolchain) = &test.toolchain {
             item.insert("toolchain", Value::from(toolchain.as_str()));
+        }
+        if let Some(setup) = &test.setup {
+            item.insert("setup", Value::from(setup.as_str()));
         }
         if !test.env.is_empty() {
             let mut env = InlineTable::default();

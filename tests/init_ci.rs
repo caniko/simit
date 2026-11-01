@@ -7739,6 +7739,13 @@ id = "windows"
 runner = "windows-2025"
 env = { RUST_BACKTRACE = "1" }
 timeout_minutes = 45
+setup = """
+echo "FETCHED=1" >> "$GITHUB_ENV"
+
+if true; then
+  echo nested
+fi
+"""
 
 [[ci.native_tests]]
 id = "macos"
@@ -7777,7 +7784,8 @@ fn native_tests_render_a_job_per_entry_and_round_trip() {
 
     let windows = &yaml["jobs"]["native-test-windows"];
     assert_eq!(windows["runs-on"].as_str(), Some("windows-2025"));
-    assert_eq!(windows["timeout-minutes"].as_u64(), Some(60));
+    // 45 + 15 for checkout and toolchain + 15 for the setup step.
+    assert_eq!(windows["timeout-minutes"].as_u64(), Some(75));
     assert_eq!(windows["permissions"]["contents"].as_str(), Some("read"));
     let steps = windows["steps"].as_sequence().unwrap();
     assert!(
@@ -7794,12 +7802,22 @@ fn native_tests_render_a_job_per_entry_and_round_trip() {
     );
     // The default toolchain comes from rust-toolchain.toml.
     assert_eq!(steps[1]["with"]["toolchain"].as_str(), Some("1.90.0"));
+    // `setup` runs between the toolchain install and the tests, in bash, verbatim.
+    assert_eq!(steps[2]["name"].as_str(), Some("Setup windows"));
+    assert_eq!(steps[2]["shell"].as_str(), Some("bash"));
+    assert_eq!(steps[2]["timeout-minutes"].as_u64(), Some(15));
     assert_eq!(
         steps[2]["run"].as_str(),
+        Some("echo \"FETCHED=1\" >> \"$GITHUB_ENV\"\n\nif true; then\n  echo nested\nfi\n")
+    );
+    assert!(steps[2]["env"].is_null());
+    assert_eq!(
+        steps[3]["run"].as_str(),
         Some("cargo test --workspace --locked")
     );
-    assert_eq!(steps[2]["timeout-minutes"].as_u64(), Some(45));
-    assert_eq!(steps[2]["env"]["RUST_BACKTRACE"].as_str(), Some("1"));
+    assert_eq!(steps[3]["timeout-minutes"].as_u64(), Some(45));
+    assert_eq!(steps[3]["env"]["RUST_BACKTRACE"].as_str(), Some("1"));
+    assert_eq!(steps.len(), 4);
 
     let mac = &yaml["jobs"]["native-test-macos"];
     assert_eq!(
@@ -7810,6 +7828,7 @@ fn native_tests_render_a_job_per_entry_and_round_trip() {
         mac["steps"][2]["run"].as_str(),
         Some("cargo test -p core --locked")
     );
+    assert_eq!(mac["steps"].as_sequence().unwrap().len(), 3);
     for line in text
         .lines()
         .filter(|line| line.trim_start().starts_with("uses:"))

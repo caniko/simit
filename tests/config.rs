@@ -1350,12 +1350,16 @@ fn native_tests_defaults_and_validation() {
     let test = &native_tests_config("").unwrap().ci.native_tests[0];
     assert_eq!(test.args, "--workspace --locked");
     assert_eq!(test.timeout_minutes, 60);
-    assert!(test.toolchain.is_none() && test.env.is_empty());
+    assert!(test.toolchain.is_none() && test.env.is_empty() && test.setup.is_none());
+    native_tests_config("setup = \"echo hi\"\ntimeout_minutes = 330\n").unwrap();
     native_tests_config("toolchain = \"1.85.0\"\nargs = \"-p core\"\ntimeout_minutes = 90\nenv = { RUST_LOG = \"info\" }\n")
         .unwrap();
     let cases = [
         ("timeout_minutes = 0\n", "timeout_minutes"),
         ("timeout_minutes = 400\n", "timeout_minutes"),
+        ("setup = \"echo\"\ntimeout_minutes = 331\n", "1..=330"),
+        ("setup = \" \\n\"\n", "setup"),
+        ("setup = \"a\\r\\nb\"\n", "setup"),
         ("runner = \"\"\n", "runner"),
         ("toolchain = \"stable\\nx\"\n", "toolchain"),
         ("toolchain = \"a b\"\n", "toolchain"),
