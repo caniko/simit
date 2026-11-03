@@ -32,9 +32,20 @@ pub(crate) fn submit(args: WingetSubmitArgs) -> Result<()> {
     if token_env.is_empty() {
         bail!("Winget token environment variable name is empty");
     }
+    // The ARM64 zip sits next to the x64 one, so swap the file name in the URL.
+    let arm64_url = resolved.arm64_zip_archive.as_ref().map(|name| {
+        let name = name.replace("{version}", &args.version);
+        format!(
+            "{}/{name}",
+            url.rsplit_once('/').map_or("", |(base, _)| base)
+        )
+    });
     if args.dry_run {
+        let arm64 = arm64_url
+            .as_ref()
+            .map_or_else(String::new, |u| format!(" and arm64 ({u})"));
         println!(
-            "winget: would submit {} {} ({url}) to microsoft/winget-pkgs through the GitHub API with ${token_env}",
+            "winget: would submit {} {} ({url}{arm64}) to microsoft/winget-pkgs through the GitHub API with ${token_env}",
             resolved.package_id, args.version
         );
         return Ok(());
@@ -53,19 +64,26 @@ pub(crate) fn submit(args: WingetSubmitArgs) -> Result<()> {
     let release_dir = work_dir.join("release");
     fs::create_dir_all(&release_dir)
         .with_context(|| format!("creating {}", release_dir.display()))?;
-    let zip_name = url.rsplit('/').next().unwrap_or_default();
-    if zip_name.is_empty() {
-        bail!("cannot derive the installer file name from {url}");
-    }
-    // The manifests carry the installer's SHA-256, so fetch the zip.
-    let status = Command::new("curl")
-        .args(["-fsSL", "-o"])
-        .arg(release_dir.join(zip_name))
-        .arg(&url)
-        .status()
-        .context("downloading the installer with curl")?;
-    if !status.success() {
-        bail!("downloading {url} failed");
+    // (env prefix, URL) per installer; the manifests carry each zip's SHA-256, so fetch them.
+    let mut installers = vec![("ZIP", url.as_str())];
+    installers.extend(arm64_url.as_deref().map(|u| ("ARM64_ZIP", u)));
+    let mut zip_env = Vec::new();
+    for (prefix, url) in installers {
+        let zip_name = url.rsplit('/').next().unwrap_or_default();
+        if zip_name.is_empty() {
+            bail!("cannot derive the installer file name from {url}");
+        }
+        let status = Command::new("curl")
+            .args(["-fsSL", "-o"])
+            .arg(release_dir.join(zip_name))
+            .arg(url)
+            .status()
+            .context("downloading the installer with curl")?;
+        if !status.success() {
+            bail!("downloading {url} failed");
+        }
+        zip_env.push((format!("{prefix}_NAME"), zip_name.to_owned()));
+        zip_env.push((format!("{prefix}_URL"), url.to_owned()));
     }
     let script = work_dir.join("winget-submit.sh");
     fs::write(
@@ -78,8 +96,7 @@ pub(crate) fn submit(args: WingetSubmitArgs) -> Result<()> {
         .arg("winget-submit.sh")
         .current_dir(&work_dir)
         .env("VERSION", &args.version)
-        .env("ZIP_NAME", zip_name)
-        .env("ZIP_URL", &url)
+        .envs(zip_env)
         .env("WINGET_PAT", token)
         .env_remove("PUBLISH_WINGET_STATE")
         .status()
@@ -102,6 +119,7 @@ fn resolve(
         package_id: String::new(),
         download_repo: String::new(),
         zip_archive: String::new(),
+        arm64_zip_archive: None,
         token_secret: "WINGET_PAT".to_owned(),
         publisher: None,
         package_name: None,
@@ -140,6 +158,9 @@ fn resolve(
         if slot.is_empty() {
             bail!("winget.{name} not set; provide {flag} or [winget].{name}");
         }
+    }
+    if let Some(value) = &args.arm64_zip_archive {
+        winget.arm64_zip_archive = Some(value.clone());
     }
     if let Some(env) = &args.token_env {
         winget.token_secret.clone_from(env);

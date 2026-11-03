@@ -1453,6 +1453,12 @@ pub struct WingetSubmitArgs {
         help = "Windows zip filename or pattern containing {version}"
     )]
     pub zip_archive: Option<String>,
+    #[arg(
+        long = "arm64-zip-archive",
+        value_name = "NAME",
+        help = "Windows ARM64 zip filename or pattern containing {version}; adds an arm64 installer"
+    )]
+    pub arm64_zip_archive: Option<String>,
     #[arg(long = "url", value_name = "URL", help = "Installer URL to submit")]
     pub url: Option<String>,
     #[arg(
