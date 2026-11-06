@@ -2254,11 +2254,33 @@ runtime = "nix"
     for (name, script) in [
         (
             "git",
-            "#!/bin/sh\nif [ \"$1\" = rev-parse ]; then printf '%040d\\n' 1; fi\n",
+            r#"#!/bin/sh
+case "$1" in
+  rev-parse) printf '%040d\n' 1 ;;
+  grep) test "${FIXTURE_LFS:-0}" = 1 ;;
+  lfs) touch lfs-ready ;;
+  status)
+    if [ "${FIXTURE_STATUS_FAIL:-0}" = 1 ]; then exit 42; fi
+    if [ "${FIXTURE_DIRTY:-0}" = 1 ] || { [ "${FIXTURE_LFS:-0}" = 1 ] && [ ! -f lfs-ready ]; }; then
+      printf ' M design/fixture.fig\n'
+    fi ;;
+esac
+"#,
         ),
         (
             "nix",
-            "#!/bin/sh\nif [ \"$1\" = flake ]; then printf '{\"locked\":{\"rev\":\"fixture\"}}\\n'; else printf '[{\"drvPath\":\"/nix/store/fixture.drv\",\"outputs\":{\"out\":\"/nix/store/fixture\"}}]\\n'; exit 7; fi\n",
+            r#"#!/bin/sh
+printf '%s\n' "$*" >> nix-calls
+case " $* " in
+  *' nixpkgs#git-lfs '*) printf '%s\n' "$FIXTURE_LFS_PATH" ;;
+  *) if [ "$1" = flake ]; then
+       printf '{"locked":{"rev":"fixture"}}\n'
+     else
+       printf '[{"drvPath":"/nix/store/fixture.drv","outputs":{"out":"/nix/store/fixture"}}]\n'
+       exit 7
+     fi ;;
+esac
+"#,
         ),
     ] {
         fs::write(bin.join(name), script).unwrap();
@@ -2269,12 +2291,19 @@ runtime = "nix"
         std::iter::once(bin).chain(std::env::split_paths(&std::env::var_os("PATH").unwrap())),
     )
     .unwrap();
-    let output = Command::new("sh")
-        .current_dir(temp.path())
-        .env("PATH", path)
-        .args(["-c", &build_script])
-        .output()
-        .unwrap();
+    let lfs_path = temp.path().join("lfs-tool");
+    fs::create_dir_all(lfs_path.join("bin")).unwrap();
+    let run = |variables: &[(&str, &str)]| {
+        Command::new("sh")
+            .current_dir(temp.path())
+            .env("PATH", &path)
+            .env("FIXTURE_LFS_PATH", &lfs_path)
+            .envs(variables.iter().copied())
+            .args(["-c", &build_script])
+            .output()
+            .unwrap()
+    };
+    let output = run(&[]);
     assert_eq!(output.status.code(), Some(7), "{output:?}");
     let stdout = String::from_utf8(output.stdout).unwrap();
     let receipt: serde_json::Value = serde_json::from_str(stdout.lines().next().unwrap()).unwrap();
@@ -2283,6 +2312,25 @@ runtime = "nix"
     assert_eq!(receipt["exit_status"], 7);
     assert!(stdout.contains("/nix/store/fixture.drv"));
     assert!(stdout.contains("\"rev\":\"fixture\""));
+
+    let lfs = run(&[("FIXTURE_LFS", "1")]);
+    assert_eq!(lfs.status.code(), Some(7), "{lfs:?}");
+    assert!(temp.path().join("lfs-ready").exists());
+    let calls = read(&temp.path().join("nix-calls"));
+    let bootstrap = calls
+        .lines()
+        .find(|line| line.contains("nixpkgs#git-lfs"))
+        .unwrap();
+    assert!(bootstrap.contains("--inputs-from ."));
+    assert!(bootstrap.contains("--no-update-lock-file"));
+    assert!(bootstrap.contains("--max-jobs 1 --cores 2"));
+
+    let dirty = run(&[("FIXTURE_DIRTY", "1")]);
+    assert_eq!(dirty.status.code(), Some(1), "{dirty:?}");
+    assert!(String::from_utf8_lossy(&dirty.stderr).contains("design/fixture.fig"));
+    assert!(!String::from_utf8_lossy(&dirty.stdout).contains("/nix/store/fixture.drv"));
+    let unreadable = run(&[("FIXTURE_STATUS_FAIL", "1")]);
+    assert_eq!(unreadable.status.code(), Some(42), "{unreadable:?}");
 
     for invalid in [
         config.replace("qualify_cores = 2", "qualify_cores = 0"),

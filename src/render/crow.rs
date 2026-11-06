@@ -1049,31 +1049,46 @@ pub fn qualify_files(
     let mut files = Vec::new();
     let mut previous = Vec::<String>::new();
     for (job, mut command, installable) in jobs {
-        if let Some(jobs) = prebuild.qualify_max_jobs {
-            command.push_str(&format!(" --max-jobs {jobs}"));
-        }
-        if let Some(cores) = prebuild.qualify_cores {
-            command.push_str(&format!(" --cores {cores}"));
+        let mut lfs_command = "nix build --inputs-from . nixpkgs#git-lfs --no-link --no-update-lock-file --print-out-paths".to_owned();
+        for bounded in [&mut command, &mut lfs_command] {
+            if let Some(jobs) = prebuild.qualify_max_jobs {
+                bounded.push_str(&format!(" --max-jobs {jobs}"));
+            }
+            if let Some(cores) = prebuild.qualify_cores {
+                bounded.push_str(&format!(" --cores {cores}"));
+            }
         }
         if prebuild.qualify_capture_results && installable.is_some() {
             command.push_str(" --json");
         }
-        if let Some(minutes) = prebuild.qualify_timeout_minutes {
-            command = format!("timeout --signal=TERM --kill-after=30s {minutes}m {command}");
-        }
+        let timeout = prebuild
+            .qualify_timeout_minutes
+            .map(|minutes| format!("timeout --signal=TERM --kill-after=30s {minutes}m "))
+            .unwrap_or_default();
+        command = format!("{timeout}{command}");
         if prebuild.qualify_capture_results {
             let installable = shell_quote(&serde_json::to_string(&installable)?);
             command = format!(
                 r#"set -eu
-evidence='.simit-qualification/{job}'
-mkdir -p "$${{evidence}}"
+mkdir -p .simit-qualification
+evidence="$(mktemp -d '.simit-qualification/{job}.XXXXXX')"
 source_commit="$(git rev-parse HEAD)"
 lock_sha256="$(sha256sum flake.lock)"
 lock_sha256="$${{lock_sha256%% *}}"
 installable={installable}
 trap 'status=$?; trap - EXIT; printf '\''{{"schema":"simit.crow-qualification.v1","source_commit":"%s","lock_sha256":"%s","installable":%s,"exit_status":%s}}\n'\'' "$${{source_commit}}" "$${{lock_sha256}}" "$${{installable}}" "$${{status}}"; for receipt in "$${{evidence}}/metadata.json" "$${{evidence}}/result.json"; do if test -f "$${{receipt}}"; then cat "$${{receipt}}"; fi; done; exit "$${{status}}"' EXIT
-test -z "$(git status --porcelain --untracked-files=no)"
-nix flake metadata --json --no-update-lock-file > "$${{evidence}}/metadata.json"
+# The clone container's LFS clean filter is not available in this step's image.
+if git grep -q 'filter=lfs' HEAD -- '*.gitattributes'; then
+  git_lfs="$({timeout}{lfs_command})"
+  export PATH="$${{git_lfs}}/bin:$${{PATH}}"
+  git lfs install --local
+fi
+source_status="$(git status --porcelain --untracked-files=no)"
+if test -n "$${{source_status}}"; then
+  printf '%s\n' "$${{source_status}}" >&2
+  exit 1
+fi
+{timeout}nix flake metadata --json --no-update-lock-file > "$${{evidence}}/metadata.json"
 {command} > "$${{evidence}}/result.json""#
             );
         }

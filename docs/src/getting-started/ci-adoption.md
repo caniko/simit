@@ -409,7 +409,13 @@ workflow. Positive job/core limits reach every qualification command; timeout
 sends TERM and then KILL after 30 seconds. Result capture emits the checked-out
 commit, lock-file SHA-256, exact installable, exit status, flake metadata and
 Nix's JSON derivation/output map into the workflow log, including failed builds.
-It refuses a dirty tracked source tree. These are **log receipts**, not Actions
+It refuses a dirty tracked source tree and propagates Git inspection errors.
+For Git LFS repositories it initializes the local clean filter using `git-lfs`
+from the flake's pinned `nixpkgs` before inspecting the smudged checkout; clone
+and qualification containers do not share tool environments. Bootstrap obeys
+the same job/core/timeout limits. Each attempt uses a fresh receipt directory,
+so an early failure cannot attach results from an earlier attempt.
+These are **log receipts**, not Actions
 artifact uploads. Configure and verify the Crow repository timeout and log
 retention separately before enabling a release gate (for example, at least
 90 minutes and 14 days). Download the logs and retain the referenced output
