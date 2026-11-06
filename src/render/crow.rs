@@ -656,7 +656,7 @@ fn crow_path(stem: &str, suffix: Option<&str>, format: CrowWorkflowFormat) -> Pa
     PathBuf::from(".crow").join(format!("{name}.{extension}"))
 }
 
-fn render_workflow(workflow: Workflow, format: CrowWorkflowFormat) -> Result<String> {
+fn render_workflow(workflow: impl Serialize, format: CrowWorkflowFormat) -> Result<String> {
     let yaml = serde_yaml::to_string(&workflow).context("serializing Crow workflow")?;
     match format {
         CrowWorkflowFormat::Yaml => Ok(format!("{}\n{}", ci::GENERATED_WORKFLOW_MARKER, yaml)),
@@ -1016,12 +1016,14 @@ pub fn prebuild_file(
 /// Secret-free workflows that qualify the flake, `[prebuild].qualify` and the
 /// prebuild installables on pull requests and default-branch pushes. Each
 /// command is its own workflow, `.crow/prebuild-qualify-<name>.*`, so every one
-/// gets the repository timeout and they run in parallel.
+/// gets the repository timeout. Optional qualification controls bound and chain
+/// these workflows without granting PRs publication secrets.
 pub fn qualify_files(
     format: CrowWorkflowFormat,
     config: &CrowCiConfig,
     prebuild: &PrebuildConfig,
 ) -> Result<Vec<GeneratedFile>> {
+    prebuild.validate_qualification()?;
     let image = nix_image(config)?;
     let installables = prebuild
         .qualify
@@ -1031,19 +1033,50 @@ pub fn qualify_files(
         .collect::<Vec<_>>();
     let mut jobs = vec![(
         "flake-check".to_owned(),
-        "nix flake check --no-build".to_owned(),
+        "nix flake check --no-build --no-update-lock-file".to_owned(),
+        None,
     )];
     for (installable, job) in installables.iter().zip(qualify_job_names(&installables)) {
         jobs.push((
             job,
             format!(
-                "nix build {} --no-link --print-build-logs",
+                "nix build {} --no-link --print-build-logs --no-update-lock-file",
                 shell_quote(installable)
             ),
+            Some(*installable),
         ));
     }
     let mut files = Vec::new();
-    for (job, command) in jobs {
+    let mut previous = Vec::<String>::new();
+    for (job, mut command, installable) in jobs {
+        if let Some(jobs) = prebuild.qualify_max_jobs {
+            command.push_str(&format!(" --max-jobs {jobs}"));
+        }
+        if let Some(cores) = prebuild.qualify_cores {
+            command.push_str(&format!(" --cores {cores}"));
+        }
+        if prebuild.qualify_capture_results && installable.is_some() {
+            command.push_str(" --json");
+        }
+        if let Some(minutes) = prebuild.qualify_timeout_minutes {
+            command = format!("timeout --signal=TERM --kill-after=30s {minutes}m {command}");
+        }
+        if prebuild.qualify_capture_results {
+            let installable = shell_quote(&serde_json::to_string(&installable)?);
+            command = format!(
+                r#"set -eu
+evidence='.simit-qualification/{job}'
+mkdir -p "$${{evidence}}"
+source_commit="$(git rev-parse HEAD)"
+lock_sha256="$(sha256sum flake.lock)"
+lock_sha256="$${{lock_sha256%% *}}"
+installable={installable}
+trap 'status=$?; trap - EXIT; printf '\''{{"schema":"simit.crow-qualification.v1","source_commit":"%s","lock_sha256":"%s","installable":%s,"exit_status":%s}}\n'\'' "$${{source_commit}}" "$${{lock_sha256}}" "$${{installable}}" "$${{status}}"; for receipt in "$${{evidence}}/metadata.json" "$${{evidence}}/result.json"; do if test -f "$${{receipt}}"; then cat "$${{receipt}}"; fi; done; exit "$${{status}}"' EXIT
+test -z "$(git status --porcelain --untracked-files=no)"
+nix flake metadata --json --no-update-lock-file > "$${{evidence}}/metadata.json"
+{command} > "$${{evidence}}/result.json""#
+            );
+        }
         let mut step = Step::new(job.clone(), &image).command(command);
         add_nix_environment(std::slice::from_mut(&mut step));
         let workflow = Workflow {
@@ -1064,6 +1097,25 @@ pub fn qualify_files(
             variables: config.variables.clone(),
             workspace: None,
             steps: vec![step],
+        };
+        // Flattening adds a workflow dependency, not a step dependency (which
+        // cannot serialize separate Crow workflows).
+        #[derive(Serialize)]
+        struct QualificationWorkflow {
+            #[serde(flatten)]
+            workflow: Workflow,
+            #[serde(skip_serializing_if = "Vec::is_empty")]
+            depends_on: Vec<String>,
+        }
+        let name = workflow.name.clone();
+        let workflow = QualificationWorkflow {
+            workflow,
+            depends_on: previous,
+        };
+        previous = if prebuild.qualify_serial {
+            vec![name]
+        } else {
+            Vec::new()
         };
         files.push(GeneratedFile {
             relative_path: crow_path(&format!("prebuild-qualify-{job}"), None, format),

@@ -1347,9 +1347,43 @@ pub struct PrebuildConfig {
     /// `.crow/prebuild-qualify-<name>` workflow per command.
     #[serde(default)]
     pub qualify: Vec<String>,
+    /// Crow qualification workflows form a dependency chain instead of running together.
+    #[serde(default)]
+    pub qualify_serial: bool,
+    #[serde(default)]
+    pub qualify_max_jobs: Option<u64>,
+    #[serde(default)]
+    pub qualify_cores: Option<u64>,
+    #[serde(default)]
+    pub qualify_timeout_minutes: Option<u64>,
+    /// Emit source/lock identity, flake metadata and Nix JSON results into Crow logs.
+    #[serde(default)]
+    pub qualify_capture_results: bool,
 }
 
 impl PrebuildConfig {
+    pub(crate) fn validate_qualification(&self) -> Result<()> {
+        if (self.qualify_serial
+            || self.qualify_max_jobs.is_some()
+            || self.qualify_cores.is_some()
+            || self.qualify_timeout_minutes.is_some()
+            || self.qualify_capture_results)
+            && (!self.runs_on_crow() || self.qualify.is_empty())
+        {
+            bail!("[prebuild].qualify_* controls require provider = \"crow\" and nonempty qualify");
+        }
+        for (name, value) in [
+            ("qualify_max_jobs", self.qualify_max_jobs),
+            ("qualify_cores", self.qualify_cores),
+            ("qualify_timeout_minutes", self.qualify_timeout_minutes),
+        ] {
+            if value == Some(0) {
+                bail!("[prebuild].{name} must be positive");
+            }
+        }
+        Ok(())
+    }
+
     pub(crate) fn runs_on_crow(&self) -> bool {
         self.provider == Some(CiProvider::Crow)
     }
@@ -3238,6 +3272,7 @@ impl ProjectConfig {
             )?;
         }
         if let Some(prebuild) = &self.prebuild {
+            prebuild.validate_qualification()?;
             if prebuild.runs_on_crow()
                 && (prebuild.release_archives
                     || !prebuild.system_runners.is_empty()

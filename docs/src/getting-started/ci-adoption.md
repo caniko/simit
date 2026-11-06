@@ -389,7 +389,32 @@ runs `nix flake check --no-build`, and one `.crow/prebuild-qualify-<name>`
 workflow builds each `qualify` installable and each prebuild `nix_builds`
 installable, named after its final attribute. Separate workflows run in
 parallel and each gets the repository timeout. Removing `qualify` retires
-them.
+them. Qualification never updates the lock file. Crow prebuilds can opt into
+bounded, serialized qualification:
+
+```toml
+[prebuild]
+provider = "crow"
+nix_builds = [".#packages.x86_64-linux.server"]
+qualify = [".#checks.x86_64-linux.clippy"]
+qualify_serial = true
+qualify_max_jobs = 1
+qualify_cores = 2
+qualify_timeout_minutes = 90
+qualify_capture_results = true
+```
+
+`qualify_serial` chains workflow dependencies, not just steps within each
+workflow. Positive job/core limits reach every qualification command; timeout
+sends TERM and then KILL after 30 seconds. Result capture emits the checked-out
+commit, lock-file SHA-256, exact installable, exit status, flake metadata and
+Nix's JSON derivation/output map into the workflow log, including failed builds.
+It refuses a dirty tracked source tree. These are **log receipts**, not Actions
+artifact uploads. Configure and verify the Crow repository timeout and log
+retention separately before enabling a release gate (for example, at least
+90 minutes and 14 days). Download the logs and retain the referenced output
+closures when off-server evidence or recovery is required. Repository policy
+and cached realization do not prove fresh test execution.
 Distinct MSRV, feature, platform, extracted-package, all-system evaluation and
 fresh-execution checks are separate acceptance cases, not duplicate work.
 

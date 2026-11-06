@@ -2111,14 +2111,17 @@ token_secret = "ATTIC_TOKEN"
             .join(format!(".crow/prebuild-qualify-{job}.yaml"))
     };
     let expected = [
-        ("flake-check", "nix flake check --no-build"),
+        (
+            "flake-check",
+            "nix flake check --no-build --no-update-lock-file",
+        ),
         (
             "clippy",
-            "nix build '.#checks.x86_64-linux.clippy' --no-link --print-build-logs",
+            "nix build '.#checks.x86_64-linux.clippy' --no-link --print-build-logs --no-update-lock-file",
         ),
         (
             "server",
-            "nix build '.#packages.x86_64-linux.server' --no-link --print-build-logs",
+            "nix build '.#packages.x86_64-linux.server' --no-link --print-build-logs --no-update-lock-file",
         ),
     ];
     for (job, command) in expected {
@@ -2184,6 +2187,117 @@ token_secret = "ATTIC_TOKEN"
         + "\n[prebuild.system_runners]\n\"x86_64-linux\" = \"ubuntu-24.04\"\n";
     fs::write(temp.path().join("simit.toml"), github).unwrap();
     assert!(!prebuild_only(false));
+}
+
+#[test]
+fn crow_qualification_bounds_work_and_retains_failed_result_receipts() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let config = r#"[prebuild]
+provider = "crow"
+nix_builds = [".#packages.x86_64-linux.server"]
+qualify = [".#checks.x86_64-linux.clippy"]
+qualify_serial = true
+qualify_max_jobs = 1
+qualify_cores = 2
+qualify_timeout_minutes = 90
+qualify_capture_results = true
+
+[ci]
+provider = "actions"
+platform = "github"
+runtime = "nix"
+"#;
+    let temp = init_flake_only();
+    fs::write(temp.path().join("simit.toml"), config).unwrap();
+    let generate = || {
+        simit()
+            .current_dir(temp.path())
+            .args(["init", "ci", "--prebuild-only"])
+            .output()
+            .unwrap()
+    };
+    let output = generate();
+    assert!(output.status.success(), "{output:?}");
+    let mut previous = None;
+    let mut build_script = String::new();
+    for job in ["flake-check", "clippy", "server"] {
+        let workflow = read(
+            &temp
+                .path()
+                .join(format!(".crow/prebuild-qualify-{job}.yaml")),
+        );
+        let yaml: serde_yaml::Value = serde_yaml::from_str(&workflow).unwrap();
+        assert!(!workflow.contains("from_secret"));
+        assert_eq!(yaml["when"][0]["event"], "pull_request");
+        if let Some(previous) = previous {
+            assert_eq!(yaml["depends_on"][0], previous);
+        } else {
+            assert!(yaml["depends_on"].is_null());
+        }
+        previous = Some(format!("qualify-{job}"));
+        let script = yaml["steps"][0]["commands"][0].as_str().unwrap();
+        assert!(script.contains("--no-update-lock-file"));
+        assert!(script.contains("--max-jobs 1 --cores 2"));
+        assert!(script.contains("timeout --signal=TERM --kill-after=30s 90m"));
+        assert!(script.contains("simit.crow-qualification.v1"));
+        if job == "server" {
+            assert!(script.contains("--json"));
+            build_script = script.replace("$${", "${");
+        }
+    }
+    // Execute the generated command with disposable executables, not real Nix.
+    // A failing realization must preserve both its JSON output and exit status.
+    let bin = temp.path().join("bin");
+    fs::create_dir(&bin).unwrap();
+    for (name, script) in [
+        (
+            "git",
+            "#!/bin/sh\nif [ \"$1\" = rev-parse ]; then printf '%040d\\n' 1; fi\n",
+        ),
+        (
+            "nix",
+            "#!/bin/sh\nif [ \"$1\" = flake ]; then printf '{\"locked\":{\"rev\":\"fixture\"}}\\n'; else printf '[{\"drvPath\":\"/nix/store/fixture.drv\",\"outputs\":{\"out\":\"/nix/store/fixture\"}}]\\n'; exit 7; fi\n",
+        ),
+    ] {
+        fs::write(bin.join(name), script).unwrap();
+        fs::set_permissions(bin.join(name), fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    fs::write(temp.path().join("flake.lock"), "{}\n").unwrap();
+    let path = std::env::join_paths(
+        std::iter::once(bin).chain(std::env::split_paths(&std::env::var_os("PATH").unwrap())),
+    )
+    .unwrap();
+    let output = Command::new("sh")
+        .current_dir(temp.path())
+        .env("PATH", path)
+        .args(["-c", &build_script])
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(7), "{output:?}");
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    let receipt: serde_json::Value = serde_json::from_str(stdout.lines().next().unwrap()).unwrap();
+    assert_eq!(receipt["source_commit"], format!("{:040}", 1));
+    assert_eq!(receipt["installable"], ".#packages.x86_64-linux.server");
+    assert_eq!(receipt["exit_status"], 7);
+    assert!(stdout.contains("/nix/store/fixture.drv"));
+    assert!(stdout.contains("\"rev\":\"fixture\""));
+
+    for invalid in [
+        config.replace("qualify_cores = 2", "qualify_cores = 0"),
+        config.replace("qualify_max_jobs = 1", "qualify_max_jobs = 0"),
+        config.replace(
+            "qualify_timeout_minutes = 90",
+            "qualify_timeout_minutes = 0",
+        ),
+        config.replace(
+            "qualify = [\".#checks.x86_64-linux.clippy\"]",
+            "qualify = []",
+        ),
+    ] {
+        fs::write(temp.path().join("simit.toml"), invalid).unwrap();
+        assert!(!generate().status.success());
+    }
 }
 
 #[test]
