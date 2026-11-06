@@ -2190,6 +2190,7 @@ token_secret = "ATTIC_TOKEN"
 }
 
 #[test]
+#[cfg(unix)]
 fn crow_qualification_bounds_work_and_retains_failed_result_receipts() {
     use std::os::unix::fs::PermissionsExt;
 
