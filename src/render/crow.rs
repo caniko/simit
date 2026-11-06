@@ -1085,11 +1085,14 @@ pub fn qualify_files(
         command = format!("{timeout}{command}");
         let mut preparation = String::new();
         if prebuild.qualify_split_evaluation && installable.is_some() {
-            let parser = shell_quote(QUALIFICATION_TARGETS);
+            // Nix auto-applies --argstr only while traversing an attribute path.
+            let parser = shell_quote(&format!(
+                "{{ plan }}: {{ targets = ({QUALIFICATION_TARGETS}) plan; }}"
+            ));
             let plan_command = command.trim_end_matches(" --json");
             preparation = format!(
                 r#"{plan_command} --dry-run --json > "$${{evidence}}/plan.json"
-{timeout}nix eval --raw --expr {parser} --argstr plan "$(cat "$${{evidence}}/plan.json")" > "$${{evidence}}/targets.txt"
+{timeout}nix eval --raw --expr {parser} --argstr plan "$(cat "$${{evidence}}/plan.json")" targets > "$${{evidence}}/targets.txt"
 root_parent="$${{NIX_STATE_DIR:-/nix/var/nix}}/gcroots/per-user/$(id -un)"
 mkdir -p "$${{root_parent}}" "$${{evidence}}/roots"
 gcroot="$(mktemp -d "$${{root_parent}}/simit-{job}.XXXXXX")"
