@@ -2065,6 +2065,138 @@ token_secret = "DEMO_ATTIC_TOKEN"
 }
 
 #[test]
+#[cfg(unix)]
+fn crow_qualification_separates_evaluation_from_frozen_realization() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let temp = init_flake_only();
+    let config = r#"[prebuild]
+provider = "crow"
+qualify = [".#checks.x86_64-linux.server^dev,out"]
+nix_builds = [".#packages.x86_64-linux.tool"]
+qualify_max_jobs = 1
+qualify_cores = 2
+qualify_timeout_minutes = 90
+qualify_capture_results = true
+qualify_split_evaluation = true
+
+[ci]
+provider = "actions"
+platform = "github"
+runtime = "nix"
+"#;
+    fs::write(temp.path().join("simit.toml"), config).unwrap();
+    let generate = || {
+        simit()
+            .current_dir(temp.path())
+            .args(["init", "ci", "--prebuild-only"])
+            .output()
+            .unwrap()
+    };
+    let generated = generate();
+    assert!(generated.status.success(), "{generated:?}");
+    let file = fs::read_dir(temp.path().join(".crow"))
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .find(|path| {
+            path.file_name()
+                .unwrap()
+                .to_string_lossy()
+                .contains("server")
+        })
+        .unwrap();
+    let workflow: serde_yaml::Value = serde_yaml::from_str(&read(&file)).unwrap();
+    let script = workflow["steps"][0]["commands"][0]
+        .as_str()
+        .unwrap()
+        .replace("$${", "${");
+    assert!(script.contains("--dry-run --json"));
+    assert!(script.contains("--stdin"));
+    assert!(script.contains("plan.json"));
+    assert!(script.contains("gcroots/per-user"));
+    let bin = temp.path().join("bin");
+    fs::create_dir(&bin).unwrap();
+    for (name, content) in [
+        (
+            "git",
+            "#!/bin/sh\ncase \"$1\" in rev-parse) printf '%040d\\n' 1;; grep) exit 1;; esac\n",
+        ),
+        (
+            "nix",
+            r#"#!/bin/sh
+printf '%s\n' "$*" >> nix-calls
+if [ "$1" = flake ]; then printf '{}\n'; exit; fi
+case " $* " in
+  *' --dry-run '*)
+    test "${FAIL_PLAN:-0}" = 0 || exit 42
+    printf '[{"drvPath":"/nix/store/00000000000000000000000000000000-fixture.drv","outputs":{"dev":"/nix/store/fixture-dev","out":"/nix/store/fixture"}}]\n' ;;
+  *' eval '*) printf '/nix/store/00000000000000000000000000000000-fixture.drv^dev,out\n' ;;
+  *' --stdin '*)
+    cat > realized-targets
+    printf '[{"drvPath":"/nix/store/00000000000000000000000000000000-fixture.drv","outputs":{"dev":"/nix/store/fixture-dev","out":"/nix/store/fixture"}}]\n'
+    exit 7 ;;
+  *) exit 99 ;;
+esac
+"#,
+        ),
+    ] {
+        fs::write(bin.join(name), content).unwrap();
+        fs::set_permissions(bin.join(name), fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    fs::write(temp.path().join("flake.lock"), "{}\n").unwrap();
+    let path = std::env::join_paths(
+        std::iter::once(bin).chain(std::env::split_paths(&std::env::var_os("PATH").unwrap())),
+    )
+    .unwrap();
+    let run = |fail_plan: &str| {
+        Command::new("sh")
+            .current_dir(temp.path())
+            .env("PATH", &path)
+            .env("NIX_STATE_DIR", temp.path().join("nix-state"))
+            .env("FAIL_PLAN", fail_plan)
+            .args(["-c", &script])
+            .output()
+            .unwrap()
+    };
+    let output = run("0");
+    assert_eq!(output.status.code(), Some(7), "{output:?}");
+    assert_eq!(
+        read(&temp.path().join("realized-targets")),
+        "/nix/store/00000000000000000000000000000000-fixture.drv^dev,out\n"
+    );
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(stdout.contains("\"exit_status\":7"));
+    assert!(stdout.contains("fixture-dev"));
+    let calls = read(&temp.path().join("nix-calls"));
+    let realize = calls.lines().find(|line| line.contains("--stdin")).unwrap();
+    assert!(!realize.contains(".#"));
+    assert!(realize.contains("--max-jobs 1 --cores 2"));
+    let users = temp.path().join("nix-state/gcroots/per-user");
+    let user = fs::read_dir(users).unwrap().next().unwrap().unwrap().path();
+    let roots = fs::read_dir(user).unwrap().next().unwrap().unwrap().path();
+    let indirect = fs::read_link(roots.join("1")).unwrap();
+    assert!(indirect.starts_with(temp.path()));
+    assert_eq!(
+        fs::read_link(indirect).unwrap(),
+        Path::new("/nix/store/00000000000000000000000000000000-fixture.drv")
+    );
+    fs::remove_file(temp.path().join("realized-targets")).unwrap();
+    let failure = run("1");
+    assert_eq!(failure.status.code(), Some(42), "{failure:?}");
+    assert!(!temp.path().join("realized-targets").exists());
+    assert!(!String::from_utf8_lossy(&failure.stdout).contains("fixture-dev"));
+    fs::write(
+        temp.path().join("simit.toml"),
+        config.replace(
+            "qualify_capture_results = true",
+            "qualify_capture_results = false",
+        ),
+    )
+    .unwrap();
+    assert!(!generate().status.success());
+}
+
+#[test]
 fn crow_prebuild_qualify_runs_secret_free_on_pull_requests() {
     let config = r#"[prebuild]
 provider = "crow"
@@ -2111,14 +2243,17 @@ token_secret = "ATTIC_TOKEN"
             .join(format!(".crow/prebuild-qualify-{job}.yaml"))
     };
     let expected = [
-        ("flake-check", "nix flake check --no-build"),
+        (
+            "flake-check",
+            "nix flake check --no-build --no-update-lock-file",
+        ),
         (
             "clippy",
-            "nix build '.#checks.x86_64-linux.clippy' --no-link --print-build-logs",
+            "nix build '.#checks.x86_64-linux.clippy' --no-link --print-build-logs --no-update-lock-file",
         ),
         (
             "server",
-            "nix build '.#packages.x86_64-linux.server' --no-link --print-build-logs",
+            "nix build '.#packages.x86_64-linux.server' --no-link --print-build-logs --no-update-lock-file",
         ),
     ];
     for (job, command) in expected {
@@ -2184,6 +2319,199 @@ token_secret = "ATTIC_TOKEN"
         + "\n[prebuild.system_runners]\n\"x86_64-linux\" = \"ubuntu-24.04\"\n";
     fs::write(temp.path().join("simit.toml"), github).unwrap();
     assert!(!prebuild_only(false));
+}
+
+#[test]
+#[cfg(unix)]
+fn crow_qualification_bounds_work_and_retains_failed_result_receipts() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let config = r#"[prebuild]
+provider = "crow"
+nix_builds = [".#packages.x86_64-linux.server"]
+qualify = [".#checks.x86_64-linux.clippy"]
+qualify_serial = true
+qualify_max_jobs = 1
+qualify_cores = 2
+qualify_timeout_minutes = 90
+qualify_capture_results = true
+
+[ci]
+provider = "actions"
+platform = "github"
+runtime = "nix"
+"#;
+    let temp = init_flake_only();
+    fs::write(temp.path().join("simit.toml"), config).unwrap();
+    let generate = || {
+        simit()
+            .current_dir(temp.path())
+            .args(["init", "ci", "--prebuild-only"])
+            .output()
+            .unwrap()
+    };
+    let output = generate();
+    assert!(output.status.success(), "{output:?}");
+    let mut previous = None;
+    let mut build_script = String::new();
+    for job in ["flake-check", "clippy", "server"] {
+        let workflow = read(
+            &temp
+                .path()
+                .join(format!(".crow/prebuild-qualify-{job}.yaml")),
+        );
+        let yaml: serde_yaml::Value = serde_yaml::from_str(&workflow).unwrap();
+        assert!(!workflow.contains("from_secret"));
+        assert_eq!(yaml["when"][0]["event"], "pull_request");
+        if let Some(previous) = previous {
+            assert_eq!(yaml["depends_on"][0], previous);
+        } else {
+            assert!(yaml["depends_on"].is_null());
+        }
+        previous = Some(format!("qualify-{job}"));
+        let script = yaml["steps"][0]["commands"][0].as_str().unwrap();
+        assert!(script.contains("--no-update-lock-file"));
+        assert!(script.contains("--max-jobs 1 --cores 2"));
+        assert!(script.contains("timeout --signal=TERM --kill-after=30s 90m"));
+        assert!(script.contains("simit.crow-qualification.v1"));
+        if job == "server" {
+            assert!(script.contains("--json"));
+            build_script = script.replace("$${", "${");
+        }
+    }
+    // Execute the generated command with disposable executables, not real Nix.
+    // A failing realization must preserve both its JSON output and exit status.
+    let cgroup = temp.path().join("cgroup");
+    let memory = cgroup.join("step");
+    fs::create_dir_all(&memory).unwrap();
+    fs::write(cgroup.join("memory.events"), "oom_kill 99\n").unwrap();
+    fs::write(memory.join("memory.events"), "oom_kill 0\n").unwrap();
+    fs::write(memory.join("memory.max"), "7516192768\n").unwrap();
+    fs::write(memory.join("memory.peak"), "4096\n").unwrap();
+    let membership = temp.path().join("membership");
+    fs::write(&membership, "0::/step\n").unwrap();
+    build_script = build_script
+        .replace("/sys/fs/cgroup", cgroup.to_str().unwrap())
+        .replace("/proc/self/cgroup", membership.to_str().unwrap());
+    let bin = temp.path().join("bin");
+    fs::create_dir(&bin).unwrap();
+    for (name, script) in [
+        (
+            "git",
+            r#"#!/bin/sh
+case "$1" in
+  rev-parse) printf '%040d\n' 1 ;;
+  grep) test "${FIXTURE_LFS:-0}" = 1 ;;
+  lfs) touch lfs-ready ;;
+  status)
+    if [ "${FIXTURE_STATUS_FAIL:-0}" = 1 ]; then exit 42; fi
+    if [ "${FIXTURE_DIRTY:-0}" = 1 ] || { [ "${FIXTURE_LFS:-0}" = 1 ] && [ ! -f lfs-ready ]; }; then
+      printf ' M design/fixture.fig\n'
+    fi ;;
+esac
+"#,
+        ),
+        (
+            "nix",
+            r#"#!/bin/sh
+printf '%s\n' "$*" >> nix-calls
+case " $* " in
+  *' nixpkgs#git-lfs '*) printf '%s\n' "$FIXTURE_LFS_PATH" ;;
+  *) if [ "$1" = flake ]; then
+       printf '{"locked":{"rev":"fixture"}}\n'
+     else
+       printf '[{"drvPath":"/nix/store/fixture.drv","outputs":{"out":"/nix/store/fixture"}}]\n'
+       printf 'oom_kill 1\n' > "$FIXTURE_MEMORY_DIR/memory.events"
+       printf '8192\n' > "$FIXTURE_MEMORY_DIR/memory.peak"
+       exit 7
+     fi ;;
+esac
+"#,
+        ),
+    ] {
+        fs::write(bin.join(name), script).unwrap();
+        fs::set_permissions(bin.join(name), fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    fs::write(temp.path().join("flake.lock"), "{}\n").unwrap();
+    let path = std::env::join_paths(
+        std::iter::once(bin).chain(std::env::split_paths(&std::env::var_os("PATH").unwrap())),
+    )
+    .unwrap();
+    let lfs_path = temp.path().join("lfs-tool");
+    fs::create_dir_all(lfs_path.join("bin")).unwrap();
+    let run = |variables: &[(&str, &str)]| {
+        Command::new("sh")
+            .current_dir(temp.path())
+            .env("PATH", &path)
+            .env("FIXTURE_LFS_PATH", &lfs_path)
+            .env("FIXTURE_MEMORY_DIR", &memory)
+            .envs(variables.iter().copied())
+            .args(["-c", &build_script])
+            .output()
+            .unwrap()
+    };
+    let output = run(&[]);
+    assert_eq!(output.status.code(), Some(7), "{output:?}");
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    let receipt: serde_json::Value = serde_json::from_str(stdout.lines().next().unwrap()).unwrap();
+    assert_eq!(receipt["source_commit"], format!("{:040}", 1));
+    assert_eq!(receipt["installable"], ".#packages.x86_64-linux.server");
+    assert_eq!(receipt["exit_status"], 7);
+    assert!(stdout.contains("/nix/store/fixture.drv"));
+    assert!(stdout.contains("\"rev\":\"fixture\""));
+    let evidence = fs::read_dir(temp.path().join(".simit-qualification"))
+        .unwrap()
+        .next()
+        .unwrap()
+        .unwrap()
+        .path();
+    let before = read(&evidence.join("memory-before.txt"));
+    let after = read(&evidence.join("memory-after.txt"));
+    assert!(before.contains("scope=membership"));
+    assert!(before.contains("memory.events:\noom_kill 0"));
+    assert!(before.contains("memory.max:\n7516192768"));
+    assert!(after.contains("memory.events:\noom_kill 1"));
+    assert!(after.contains("memory.peak:\n8192"));
+    assert!(stdout.contains(&before) && stdout.contains(&after));
+    assert!(!stdout.contains("oom_kill 99"));
+    assert!(stdout.contains("unavailable"));
+
+    let lfs = run(&[("FIXTURE_LFS", "1")]);
+    assert_eq!(lfs.status.code(), Some(7), "{lfs:?}");
+    assert!(temp.path().join("lfs-ready").exists());
+    let calls = read(&temp.path().join("nix-calls"));
+    let bootstrap = calls
+        .lines()
+        .find(|line| line.contains("nixpkgs#git-lfs"))
+        .unwrap();
+    assert!(bootstrap.contains("--inputs-from ."));
+    assert!(bootstrap.contains("--no-update-lock-file"));
+    assert!(bootstrap.contains("--max-jobs 1 --cores 2"));
+
+    let dirty = run(&[("FIXTURE_DIRTY", "1")]);
+    assert_eq!(dirty.status.code(), Some(1), "{dirty:?}");
+    assert!(String::from_utf8_lossy(&dirty.stderr).contains("design/fixture.fig"));
+    assert!(!String::from_utf8_lossy(&dirty.stdout).contains("/nix/store/fixture.drv"));
+    fs::write(&membership, "0::/missing\n").unwrap();
+    let unreadable = run(&[("FIXTURE_STATUS_FAIL", "1")]);
+    assert_eq!(unreadable.status.code(), Some(42), "{unreadable:?}");
+    assert!(String::from_utf8_lossy(&unreadable.stdout).contains("scope=mount-root-fallback"));
+
+    for invalid in [
+        config.replace("qualify_cores = 2", "qualify_cores = 0"),
+        config.replace("qualify_max_jobs = 1", "qualify_max_jobs = 0"),
+        config.replace(
+            "qualify_timeout_minutes = 90",
+            "qualify_timeout_minutes = 0",
+        ),
+        config.replace(
+            "qualify = [\".#checks.x86_64-linux.clippy\"]",
+            "qualify = []",
+        ),
+    ] {
+        fs::write(temp.path().join("simit.toml"), invalid).unwrap();
+        assert!(!generate().status.success());
+    }
 }
 
 #[test]

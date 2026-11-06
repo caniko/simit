@@ -389,7 +389,62 @@ runs `nix flake check --no-build`, and one `.crow/prebuild-qualify-<name>`
 workflow builds each `qualify` installable and each prebuild `nix_builds`
 installable, named after its final attribute. Separate workflows run in
 parallel and each gets the repository timeout. Removing `qualify` retires
-them.
+them. Qualification never updates the lock file. Crow prebuilds can opt into
+bounded, serialized qualification:
+
+```toml
+[prebuild]
+provider = "crow"
+nix_builds = [".#packages.x86_64-linux.server"]
+qualify = [".#checks.x86_64-linux.clippy"]
+qualify_serial = true
+qualify_max_jobs = 1
+qualify_cores = 2
+qualify_timeout_minutes = 90
+qualify_capture_results = true
+# Optional: release the evaluator before realizing frozen derivations.
+qualify_split_evaluation = true
+```
+
+`qualify_serial` chains workflow dependencies, not just steps within each
+workflow. Positive job/core limits reach every qualification command; timeout
+sends TERM and then KILL after 30 seconds. Result capture emits the checked-out
+commit, lock-file SHA-256, exact installable, exit status, flake metadata and
+Nix's JSON derivation/output map into the workflow log, including failed builds.
+It refuses a dirty tracked source tree and propagates Git inspection errors.
+For Git LFS repositories it initializes the local clean filter using `git-lfs`
+from the flake's pinned `nixpkgs` before inspecting the smudged checkout; clone
+and qualification containers do not share tool environments. Bootstrap obeys
+the same job/core/timeout limits. Each attempt uses a fresh receipt directory,
+so an early failure cannot attach results from an earlier attempt.
+Result capture also logs read-only cgroup-v2 memory snapshots before work and
+from the exit trap: membership, selected path, byte limits/current/peak, swap
+limits/current, and `memory.events`/`memory.events.local`. Missing counters are
+reported as unavailable and never replace the qualification exit status. A
+mount-root fallback is labelled explicitly and may include other workloads;
+do not attribute its counters to this step. Compare before/after OOM counters:
+an existing nonzero count or cumulative peak alone does not prove a new OOM.
+If the whole container is killed, its trap may not run and the final snapshot
+will be absent. No limit or counter is changed or reset.
+`qualify_split_evaluation` requires result capture. It first records Nix's
+`build --dry-run --json` plan, then starts a separate realization process with
+only those exact derivations and selected output names (`--stdin`). The original
+flake installable is never reevaluated during realization. The plan is retained
+alongside the final JSON result, including on failure; planning failures cannot
+start a build. Static derivation installables and explicit output selections are
+supported; opaque store paths and dynamic derivations fail closed in this mode.
+Indirect GC roots protect the selected derivations while the evidence directory
+exists, and the realization's result links root the outputs. The worker must
+permit writing its per-user GC roots under `${NIX_STATE_DIR:-/nix/var/nix}`.
+Timeout/job/core limits and all qualification gates are unchanged. This can
+reduce evaluation/build memory overlap; it does not increase the worker memory
+limit or guarantee that a memory-limited build will fit.
+These are **log receipts**, not Actions
+artifact uploads. Configure and verify the Crow repository timeout and log
+retention separately before enabling a release gate (for example, at least
+90 minutes and 14 days). Download the logs and retain the referenced output
+closures when off-server evidence or recovery is required. Repository policy
+and cached realization do not prove fresh test execution.
 Distinct MSRV, feature, platform, extracted-package, all-system evaluation and
 fresh-execution checks are separate acceptance cases, not duplicate work.
 
