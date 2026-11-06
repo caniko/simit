@@ -1359,6 +1359,9 @@ pub struct PrebuildConfig {
     /// Emit source/lock identity, flake metadata and Nix JSON results into Crow logs.
     #[serde(default)]
     pub qualify_capture_results: bool,
+    /// Freeze derivations/outputs, then realize them after the evaluator exits.
+    #[serde(default)]
+    pub qualify_split_evaluation: bool,
 }
 
 impl PrebuildConfig {
@@ -1367,10 +1370,14 @@ impl PrebuildConfig {
             || self.qualify_max_jobs.is_some()
             || self.qualify_cores.is_some()
             || self.qualify_timeout_minutes.is_some()
-            || self.qualify_capture_results)
+            || self.qualify_capture_results
+            || self.qualify_split_evaluation)
             && (!self.runs_on_crow() || self.qualify.is_empty())
         {
             bail!("[prebuild].qualify_* controls require provider = \"crow\" and nonempty qualify");
+        }
+        if self.qualify_split_evaluation && !self.qualify_capture_results {
+            bail!("[prebuild].qualify_split_evaluation requires qualify_capture_results");
         }
         for (name, value) in [
             ("qualify_max_jobs", self.qualify_max_jobs),

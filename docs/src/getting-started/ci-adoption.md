@@ -402,6 +402,8 @@ qualify_max_jobs = 1
 qualify_cores = 2
 qualify_timeout_minutes = 90
 qualify_capture_results = true
+# Optional: release the evaluator before realizing frozen derivations.
+qualify_split_evaluation = true
 ```
 
 `qualify_serial` chains workflow dependencies, not just steps within each
@@ -415,6 +417,19 @@ from the flake's pinned `nixpkgs` before inspecting the smudged checkout; clone
 and qualification containers do not share tool environments. Bootstrap obeys
 the same job/core/timeout limits. Each attempt uses a fresh receipt directory,
 so an early failure cannot attach results from an earlier attempt.
+`qualify_split_evaluation` requires result capture. It first records Nix's
+`build --dry-run --json` plan, then starts a separate realization process with
+only those exact derivations and selected output names (`--stdin`). The original
+flake installable is never reevaluated during realization. The plan is retained
+alongside the final JSON result, including on failure; planning failures cannot
+start a build. Static derivation installables and explicit output selections are
+supported; opaque store paths and dynamic derivations fail closed in this mode.
+Indirect GC roots protect the selected derivations while the evidence directory
+exists, and the realization's result links root the outputs. The worker must
+permit writing its per-user GC roots under `${NIX_STATE_DIR:-/nix/var/nix}`.
+Timeout/job/core limits and all qualification gates are unchanged. This can
+reduce evaluation/build memory overlap; it does not increase the worker memory
+limit or guarantee that a memory-limited build will fit.
 These are **log receipts**, not Actions
 artifact uploads. Configure and verify the Crow repository timeout and log
 retention separately before enabling a release gate (for example, at least

@@ -1013,6 +1013,21 @@ pub fn prebuild_file(
     })
 }
 
+// Parse Nix's own dry-run plan, preserving the selected outputs, not just ^out.
+// Opaque paths and dynamic derivations fail closed in this opt-in mode.
+const QUALIFICATION_TARGETS: &str = r#"plan:
+let
+  selected = builtins.fromJSON plan;
+  target = entry:
+    assert builtins.isAttrs entry && builtins.isString entry.drvPath;
+    assert builtins.match "/nix/store/[0-9a-z]{32}-[A-Za-z0-9+._?=-]+[.]drv" entry.drvPath != null;
+    assert builtins.isAttrs entry.outputs && entry.outputs != {};
+    entry.drvPath + "^" + builtins.concatStringsSep "," (builtins.attrNames entry.outputs);
+in
+assert builtins.isList selected && selected != [];
+builtins.concatStringsSep "\n" (map target selected) + "\n"
+"#;
+
 /// Secret-free workflows that qualify the flake, `[prebuild].qualify` and the
 /// prebuild installables on pull requests and default-branch pushes. Each
 /// command is its own workflow, `.crow/prebuild-qualify-<name>.*`, so every one
@@ -1050,7 +1065,8 @@ pub fn qualify_files(
     let mut previous = Vec::<String>::new();
     for (job, mut command, installable) in jobs {
         let mut lfs_command = "nix build --inputs-from . nixpkgs#git-lfs --no-link --no-update-lock-file --print-out-paths".to_owned();
-        for bounded in [&mut command, &mut lfs_command] {
+        let mut frozen_command = "nix build --stdin --out-link \"$${evidence}/result\" --print-build-logs --no-update-lock-file".to_owned();
+        for bounded in [&mut command, &mut lfs_command, &mut frozen_command] {
             if let Some(jobs) = prebuild.qualify_max_jobs {
                 bounded.push_str(&format!(" --max-jobs {jobs}"));
             }
@@ -1060,12 +1076,33 @@ pub fn qualify_files(
         }
         if prebuild.qualify_capture_results && installable.is_some() {
             command.push_str(" --json");
+            frozen_command.push_str(" --json");
         }
         let timeout = prebuild
             .qualify_timeout_minutes
             .map(|minutes| format!("timeout --signal=TERM --kill-after=30s {minutes}m "))
             .unwrap_or_default();
         command = format!("{timeout}{command}");
+        let mut preparation = String::new();
+        if prebuild.qualify_split_evaluation && installable.is_some() {
+            let parser = shell_quote(QUALIFICATION_TARGETS);
+            let plan_command = command.trim_end_matches(" --json");
+            preparation = format!(
+                r#"{plan_command} --dry-run --json > "$${{evidence}}/plan.json"
+{timeout}nix eval --raw --expr {parser} --argstr plan "$(cat "$${{evidence}}/plan.json")" > "$${{evidence}}/targets.txt"
+root_parent="$${{NIX_STATE_DIR:-/nix/var/nix}}/gcroots/per-user/$(id -un)"
+mkdir -p "$${{root_parent}}" "$${{evidence}}/roots"
+gcroot="$(mktemp -d "$${{root_parent}}/simit-{job}.XXXXXX")"
+index=0
+while IFS= read -r target; do
+  index=$((index + 1))
+  ln -s "$${{target%%^*}}" "$${{evidence}}/roots/$${{index}}"
+  ln -s "$${{PWD}}/$${{evidence}}/roots/$${{index}}" "$${{gcroot}}/$${{index}}"
+done < "$${{evidence}}/targets.txt"
+"#
+            );
+            command = format!("{timeout}{frozen_command} < \"$${{evidence}}/targets.txt\"");
+        }
         if prebuild.qualify_capture_results {
             let installable = shell_quote(&serde_json::to_string(&installable)?);
             command = format!(
@@ -1076,7 +1113,7 @@ source_commit="$(git rev-parse HEAD)"
 lock_sha256="$(sha256sum flake.lock)"
 lock_sha256="$${{lock_sha256%% *}}"
 installable={installable}
-trap 'status=$?; trap - EXIT; printf '\''{{"schema":"simit.crow-qualification.v1","source_commit":"%s","lock_sha256":"%s","installable":%s,"exit_status":%s}}\n'\'' "$${{source_commit}}" "$${{lock_sha256}}" "$${{installable}}" "$${{status}}"; for receipt in "$${{evidence}}/metadata.json" "$${{evidence}}/result.json"; do if test -f "$${{receipt}}"; then cat "$${{receipt}}"; fi; done; exit "$${{status}}"' EXIT
+trap 'status=$?; trap - EXIT; printf '\''{{"schema":"simit.crow-qualification.v1","source_commit":"%s","lock_sha256":"%s","installable":%s,"exit_status":%s}}\n'\'' "$${{source_commit}}" "$${{lock_sha256}}" "$${{installable}}" "$${{status}}"; for receipt in "$${{evidence}}/metadata.json" "$${{evidence}}/plan.json" "$${{evidence}}/result.json"; do if test -f "$${{receipt}}"; then cat "$${{receipt}}"; fi; done; exit "$${{status}}"' EXIT
 # The clone container's LFS clean filter is not available in this step's image.
 if git grep -q 'filter=lfs' HEAD -- '*.gitattributes'; then
   git_lfs="$({timeout}{lfs_command})"
@@ -1089,7 +1126,7 @@ if test -n "$${{source_status}}"; then
   exit 1
 fi
 {timeout}nix flake metadata --json --no-update-lock-file > "$${{evidence}}/metadata.json"
-{command} > "$${{evidence}}/result.json""#
+{preparation}{command} > "$${{evidence}}/result.json""#
             );
         }
         let mut step = Step::new(job.clone(), &image).command(command);

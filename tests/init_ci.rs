@@ -2065,6 +2065,138 @@ token_secret = "DEMO_ATTIC_TOKEN"
 }
 
 #[test]
+#[cfg(unix)]
+fn crow_qualification_separates_evaluation_from_frozen_realization() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let temp = init_flake_only();
+    let config = r#"[prebuild]
+provider = "crow"
+qualify = [".#checks.x86_64-linux.server^dev,out"]
+nix_builds = [".#packages.x86_64-linux.tool"]
+qualify_max_jobs = 1
+qualify_cores = 2
+qualify_timeout_minutes = 90
+qualify_capture_results = true
+qualify_split_evaluation = true
+
+[ci]
+provider = "actions"
+platform = "github"
+runtime = "nix"
+"#;
+    fs::write(temp.path().join("simit.toml"), config).unwrap();
+    let generate = || {
+        simit()
+            .current_dir(temp.path())
+            .args(["init", "ci", "--prebuild-only"])
+            .output()
+            .unwrap()
+    };
+    let generated = generate();
+    assert!(generated.status.success(), "{generated:?}");
+    let file = fs::read_dir(temp.path().join(".crow"))
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .find(|path| {
+            path.file_name()
+                .unwrap()
+                .to_string_lossy()
+                .contains("server")
+        })
+        .unwrap();
+    let workflow: serde_yaml::Value = serde_yaml::from_str(&read(&file)).unwrap();
+    let script = workflow["steps"][0]["commands"][0]
+        .as_str()
+        .unwrap()
+        .replace("$${", "${");
+    assert!(script.contains("--dry-run --json"));
+    assert!(script.contains("--stdin"));
+    assert!(script.contains("plan.json"));
+    assert!(script.contains("gcroots/per-user"));
+    let bin = temp.path().join("bin");
+    fs::create_dir(&bin).unwrap();
+    for (name, content) in [
+        (
+            "git",
+            "#!/bin/sh\ncase \"$1\" in rev-parse) printf '%040d\\n' 1;; grep) exit 1;; esac\n",
+        ),
+        (
+            "nix",
+            r#"#!/bin/sh
+printf '%s\n' "$*" >> nix-calls
+if [ "$1" = flake ]; then printf '{}\n'; exit; fi
+case " $* " in
+  *' --dry-run '*)
+    test "${FAIL_PLAN:-0}" = 0 || exit 42
+    printf '[{"drvPath":"/nix/store/00000000000000000000000000000000-fixture.drv","outputs":{"dev":"/nix/store/fixture-dev","out":"/nix/store/fixture"}}]\n' ;;
+  *' eval '*) printf '/nix/store/00000000000000000000000000000000-fixture.drv^dev,out\n' ;;
+  *' --stdin '*)
+    cat > realized-targets
+    printf '[{"drvPath":"/nix/store/00000000000000000000000000000000-fixture.drv","outputs":{"dev":"/nix/store/fixture-dev","out":"/nix/store/fixture"}}]\n'
+    exit 7 ;;
+  *) exit 99 ;;
+esac
+"#,
+        ),
+    ] {
+        fs::write(bin.join(name), content).unwrap();
+        fs::set_permissions(bin.join(name), fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    fs::write(temp.path().join("flake.lock"), "{}\n").unwrap();
+    let path = std::env::join_paths(
+        std::iter::once(bin).chain(std::env::split_paths(&std::env::var_os("PATH").unwrap())),
+    )
+    .unwrap();
+    let run = |fail_plan: &str| {
+        Command::new("sh")
+            .current_dir(temp.path())
+            .env("PATH", &path)
+            .env("NIX_STATE_DIR", temp.path().join("nix-state"))
+            .env("FAIL_PLAN", fail_plan)
+            .args(["-c", &script])
+            .output()
+            .unwrap()
+    };
+    let output = run("0");
+    assert_eq!(output.status.code(), Some(7), "{output:?}");
+    assert_eq!(
+        read(&temp.path().join("realized-targets")),
+        "/nix/store/00000000000000000000000000000000-fixture.drv^dev,out\n"
+    );
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(stdout.contains("\"exit_status\":7"));
+    assert!(stdout.contains("fixture-dev"));
+    let calls = read(&temp.path().join("nix-calls"));
+    let realize = calls.lines().find(|line| line.contains("--stdin")).unwrap();
+    assert!(!realize.contains(".#"));
+    assert!(realize.contains("--max-jobs 1 --cores 2"));
+    let users = temp.path().join("nix-state/gcroots/per-user");
+    let user = fs::read_dir(users).unwrap().next().unwrap().unwrap().path();
+    let roots = fs::read_dir(user).unwrap().next().unwrap().unwrap().path();
+    let indirect = fs::read_link(roots.join("1")).unwrap();
+    assert!(indirect.starts_with(temp.path()));
+    assert_eq!(
+        fs::read_link(indirect).unwrap(),
+        Path::new("/nix/store/00000000000000000000000000000000-fixture.drv")
+    );
+    fs::remove_file(temp.path().join("realized-targets")).unwrap();
+    let failure = run("1");
+    assert_eq!(failure.status.code(), Some(42), "{failure:?}");
+    assert!(!temp.path().join("realized-targets").exists());
+    assert!(!String::from_utf8_lossy(&failure.stdout).contains("fixture-dev"));
+    fs::write(
+        temp.path().join("simit.toml"),
+        config.replace(
+            "qualify_capture_results = true",
+            "qualify_capture_results = false",
+        ),
+    )
+    .unwrap();
+    assert!(!generate().status.success());
+}
+
+#[test]
 fn crow_prebuild_qualify_runs_secret_free_on_pull_requests() {
     let config = r#"[prebuild]
 provider = "crow"
