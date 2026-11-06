@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Exercise the packaged generator's plan-parser command with real Nix, no builds."""
+"""Exercise packaged Crow parsing and read-only diagnostics with real Nix, no builds."""
 import json
 import os
 from pathlib import Path
@@ -61,3 +61,9 @@ runtime = "nix"
             assert result.returncode != 0, f"{name}: unsupported plan accepted"
             assert not targets, f"{name}: stale targets retained"
         print(f"PASS {name}: generated command through real Nix", flush=True)
+    memory_command = script[script.index("memory_snapshot()"):script.index("\ntrap '")]
+    snapshot = subprocess.run(["sh", "-eu", "-c", memory_command + "\nmemory_snapshot qualification"],
+                              cwd=root, env=env, text=True, capture_output=True, check=True, timeout=10)
+    assert "simit.crow-memory.v1 qualification" in snapshot.stdout
+    assert "scope=" in snapshot.stdout and "memory.events:" in snapshot.stdout
+    print(snapshot.stdout, end="", flush=True)

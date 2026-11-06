@@ -417,6 +417,15 @@ from the flake's pinned `nixpkgs` before inspecting the smudged checkout; clone
 and qualification containers do not share tool environments. Bootstrap obeys
 the same job/core/timeout limits. Each attempt uses a fresh receipt directory,
 so an early failure cannot attach results from an earlier attempt.
+Result capture also logs read-only cgroup-v2 memory snapshots before work and
+from the exit trap: membership, selected path, byte limits/current/peak, swap
+limits/current, and `memory.events`/`memory.events.local`. Missing counters are
+reported as unavailable and never replace the qualification exit status. A
+mount-root fallback is labelled explicitly and may include other workloads;
+do not attribute its counters to this step. Compare before/after OOM counters:
+an existing nonzero count or cumulative peak alone does not prove a new OOM.
+If the whole container is killed, its trap may not run and the final snapshot
+will be absent. No limit or counter is changed or reset.
 `qualify_split_evaluation` requires result capture. It first records Nix's
 `build --dry-run --json` plan, then starts a separate realization process with
 only those exact derivations and selected output names (`--stdin`). The original

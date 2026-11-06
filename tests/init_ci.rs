@@ -2381,6 +2381,18 @@ runtime = "nix"
     }
     // Execute the generated command with disposable executables, not real Nix.
     // A failing realization must preserve both its JSON output and exit status.
+    let cgroup = temp.path().join("cgroup");
+    let memory = cgroup.join("step");
+    fs::create_dir_all(&memory).unwrap();
+    fs::write(cgroup.join("memory.events"), "oom_kill 99\n").unwrap();
+    fs::write(memory.join("memory.events"), "oom_kill 0\n").unwrap();
+    fs::write(memory.join("memory.max"), "7516192768\n").unwrap();
+    fs::write(memory.join("memory.peak"), "4096\n").unwrap();
+    let membership = temp.path().join("membership");
+    fs::write(&membership, "0::/step\n").unwrap();
+    build_script = build_script
+        .replace("/sys/fs/cgroup", cgroup.to_str().unwrap())
+        .replace("/proc/self/cgroup", membership.to_str().unwrap());
     let bin = temp.path().join("bin");
     fs::create_dir(&bin).unwrap();
     for (name, script) in [
@@ -2409,6 +2421,8 @@ case " $* " in
        printf '{"locked":{"rev":"fixture"}}\n'
      else
        printf '[{"drvPath":"/nix/store/fixture.drv","outputs":{"out":"/nix/store/fixture"}}]\n'
+       printf 'oom_kill 1\n' > "$FIXTURE_MEMORY_DIR/memory.events"
+       printf '8192\n' > "$FIXTURE_MEMORY_DIR/memory.peak"
        exit 7
      fi ;;
 esac
@@ -2430,6 +2444,7 @@ esac
             .current_dir(temp.path())
             .env("PATH", &path)
             .env("FIXTURE_LFS_PATH", &lfs_path)
+            .env("FIXTURE_MEMORY_DIR", &memory)
             .envs(variables.iter().copied())
             .args(["-c", &build_script])
             .output()
@@ -2444,6 +2459,22 @@ esac
     assert_eq!(receipt["exit_status"], 7);
     assert!(stdout.contains("/nix/store/fixture.drv"));
     assert!(stdout.contains("\"rev\":\"fixture\""));
+    let evidence = fs::read_dir(temp.path().join(".simit-qualification"))
+        .unwrap()
+        .next()
+        .unwrap()
+        .unwrap()
+        .path();
+    let before = read(&evidence.join("memory-before.txt"));
+    let after = read(&evidence.join("memory-after.txt"));
+    assert!(before.contains("scope=membership"));
+    assert!(before.contains("memory.events:\noom_kill 0"));
+    assert!(before.contains("memory.max:\n7516192768"));
+    assert!(after.contains("memory.events:\noom_kill 1"));
+    assert!(after.contains("memory.peak:\n8192"));
+    assert!(stdout.contains(&before) && stdout.contains(&after));
+    assert!(!stdout.contains("oom_kill 99"));
+    assert!(stdout.contains("unavailable"));
 
     let lfs = run(&[("FIXTURE_LFS", "1")]);
     assert_eq!(lfs.status.code(), Some(7), "{lfs:?}");
@@ -2461,8 +2492,10 @@ esac
     assert_eq!(dirty.status.code(), Some(1), "{dirty:?}");
     assert!(String::from_utf8_lossy(&dirty.stderr).contains("design/fixture.fig"));
     assert!(!String::from_utf8_lossy(&dirty.stdout).contains("/nix/store/fixture.drv"));
+    fs::write(&membership, "0::/missing\n").unwrap();
     let unreadable = run(&[("FIXTURE_STATUS_FAIL", "1")]);
     assert_eq!(unreadable.status.code(), Some(42), "{unreadable:?}");
+    assert!(String::from_utf8_lossy(&unreadable.stdout).contains("scope=mount-root-fallback"));
 
     for invalid in [
         config.replace("qualify_cores = 2", "qualify_cores = 0"),

@@ -1116,7 +1116,34 @@ source_commit="$(git rev-parse HEAD)"
 lock_sha256="$(sha256sum flake.lock)"
 lock_sha256="$${{lock_sha256%% *}}"
 installable={installable}
-trap 'status=$?; trap - EXIT; printf '\''{{"schema":"simit.crow-qualification.v1","source_commit":"%s","lock_sha256":"%s","installable":%s,"exit_status":%s}}\n'\'' "$${{source_commit}}" "$${{lock_sha256}}" "$${{installable}}" "$${{status}}"; for receipt in "$${{evidence}}/metadata.json" "$${{evidence}}/plan.json" "$${{evidence}}/result.json"; do if test -f "$${{receipt}}"; then cat "$${{receipt}}"; fi; done; exit "$${{status}}"' EXIT
+memory_snapshot() (
+  printf 'simit.crow-memory.v1 %s\n' "$1"
+  member=""
+  if test -r /proc/self/cgroup; then
+    while IFS=: read -r hierarchy controllers membership; do
+      printf '%s:%s:%s\n' "$${{hierarchy}}" "$${{controllers}}" "$${{membership}}"
+      if test "$${{hierarchy}}" = 0 && test -z "$${{controllers}}"; then member="$${{membership}}"; fi
+    done < /proc/self/cgroup
+  fi
+  memory_dir="/sys/fs/cgroup$${{member%/}}"
+  scope=membership
+  # ponytail: fallback may aggregate workloads; resolve mountinfo if attribution needs it.
+  if test -z "$${{member}}" || ! test -r "$${{memory_dir}}/memory.events"; then
+    memory_dir=/sys/fs/cgroup
+    scope=mount-root-fallback
+  fi
+  printf 'cgroup=%s\nscope=%s\n' "$${{memory_dir}}" "$${{scope}}"
+  for metric in memory.max memory.high memory.current memory.peak memory.swap.max memory.swap.current memory.events memory.events.local; do
+    printf '%s:\n' "$${{metric}}"
+    if test -r "$${{memory_dir}}/$${{metric}}"; then
+      cat "$${{memory_dir}}/$${{metric}}" || printf 'unavailable\n'
+    else
+      printf 'unavailable\n'
+    fi
+  done
+)
+trap 'status=$?; trap - EXIT; memory_snapshot after > "$${{evidence}}/memory-after.txt" || :; printf '\''{{"schema":"simit.crow-qualification.v1","source_commit":"%s","lock_sha256":"%s","installable":%s,"exit_status":%s}}\n'\'' "$${{source_commit}}" "$${{lock_sha256}}" "$${{installable}}" "$${{status}}"; for receipt in "$${{evidence}}/metadata.json" "$${{evidence}}/plan.json" "$${{evidence}}/result.json" "$${{evidence}}/memory-before.txt" "$${{evidence}}/memory-after.txt"; do if test -f "$${{receipt}}"; then cat "$${{receipt}}" || :; fi; done; exit "$${{status}}"' EXIT
+memory_snapshot before > "$${{evidence}}/memory-before.txt" || :
 # The clone container's LFS clean filter is not available in this step's image.
 if git grep -q 'filter=lfs' HEAD -- '*.gitattributes'; then
   git_lfs="$({timeout}{lfs_command})"
