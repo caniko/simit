@@ -75,6 +75,7 @@ fn publish(args: WindowsPublishArgs) -> Result<()> {
             package_id: None,
             download_repo: None,
             zip_archive: None,
+            arm64_zip_archive: None,
             url,
             token_env: None,
             work_dir: Some(args.work_dir.join("winget")),

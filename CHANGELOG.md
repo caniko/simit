@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Added: `[winget].arm64_zip_archive` (and `simit dist winget submit
+--arm64-zip-archive`) adds a second `Architecture: arm64` installer to the
+  generated winget manifest, so `winget install` works on Windows on ARM.
+  Configs without it render unchanged.
+
 - Added: `setup` on `[[ci.native_tests]]` runs bash commands once before
   `cargo test`, as its own `Setup <id>` step (15 minute limit, added to the job
   limit), e.g. to fetch a pinned driver and export its path through

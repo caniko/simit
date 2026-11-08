@@ -825,7 +825,13 @@ fn republish_assets(inputs: &ReleaseWorkflowInputs<'_>, channel: &str) -> Vec<St
             .unwrap_or_default(),
         "winget" => inputs
             .winget
-            .map(|w| vec![w.zip_archive.replace("{version}", "${VERSION}")])
+            .map(|w| {
+                [Some(&w.zip_archive), w.arm64_zip_archive.as_ref()]
+                    .into_iter()
+                    .flatten()
+                    .map(|zip| zip.replace("{version}", "${VERSION}"))
+                    .collect()
+            })
             .unwrap_or_default(),
         "scoop" => inputs
             .scoop
@@ -3073,12 +3079,27 @@ fn push_publish_winget(
     w.push('/');
     w.push_str(&winget.download_repo);
     w.push_str("/releases/download/${TAG}/${ZIP_NAME}\"\n");
-    if activated_remote {
-        w.push_str("          test -s \"release/${ZIP_NAME}\" || publisher_missing winget \"missing release/${ZIP_NAME}\"\n");
-    } else {
-        w.push_str("          test -s \"release/${ZIP_NAME}\"\n");
+    let mut exports = "ZIP_NAME ZIP_URL".to_owned();
+    let mut checked = vec!["ZIP_NAME"];
+    if let Some(arm64) = &winget.arm64_zip_archive {
+        w.push_str("          ARM64_ZIP_NAME=\"");
+        w.push_str(&arm64.replace("{version}", "${VERSION}"));
+        w.push_str("\"; ARM64_ZIP_URL=\"");
+        w.push_str(platform.web_base_url());
+        w.push('/');
+        w.push_str(&winget.download_repo);
+        w.push_str("/releases/download/${TAG}/${ARM64_ZIP_NAME}\"\n");
+        exports.push_str(" ARM64_ZIP_NAME ARM64_ZIP_URL");
+        checked.push("ARM64_ZIP_NAME");
     }
-    w.push_str("          export ZIP_NAME ZIP_URL VERSION WINGET_PAT");
+    for name in checked {
+        if activated_remote {
+            writeln!(w, "          test -s \"release/${{{name}}}\" || publisher_missing winget \"missing release/${{{name}}}\"").expect("write");
+        } else {
+            writeln!(w, "          test -s \"release/${{{name}}}\"").expect("write");
+        }
+    }
+    write!(w, "          export {exports} VERSION WINGET_PAT").expect("write");
     if activated_remote {
         w.push_str(" PUBLISH_WINGET_STATE");
     }
@@ -3108,7 +3129,8 @@ fn push_publish_winget(
 /// writes the three manifests, then forks, commits and opens the PR (new
 /// package and new version alike). Reads `VERSION`, `ZIP_NAME`, `ZIP_URL` and
 /// `WINGET_PAT` from the environment, the zip from `release/$ZIP_NAME` and an
-/// optional `PUBLISH_WINGET_STATE`. Shared with `simit dist winget submit`.
+/// optional `PUBLISH_WINGET_STATE`. With `arm64_zip_archive` set it also reads
+/// `ARM64_ZIP_NAME` and `ARM64_ZIP_URL` (zip from `release/$ARM64_ZIP_NAME`). Shared with `simit dist winget submit`.
 pub(crate) fn winget_submit_script(winget: &ResolvedWinget, platform: Platform) -> String {
     let manifest_dir = winget_manifest_dir(&winget.package_id);
     let id = shell_quote(&winget.package_id);
@@ -3177,7 +3199,14 @@ fn push_winget_manifests(
         q(manifest_dir)
     )
     .expect("write");
-    w.push_str("sha=\"$(sha256sum \"release/${ZIP_NAME}\" | cut -d' ' -f1 | tr '[:lower:]' '[:upper:]')\"\n");
+    // One installer per architecture: (Architecture, env prefix, sha variable).
+    let mut installers = vec![("x64", "ZIP", "sha")];
+    if winget.arm64_zip_archive.is_some() {
+        installers.push(("arm64", "ARM64_ZIP", "sha_arm64"));
+    }
+    for (_, prefix, sha) in &installers {
+        writeln!(w, "{sha}=\"$(sha256sum \"release/${{{prefix}_NAME}}\" | cut -d' ' -f1 | tr '[:lower:]' '[:upper:]')\"").expect("write");
+    }
     // version manifest
     writeln!(w, "{{ hdr version; f PackageIdentifier {id}; f PackageVersion \"$VERSION\"; echo 'DefaultLocale: en-US'; echo 'ManifestType: version'; echo 'ManifestVersion: {mv}'; }} > {}", file("")).expect("write");
     // installer manifest: InstallerType/NestedInstallerType stay at the root,
@@ -3214,7 +3243,11 @@ fn push_winget_manifests(
         })
         .collect::<Vec<_>>()
         .join(" ");
-    writeln!(w, "{{ hdr installer; f PackageIdentifier {id}; f PackageVersion \"$VERSION\"; echo 'InstallerType: zip'; echo 'NestedInstallerType: portable'; {deps}echo 'Installers:'; echo '- Architecture: x64'; echo '  NestedInstallerFiles:'; printf '%s\\n' {nested}; printf '%s\\n' \"  InstallerUrl: $(yaml \"$ZIP_URL\")\" \"  InstallerSha256: $sha\"; echo 'ManifestType: installer'; echo 'ManifestVersion: {mv}'; }} > {}", file("installer.")).expect("write");
+    let entries: String = installers
+        .iter()
+        .map(|(arch, prefix, sha)| format!("echo '- Architecture: {arch}'; echo '  NestedInstallerFiles:'; printf '%s\\n' {nested}; printf '%s\\n' \"  InstallerUrl: $(yaml \"${prefix}_URL\")\" \"  InstallerSha256: ${sha}\"; "))
+        .collect();
+    writeln!(w, "{{ hdr installer; f PackageIdentifier {id}; f PackageVersion \"$VERSION\"; echo 'InstallerType: zip'; echo 'NestedInstallerType: portable'; {deps}echo 'Installers:'; {entries}echo 'ManifestType: installer'; echo 'ManifestVersion: {mv}'; }} > {}", file("installer.")).expect("write");
     // default-locale manifest
     let mut locale = format!(
         "hdr defaultLocale; f PackageIdentifier {id}; f PackageVersion \"$VERSION\"; echo 'PackageLocale: en-US'; f Publisher {}; f PublisherUrl {}; f PackageName {}; f PackageUrl {}; f License {};",
@@ -3578,6 +3611,7 @@ mod tests {
             package_id: "Caniko.Modde".to_owned(),
             download_repo: "caniko/rs-modde".to_owned(),
             zip_archive: "modde-{version}-x86_64-windows.zip".to_owned(),
+            arm64_zip_archive: None,
             token_secret: "WINGET_PAT".to_owned(),
             publisher: "Caniko".to_owned(),
             package_name: "Modde".to_owned(),
@@ -3796,7 +3830,7 @@ mod tests {
         release.provider = ReleaseProvider::Github;
         release.api_base = "https://api.github.com".to_owned();
         let (chocolatey, windows, flatpak, winget) =
-            (chocolatey(), windows_signing(), flatpak(), winget());
+            (chocolatey(), windows_signing(), flatpak(), arm64_winget());
         let workflow = render(&ReleaseWorkflowInputs {
             platform: Platform::Github,
             runner: "ubuntu-24.04",
@@ -3834,6 +3868,7 @@ mod tests {
                         | "Probe downstream publisher state"
                         | "Publish Homebrew tap"
                         | "Publish Flathub update PR"
+                        | "Publish winget manifest PR"
                 )
             ) {
                 continue;
@@ -3853,7 +3888,7 @@ mod tests {
             );
             checked += 1;
         }
-        assert_eq!(checked, 4);
+        assert_eq!(checked, 5);
     }
 
     #[test]
@@ -4847,6 +4882,7 @@ esac"#,
             package_id: "Caniko.Sorrel".to_owned(),
             download_repo: "caniko/sorrel".to_owned(),
             zip_archive: "sorrel-{version}-x86_64-windows.zip".to_owned(),
+            arm64_zip_archive: None,
             token_secret: "WINGET_PAT".to_owned(),
             publisher: "Caniko".to_owned(),
             package_name: "Sorrel".to_owned(),
@@ -5135,6 +5171,7 @@ cat "$FAKE/code"
             let work = self.dir.path().join("work");
             std::fs::create_dir_all(work.join("release")).unwrap();
             std::fs::write(work.join("release/sorrel-1.2.3-x86_64-windows.zip"), "zip").unwrap();
+            std::fs::write(work.join("release/sorrel-1.2.3-aarch64-windows.zip"), "arm").unwrap();
             let path = format!(
                 "{}:{}",
                 self.dir.path().join("bin").display(),
@@ -5149,6 +5186,8 @@ cat "$FAKE/code"
                 .env("VERSION", "1.2.3")
                 .env("ZIP_NAME", "sorrel-1.2.3-x86_64-windows.zip")
                 .env("ZIP_URL", "https://github.com/caniko/sorrel/releases/download/v1.2.3/sorrel-1.2.3-x86_64-windows.zip")
+                .env("ARM64_ZIP_NAME", "sorrel-1.2.3-aarch64-windows.zip")
+                .env("ARM64_ZIP_URL", "https://github.com/caniko/sorrel/releases/download/v1.2.3/sorrel-1.2.3-aarch64-windows.zip")
                 .env("WINGET_PAT", "secret-token")
                 .env_remove("PUBLISH_WINGET_STATE");
             if let Some(state) = state {
@@ -5424,6 +5463,67 @@ cat "$FAKE/code"
         let body = fake.log("body.log");
         assert!(body.contains("Architecture: x64\\n  NestedInstallerFiles:\\n  - RelativeFilePath: \\\"sorrel.exe\\\"\\n    PortableCommandAlias: \\\"sorrel\\\"\\n  - RelativeFilePath: \\\"bin/sorrelw.exe\\\"\\n  InstallerUrl:"), "{body}");
         assert_eq!(body.matches("PortableCommandAlias").count(), 1, "{body}");
+    }
+
+    fn arm64_winget() -> ResolvedWinget {
+        ResolvedWinget {
+            arm64_zip_archive: Some("sorrel-{version}-aarch64-windows.zip".to_owned()),
+            ..sorrel_winget()
+        }
+    }
+
+    #[test]
+    fn winget_arm64_installer_is_emitted_only_when_configured() {
+        let plain = winget_step(&sorrel_winget(), ReleasePublisherEnforcement::default());
+        assert!(!plain.contains("arm64") && !plain.contains("ARM64") && !plain.contains("aarch64"));
+        assert_eq!(plain.matches("- Architecture:").count(), 1);
+
+        for enforcement in [
+            ReleasePublisherEnforcement::default(),
+            ReleasePublisherEnforcement::ActivatedRemote,
+        ] {
+            let step = winget_step(&arm64_winget(), enforcement);
+            assert_eq!(step.matches("echo '- Architecture:").count(), 2);
+            assert!(step.contains("echo '- Architecture: x64'"));
+            assert!(step.contains("echo '- Architecture: arm64'"));
+            assert!(step.contains("ARM64_ZIP_NAME=\"sorrel-${VERSION}-aarch64-windows.zip\"; ARM64_ZIP_URL=\"https://github.com/caniko/sorrel/releases/download/${TAG}/${ARM64_ZIP_NAME}\""));
+            assert!(step.contains("test -s \"release/${ARM64_ZIP_NAME}\""));
+            assert!(step.contains(
+                "export ZIP_NAME ZIP_URL ARM64_ZIP_NAME ARM64_ZIP_URL VERSION WINGET_PAT"
+            ));
+            assert!(step.contains("sha_arm64=\"$(sha256sum \"release/${ARM64_ZIP_NAME}\""));
+            assert!(step.contains(
+                "InstallerUrl: $(yaml \"$ARM64_ZIP_URL\")\" \"  InstallerSha256: $sha_arm64\""
+            ));
+            // The activated-remote variant tolerates a missing zip like the x64 one.
+            assert_eq!(
+                step.contains("test -s \"release/${ARM64_ZIP_NAME}\" || publisher_missing winget"),
+                enforcement == ReleasePublisherEnforcement::ActivatedRemote
+            );
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn winget_script_writes_one_installer_entry_per_architecture() {
+        let fake = Fake::new();
+        let Some(out) = fake.run_with(None, &arm64_winget()) else {
+            return;
+        };
+        assert!(out.status.success());
+        let body = fake.log("body.log");
+        let files = "\\n  NestedInstallerFiles:\\n  - RelativeFilePath: \\\"sorrel.exe\\\"\\n    PortableCommandAlias: \\\"sorrel\\\"\\n  InstallerUrl: \\\"https://github.com/caniko/sorrel/releases/download/v1.2.3/sorrel-1.2.3-";
+        assert!(
+            body.contains(&format!(
+                "Installers:\\n- Architecture: x64{files}x86_64-windows.zip"
+            )),
+            "{body}"
+        );
+        assert!(
+            body.contains(&format!("- Architecture: arm64{files}aarch64-windows.zip")),
+            "{body}"
+        );
+        assert_eq!(body.matches("- Architecture:").count(), 2, "{body}");
     }
 
     #[cfg(unix)]

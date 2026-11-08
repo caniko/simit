@@ -261,6 +261,10 @@ pub struct WingetConfig {
     /// Windows zip file name with a literal `{version}` placeholder, used as the
     /// installer URL, e.g. `modde-{version}-x86_64-windows.zip`.
     pub zip_archive: String,
+    /// Windows ARM64 zip file name with a literal `{version}` placeholder; when
+    /// set, the installer manifest gets a second `Architecture: arm64` installer.
+    #[serde(default)]
+    pub arm64_zip_archive: Option<String>,
     /// CI secret holding the GitHub PAT.
     #[serde(default = "default_winget_token_secret")]
     pub token_secret: String,
@@ -2906,6 +2910,7 @@ pub struct ResolvedWinget {
     pub package_id: String,
     pub download_repo: String,
     pub zip_archive: String,
+    pub arm64_zip_archive: Option<String>,
     pub token_secret: String,
     pub publisher: String,
     pub package_name: String,
@@ -3936,6 +3941,7 @@ impl ProjectConfig {
             package_id: cfg.package_id.clone(),
             download_repo: cfg.download_repo.clone(),
             zip_archive: cfg.zip_archive.clone(),
+            arm64_zip_archive: cfg.arm64_zip_archive.clone(),
             token_secret: cfg.token_secret.clone(),
             publisher: cfg
                 .publisher

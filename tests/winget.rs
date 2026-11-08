@@ -64,6 +64,34 @@ fn submit_dry_run_describes_the_api_submission_without_secret() {
 }
 
 #[test]
+fn submit_dry_run_lists_the_arm64_installer() {
+    let temp = init_package();
+
+    let output = simit()
+        .current_dir(temp.path())
+        .args([
+            "dist",
+            "winget",
+            "submit",
+            "--version",
+            "1.2.3",
+            "--arm64-zip-archive",
+            "demo-app-{version}-aarch64-windows.zip",
+            "--dry-run",
+        ])
+        .output()
+        .unwrap();
+
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(stdout.contains("x86_64-windows.zip and arm64 (https://codeberg.org/example/demo-app/releases/download/1.2.3/demo-app-1.2.3-aarch64-windows.zip)"));
+}
+
+#[test]
 fn submit_rejects_the_removed_wine_flags() {
     let temp = init_package();
     for flag in ["--wine", "--wingetcreate", "--wingetcreate-url"] {

@@ -230,6 +230,7 @@ portable package.
 package_id = "Caniko.Sorrel"
 download_repo = "caniko/sorrel"
 zip_archive = "sorrel-{version}-x86_64-windows.zip"
+# arm64_zip_archive = "sorrel-{version}-aarch64-windows.zip"
 license_url = "https://github.com/caniko/sorrel/blob/trunk/LICENSE-MIT"
 ```
 
@@ -246,6 +247,7 @@ Optional fields used for the first submission, with their defaults:
 | `binary`            | `<cargo name>.exe`, the path of the executable inside the zip |
 | `command`           | Cargo package name, the portable command alias                |
 | `dependencies`      | none; winget `PackageIdentifier`s, see below                  |
+| `arm64_zip_archive` | none; set it to add a native `arm64` installer (same layout)  |
 
 `dependencies` lists winget packages the installer needs. Each becomes a
 `PackageDependencies` entry in the installer manifest (nothing is written when
