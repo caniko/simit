@@ -3,7 +3,7 @@ use super::{
     artifact, canonical_digest,
     contract::*,
     github,
-    process::{args, nix_args, run, run_build},
+    process::{args, build_deadline, nix_args, run, run_build},
     read_json, write_json,
 };
 use anyhow::{Result, bail, ensure};
@@ -255,6 +255,8 @@ pub fn build_with_cache_opt_in(
     out: &Path,
     cache_opt_in: Option<&str>,
 ) -> Result<PlatformResult> {
+    // Preparation and cache startup spend the same window as the builds.
+    let deadline = build_deadline();
     plan.validate()?;
     ensure!(
         plan.request.compiler_cache.is_none() || cache_opt_in == Some("kvrocks-v1"),
@@ -354,7 +356,7 @@ pub fn build_with_cache_opt_in(
             let log = out.join(format!("build-{index}.log"));
             let mut arguments = nix_args(&["build", "--no-link", "--json", "-L", &selected]);
             arguments.extend(cache_arguments.clone());
-            let success = run_build(&arguments, Some(&log)).is_ok();
+            let success = run_build(&arguments, Some(&log), deadline).is_ok();
             let mut outcome = if success {
                 Outcome::Passed
             } else {
@@ -366,8 +368,8 @@ pub fn build_with_cache_opt_in(
                     let mut arguments =
                         nix_args(&["build", "--no-link", "--rebuild", "-L", &selected]);
                     arguments.extend(cache_arguments.clone());
-                    if run_build(&arguments, Some(&out.join(format!("test-{index}.log")))).is_err()
-                    {
+                    let test_log = out.join(format!("test-{index}.log"));
+                    if run_build(&arguments, Some(&test_log), deadline).is_err() {
                         outcome = Outcome::Failed;
                     }
                     result

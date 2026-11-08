@@ -52,14 +52,22 @@ pub fn run(
 const BUILD_TIMEOUT_SECONDS: u64 = 19800;
 const _: () = assert!(BUILD_TIMEOUT_SECONDS < 360 * 60);
 
+/// One window for a review job's preparation and builds. The job's remaining
+/// 30 minutes are a best-effort margin for runner setup and result export.
+pub fn build_deadline() -> Instant {
+    Instant::now() + Duration::from_secs(BUILD_TIMEOUT_SECONDS)
+}
+
 /// Realizing a target (for example headless VTK/ParaView) outlasts the 35 minute
-/// default; bound it to fit inside the 360 minute hosted job, with a larger log.
-pub fn run_build(args: &[String], log: Option<&Path>) -> Result<String> {
+/// default; bound it by the job's shared `deadline`, with a larger log.
+pub fn run_build(args: &[String], log: Option<&Path>, deadline: Instant) -> Result<String> {
+    let timeout = deadline.saturating_duration_since(Instant::now());
+    ensure!(!timeout.is_zero(), "the shared build window is exhausted");
     run_command_with_limits(
         command("nix", args, None),
         log,
         CommandLimits {
-            timeout: Duration::from_secs(BUILD_TIMEOUT_SECONDS),
+            timeout,
             stdout_bytes: 16 * 1024 * 1024,
             stderr_bytes: 256 * 1024 * 1024,
         },
@@ -202,6 +210,12 @@ mod tests {
         let setup = include_str!("assets/setup-nix.yml");
         assert!(setup.contains("timeout = 18000\n"));
         assert!(setup.contains("max-silent-time = 7200\n"));
+    }
+
+    #[test]
+    fn builds_share_one_window_and_refuse_once_it_is_spent() {
+        let error = run_build(&args(&["--version"]), None, Instant::now()).unwrap_err();
+        assert!(error.to_string().contains("shared build window is exhausted"));
     }
 
     fn limits() -> CommandLimits {
