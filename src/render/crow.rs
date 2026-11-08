@@ -1142,8 +1142,10 @@ memory_snapshot() (
     fi
   done
 )
-trap 'status=$?; trap - EXIT; memory_snapshot after > "$${{evidence}}/memory-after.txt" || :; printf '\''{{"schema":"simit.crow-qualification.v1","source_commit":"%s","lock_sha256":"%s","installable":%s,"exit_status":%s}}\n'\'' "$${{source_commit}}" "$${{lock_sha256}}" "$${{installable}}" "$${{status}}"; for receipt in "$${{evidence}}/metadata.json" "$${{evidence}}/plan.json" "$${{evidence}}/result.json" "$${{evidence}}/memory-before.txt" "$${{evidence}}/memory-after.txt"; do if test -f "$${{receipt}}"; then cat "$${{receipt}}" || :; fi; done; exit "$${{status}}"' EXIT
+trap 'status=$?; trap - EXIT; memory_snapshot after > "$${{evidence}}/memory-after.txt" || :; printf '\''{{"schema":"simit.crow-qualification.v1","source_commit":"%s","lock_sha256":"%s","installable":%s,"exit_status":%s}}\n'\'' "$${{source_commit}}" "$${{lock_sha256}}" "$${{installable}}" "$${{status}}"; for receipt in "$${{evidence}}/metadata.json" "$${{evidence}}/plan.json" "$${{evidence}}/result.json" "$${{evidence}}/memory-after.txt"; do if test -f "$${{receipt}}"; then cat "$${{receipt}}" || :; fi; done; exit "$${{status}}"' EXIT
+# Print the baseline now: a hard kill skips the EXIT trap.
 memory_snapshot before > "$${{evidence}}/memory-before.txt" || :
+cat "$${{evidence}}/memory-before.txt" || :
 # The clone container's LFS clean filter is not available in this step's image.
 if git grep -q 'filter=lfs' HEAD -- '*.gitattributes'; then
   git_lfs="$({timeout}{lfs_command})"

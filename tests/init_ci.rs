@@ -2106,10 +2106,10 @@ runtime = "nix"
         })
         .unwrap();
     let workflow: serde_yaml::Value = serde_yaml::from_str(&read(&file)).unwrap();
-    let script = workflow["steps"][0]["commands"][0]
-        .as_str()
-        .unwrap()
-        .replace("$${", "${");
+    let raw = workflow["steps"][0]["commands"][0].as_str().unwrap();
+    // Crow blanks any unescaped `${...}`; only `$${...}` survives substitution.
+    assert!(!raw.replace("$${", "").contains("${"), "{raw}");
+    let script = raw.replace("$${", "${");
     assert!(script.contains("--dry-run --json"));
     assert!(script.contains("--stdin"));
     assert!(script.contains("plan.json"));
@@ -2376,6 +2376,7 @@ runtime = "nix"
         assert!(script.contains("simit.crow-qualification.v1"));
         if job == "server" {
             assert!(script.contains("--json"));
+            assert!(!script.replace("$${", "").contains("${"), "{script}");
             build_script = script.replace("$${", "${");
         }
     }
@@ -2453,7 +2454,11 @@ esac
     let output = run(&[]);
     assert_eq!(output.status.code(), Some(7), "{output:?}");
     let stdout = String::from_utf8(output.stdout).unwrap();
-    let receipt: serde_json::Value = serde_json::from_str(stdout.lines().next().unwrap()).unwrap();
+    let receipt_line = stdout
+        .lines()
+        .find(|line| line.starts_with("{\"schema\""))
+        .unwrap();
+    let receipt: serde_json::Value = serde_json::from_str(receipt_line).unwrap();
     assert_eq!(receipt["source_commit"], format!("{:040}", 1));
     assert_eq!(receipt["installable"], ".#packages.x86_64-linux.server");
     assert_eq!(receipt["exit_status"], 7);
@@ -2473,6 +2478,8 @@ esac
     assert!(after.contains("memory.events:\noom_kill 1"));
     assert!(after.contains("memory.peak:\n8192"));
     assert!(stdout.contains(&before) && stdout.contains(&after));
+    // The baseline is printed before the build, so a hard kill still shows it.
+    assert!(stdout.find(&before).unwrap() < stdout.find(receipt_line).unwrap());
     assert!(!stdout.contains("oom_kill 99"));
     assert!(stdout.contains("unavailable"));
 
