@@ -16,6 +16,8 @@ pub enum Command {
     ObserveOriginal(ObserveArgs),
     /// Revalidate exact uploaded custody, provider digest, members and retention.
     VerifyOriginalRetention(RetentionArgs),
+    /// Report which CI workflows and jobs/steps consumed the most wall-clock time.
+    Usage(crate::ci_usage::cli::UsageArgs),
 }
 
 /// Source-enrolled custody capture inputs.
@@ -586,5 +588,6 @@ pub fn run(command: Command) -> Result<()> {
             );
             Ok(())
         }
+        Command::Usage(args) => crate::ci_usage::run(args),
     }
 }

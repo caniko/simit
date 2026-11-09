@@ -18,6 +18,7 @@ pub mod changelog;
 pub mod ci_resolution;
 /// Versioned grouped CI execution, separate from rendering and qualification authority.
 pub mod ci_runtime;
+pub mod ci_usage;
 /// Command-line argument definitions.
 pub mod cli;
 /// Command implementations used by the binary.

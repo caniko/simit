@@ -23,7 +23,7 @@ pub enum Commands {
     #[cfg(feature = "runtime-admission-cli")]
     #[command(subcommand)]
     Runtime(crate::runtime_admission::cli::Command),
-    #[command(subcommand, about = "Execute versioned CI runtime contracts")]
+    #[command(subcommand, about = "Execute CI runtime contracts and report CI usage")]
     Ci(crate::ci_runtime::cli::Command),
     #[command(
         subcommand,

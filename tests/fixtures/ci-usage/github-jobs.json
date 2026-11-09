@@ -1,0 +1,32 @@
+{
+  "total_count": 3,
+  "jobs": [
+    {
+      "id": 2001,
+      "name": "test (ubuntu-24.04)",
+      "status": "completed",
+      "conclusion": "success",
+      "started_at": "2026-10-02T10:00:00Z",
+      "completed_at": "2026-10-02T11:00:00Z",
+      "labels": ["ubuntu-24.04"]
+    },
+    {
+      "id": 2002,
+      "name": "clippy",
+      "status": "completed",
+      "conclusion": "failure",
+      "started_at": "2026-10-02T10:00:00Z",
+      "completed_at": "2026-10-02T10:20:00Z",
+      "labels": ["ubuntu-24.04", "x64"]
+    },
+    {
+      "id": 2003,
+      "name": "queued",
+      "status": "queued",
+      "conclusion": null,
+      "started_at": null,
+      "completed_at": null,
+      "labels": ["ubuntu-24.04"]
+    }
+  ]
+}

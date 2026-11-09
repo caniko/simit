@@ -1,0 +1,12 @@
+{
+  "id": 138000,
+  "number": 38,
+  "status": "error",
+  "errors": [
+    {
+      "type": "generic",
+      "is_warning": false,
+      "message": "### Workflow `annotation-browser` cannot be started\n\n❌ **No agent matching the required labels was found**\n\n#### Required Labels\n\n- `agent` = `codefloe-global`\n"
+    }
+  ]
+}
