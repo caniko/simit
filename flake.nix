@@ -2,7 +2,8 @@
   description = "Semver-aware git commit helper for Rust projects";
 
   inputs = {
-    harbor.url = "git+https://github.com/caniko/harbor.git?ref=feat/harbor-monorepo-components&rev=e8b1996580e4ecd51dd402edf4a16d9df88e3a1b";
+    # harbor ships its components as submodules, so the input must fetch them.
+    harbor.url = "git+https://github.com/caniko/harbor.git?ref=feat/harbor-monorepo-components&rev=9c7e7efb0196d644322d388e0fcce7ec4dea2077&submodules=1";
 
     nixpkgs.follows = "harbor/nixpkgs";
     rust-overlay.follows = "harbor/rust-overlay";
@@ -319,34 +320,44 @@
 
       formatter = treefmtEval.config.build.wrapper;
 
-      checks = {
-        default = publicPackage;
-        formatting = treefmtEval.config.build.check self;
+      checks =
+        {
+          default = publicPackage;
+          formatting = treefmtEval.config.build.check self;
 
-        # Exposes the crane deps closure so atlas's post-build hook and CI
-        # Attic push can cache the project dependency graph independently.
-        simit-deps = depsCheck;
-        simit-clippy = clippyCheck;
-        simit-nextest = nextestCheck;
-        simit-doc = docCheck;
-        simit-audit = auditCheck;
-        simit-deny = denyCheck;
-        simit-custody-source = custodySourceCheck;
-        simit-updater-config = let
-          checked = import ./tests/updater.nix {inherit nixpkgs;};
-        in
-          assert checked.serviceVerified;
-            pkgs.writeText "simit-updater-config.json" (builtins.toJSON checked.rendered);
+          # Exposes the crane deps closure so atlas's post-build hook and CI
+          # Attic push can cache the project dependency graph independently.
+          simit-deps = depsCheck;
+          simit-clippy = clippyCheck;
+          simit-nextest = nextestCheck;
+          simit-doc = docCheck;
+          simit-audit = auditCheck;
+          simit-deny = denyCheck;
+          simit-custody-source = custodySourceCheck;
+          simit-updater-config = let
+            checked = import ./tests/updater.nix {inherit nixpkgs;};
+          in
+            assert checked.serviceVerified;
+              pkgs.writeText "simit-updater-config.json" (builtins.toJSON checked.rendered);
 
-        clippy = clippyCheck;
-        nextest = nextestCheck;
-        doc = docCheck;
-        audit = auditCheck;
-        deny = denyCheck;
-        actionlint = actionlintCheck;
-        default-package-is-publicly-buildable = assert !(publicPackage.passthru.rsHarborBuildCacheWrapped or false);
-          pkgs.runCommand "check-simit-default-package-cache-policy" {} "touch $out";
-      };
+          clippy = clippyCheck;
+          nextest = nextestCheck;
+          doc = docCheck;
+          audit = auditCheck;
+          deny = denyCheck;
+          actionlint = actionlintCheck;
+          default-package-is-publicly-buildable = assert !(publicPackage.passthru.rsHarborBuildCacheWrapped or false);
+            pkgs.runCommand "check-simit-default-package-cache-policy" {} "touch $out";
+        }
+        // pkgs.lib.optionalAttrs (binaryRelease != null) {
+          # `cargo binstall simit` fetches the published release archive instead
+          # of compiling. The check renders the expected TOML from the bundle.
+          binstall-metadata = harbor.lib.rust.mkBinstallCheck {
+            inherit pkgs;
+            bundle = binaryRelease.releaseBundle;
+            cargoToml = ./Cargo.toml;
+          };
+        };
 
       devShells = {
         test = publicCraneLib.devShell {
