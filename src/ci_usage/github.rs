@@ -7,10 +7,7 @@ use anyhow::{Context, Result, bail, ensure};
 use chrono::{DateTime, SecondsFormat, Utc};
 use serde_json::Value;
 
-use crate::ci_usage::{
-    Forge, RepoSpec, Sample, UnitKind, Window,
-    http::JsonApi,
-};
+use crate::ci_usage::{Forge, RepoSpec, Sample, UnitKind, Window, http::JsonApi};
 
 const PER_PAGE: u32 = 100;
 const MAX_RUN_PAGES: u32 = 50;
@@ -24,13 +21,7 @@ pub(super) fn collect(spec: &RepoSpec, window: &Window) -> Result<(Vec<Sample>, 
         .ok()
         .filter(|value| !value.trim().is_empty())
         .unwrap_or_else(|| "https://api.github.com".into());
-    let api = JsonApi::new(
-        &base,
-        token,
-        "GitHub",
-        "application/vnd.github+json",
-        true,
-    )?;
+    let api = JsonApi::new(&base, token, "GitHub", "application/vnd.github+json", true)?;
     let repo = format!("{}/{}", spec.owner, spec.name);
     let mut warnings = Vec::new();
     let mut samples = Vec::new();
@@ -42,11 +33,7 @@ pub(super) fn collect(spec: &RepoSpec, window: &Window) -> Result<(Vec<Sample>, 
 
 /// The midpoint to split at when a range reports more runs than GitHub lists.
 /// Ranges of an hour or less are not split further.
-fn split_point(
-    total: u64,
-    since: DateTime<Utc>,
-    until: DateTime<Utc>,
-) -> Option<DateTime<Utc>> {
+fn split_point(total: u64, since: DateTime<Utc>, until: DateTime<Utc>) -> Option<DateTime<Utc>> {
     (total > GITHUB_RUN_CAP && until - since > chrono::Duration::hours(1))
         .then(|| since + (until - since) / 2)
 }
@@ -76,7 +63,10 @@ fn runs_in_range(
         let (reported, page_runs) = parse_runs_page(&api.get(&path)?)?;
         // The page past the cap can report total_count = 0; keep the largest count.
         total = total.max(reported);
-        if let Some(middle) = (page == 1).then(|| split_point(total, since, until)).flatten() {
+        if let Some(middle) = (page == 1)
+            .then(|| split_point(total, since, until))
+            .flatten()
+        {
             let mut runs = runs_in_range(api, repo, since, middle, warnings)?;
             runs.extend(runs_in_range(api, repo, middle, until, warnings)?);
             return Ok(runs);
@@ -264,7 +254,10 @@ mod tests {
         let middle = split_point(1500, since, until).unwrap();
         assert_eq!(middle, since + chrono::Duration::days(1));
         assert_eq!(split_point(1000, since, until), None);
-        assert_eq!(split_point(1500, since, since + chrono::Duration::hours(1)), None);
+        assert_eq!(
+            split_point(1500, since, since + chrono::Duration::hours(1)),
+            None
+        );
     }
 
     #[test]

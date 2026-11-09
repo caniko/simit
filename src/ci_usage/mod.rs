@@ -3,8 +3,8 @@
 //! `simit ci usage` reports which workflows and jobs/steps consumed the most
 //! wall-clock time in a window. It never mutates a repository or CI state.
 
-mod crow;
 pub mod cli;
+mod crow;
 mod github;
 mod http;
 
@@ -88,9 +88,9 @@ fn parse_repos(raw: &[String]) -> Result<Vec<RepoSpec>> {
     ensure!(!raw.is_empty(), "at least one --repo is required");
     let mut repos = Vec::new();
     for value in raw {
-        let (forge, path) = value
-            .split_once(':')
-            .with_context(|| format!("invalid --repo {value:?}; use github:owner/name or crow:owner/name"))?;
+        let (forge, path) = value.split_once(':').with_context(|| {
+            format!("invalid --repo {value:?}; use github:owner/name or crow:owner/name")
+        })?;
         let forge = match forge {
             "github" => Forge::Github,
             "crow" => Forge::Crow,
@@ -108,7 +108,8 @@ fn parse_repos(raw: &[String]) -> Result<Vec<RepoSpec>> {
                     && part != ".."
                     && part
                         .bytes()
-                        .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-')),
+                        .all(|byte| byte.is_ascii_alphanumeric()
+                            || matches!(byte, b'.' | b'_' | b'-')),
                 "invalid repository {label} in {value:?}"
             );
         }
@@ -182,9 +183,9 @@ fn parse_relative(raw: &str) -> Result<Option<Duration>> {
     if digits.is_empty() || !digits.bytes().all(|byte| byte.is_ascii_digit()) {
         return Ok(None);
     }
-    let amount: i64 = digits.parse().with_context(|| {
-        format!("invalid window duration {raw:?}; use YYYY-MM-DD or Nd/Nh/Nw")
-    })?;
+    let amount: i64 = digits
+        .parse()
+        .with_context(|| format!("invalid window duration {raw:?}; use YYYY-MM-DD or Nd/Nh/Nw"))?;
     let multiplier = match unit {
         'd' => 86_400,
         'h' => 3_600,
@@ -245,11 +246,7 @@ impl Builder {
     }
 
     fn finish(self, window: Window, repos: Vec<String>, top: usize) -> Report {
-        let grand_total: f64 = self
-            .rows
-            .values()
-            .map(|row| row.total_seconds)
-            .sum::<f64>();
+        let grand_total: f64 = self.rows.values().map(|row| row.total_seconds).sum::<f64>();
         let mut pathways: Vec<Pathway> = self
             .rows
             .into_iter()
@@ -261,10 +258,7 @@ impl Builder {
                 } else {
                     row.total_seconds / runs as f64
                 };
-                let max_seconds = durations
-                    .iter()
-                    .copied()
-                    .fold(0.0_f64, f64::max);
+                let max_seconds = durations.iter().copied().fold(0.0_f64, f64::max);
                 Pathway {
                     forge,
                     repo,
@@ -304,7 +298,11 @@ impl Builder {
                 .or_default()
                 .add(pathway);
             workflow_totals
-                .entry((pathway.forge, pathway.repo.clone(), pathway.workflow.clone()))
+                .entry((
+                    pathway.forge,
+                    pathway.repo.clone(),
+                    pathway.workflow.clone(),
+                ))
                 .or_default()
                 .add(pathway);
         }
@@ -771,6 +769,8 @@ mod tests {
         );
         assert!(parse_repos(&["gitlab:caniko/simit".into()]).is_err());
         assert!(parse_repos(&["github:../escape".into()]).is_err());
-        assert!(parse_repos(&["github:caniko/simit".into(), "github:caniko/simit".into()]).is_err());
+        assert!(
+            parse_repos(&["github:caniko/simit".into(), "github:caniko/simit".into()]).is_err()
+        );
     }
 }

@@ -166,8 +166,7 @@ fn rate_limited(
     has_retry_after: bool,
 ) -> bool {
     status == reqwest::StatusCode::TOO_MANY_REQUESTS
-        || (status == reqwest::StatusCode::FORBIDDEN
-            && (remaining == Some("0") || has_retry_after))
+        || (status == reqwest::StatusCode::FORBIDDEN && (remaining == Some("0") || has_retry_after))
 }
 
 fn header_seconds(response: &reqwest::blocking::Response, name: &str) -> Option<u64> {

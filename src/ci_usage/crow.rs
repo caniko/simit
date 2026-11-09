@@ -8,10 +8,7 @@ use anyhow::{Context, Result, bail, ensure};
 use chrono::{DateTime, Utc};
 use serde_json::Value;
 
-use crate::ci_usage::{
-    Forge, RepoSpec, Sample, UnitKind, Window,
-    http::JsonApi,
-};
+use crate::ci_usage::{Forge, RepoSpec, Sample, UnitKind, Window, http::JsonApi};
 
 const PER_PAGE: usize = 50;
 const MAX_PIPELINE_PAGES: u32 = 20;
@@ -20,8 +17,8 @@ pub(super) fn collect(spec: &RepoSpec, window: &Window) -> Result<(Vec<Sample>, 
     let server = std::env::var("CROW_SERVER").context(
         "CROW_SERVER is required for crow: repositories (for example https://ci.example.com)",
     )?;
-    let token = std::env::var("CROW_TOKEN")
-        .context("CROW_TOKEN is required for crow: repositories")?;
+    let token =
+        std::env::var("CROW_TOKEN").context("CROW_TOKEN is required for crow: repositories")?;
     let base = format!("{}/api/v1", server.trim_end_matches('/'));
     let api = JsonApi::new(&base, token, "Crow", "application/json", false)?;
     let owner = &spec.owner;
@@ -91,8 +88,7 @@ fn parse_pipeline(repo: &str, pipeline: &Value) -> Result<Vec<Sample>> {
                 continue;
             }
             let message = error["message"].as_str().unwrap_or_default();
-            let workflow =
-                workflow_from_error(message).unwrap_or_else(|| "(pipeline)".to_owned());
+            let workflow = workflow_from_error(message).unwrap_or_else(|| "(pipeline)".to_owned());
             samples.push(Sample {
                 forge: Forge::Crow,
                 repo: repo.to_owned(),
@@ -195,8 +191,10 @@ fn parse_workflow(repo: &str, workflow: &Value) -> Result<Vec<Sample>> {
         return Ok(samples);
     }
     if samples.is_empty()
-        && let (Some(started), Some(finished)) =
-            (unix_time(&workflow["started"]), unix_time(&workflow["finished"]))
+        && let (Some(started), Some(finished)) = (
+            unix_time(&workflow["started"]),
+            unix_time(&workflow["finished"]),
+        )
     {
         let seconds = (finished - started).num_milliseconds() as f64 / 1000.0;
         if seconds >= 0.0 {
@@ -267,7 +265,10 @@ mod tests {
         let pipelines = value.as_array().unwrap();
         assert_eq!(pipelines.len(), 3);
         assert_eq!(pipelines[0]["number"], 38);
-        assert_eq!(unix_time(&pipelines[0]["created"]).unwrap().timestamp(), 1_794_203_395);
+        assert_eq!(
+            unix_time(&pipelines[0]["created"]).unwrap().timestamp(),
+            1_794_203_395
+        );
         assert!(unix_time(&serde_json::json!(0)).is_none());
     }
 
@@ -302,7 +303,9 @@ mod tests {
         assert!(!samples[0].quota_denied);
         assert!(samples[0].failed);
         assert_eq!(samples[0].seconds, None);
-        assert!(!quota_denial("No agent matching the required labels was found"));
+        assert!(!quota_denial(
+            "No agent matching the required labels was found"
+        ));
         assert!(!oom_killed("no room left on the volume"));
     }
 

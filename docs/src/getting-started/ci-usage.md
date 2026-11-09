@@ -13,13 +13,13 @@ simit ci usage \
 
 ## Inputs
 
-| Flag            | Meaning                                                                    |
-| --------------- | -------------------------------------------------------------------------- |
-| `--repo`        | `github:owner/name` or `crow:owner/name`; repeat for several repositories. |
-| `--since`       | `YYYY-MM-DD` (UTC start of day) or `Nd`/`Nh`/`Nw`; default `30d`.          |
-| `--until`       | `YYYY-MM-DD` (exclusive next midnight) or `Nd`/`Nh`/`Nw` before now; default now. |
-| `--top`         | Pathway rows to report, default 20.                                        |
-| `--json`        | Emit the stable machine-readable schema below.                             |
+| Flag      | Meaning                                                                           |
+| --------- | --------------------------------------------------------------------------------- |
+| `--repo`  | `github:owner/name` or `crow:owner/name`; repeat for several repositories.        |
+| `--since` | `YYYY-MM-DD` (UTC start of day) or `Nd`/`Nh`/`Nw`; default `30d`.                 |
+| `--until` | `YYYY-MM-DD` (exclusive next midnight) or `Nd`/`Nh`/`Nw` before now; default now. |
+| `--top`   | Pathway rows to report, default 20.                                               |
+| `--json`  | Emit the stable machine-readable schema below.                                    |
 
 Credentials come from the environment and are never printed:
 
@@ -75,7 +75,10 @@ pathway table.
 {
   "schema_version": 1,
   "generated_at": "2026-11-09T06:00:00Z",
-  "window": { "since": "2026-10-10T00:00:00Z", "until": "2026-11-09T06:00:00Z" },
+  "window": {
+    "since": "2026-10-10T00:00:00Z",
+    "until": "2026-11-09T06:00:00Z"
+  },
   "top_limit": 20,
   "repos": ["github:caniko/simit", "crow:caniko/bekiper"],
   "total_runs": 1200,
