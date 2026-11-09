@@ -48,6 +48,32 @@ pub fn run(
     run_command(command(program, args, cwd), log)
 }
 
+// The realization bound must fit inside the 360 minute hosted job.
+const BUILD_TIMEOUT_SECONDS: u64 = 19800;
+const _: () = assert!(BUILD_TIMEOUT_SECONDS < 360 * 60);
+
+/// One window for a review job's preparation and builds. The job's remaining
+/// 30 minutes are a best-effort margin for runner setup and result export.
+pub fn build_deadline() -> Instant {
+    Instant::now() + Duration::from_secs(BUILD_TIMEOUT_SECONDS)
+}
+
+/// Realizing a target (for example headless VTK/ParaView) outlasts the 35 minute
+/// default; bound it by the job's shared `deadline`, with a larger log.
+pub fn run_build(args: &[String], log: Option<&Path>, deadline: Instant) -> Result<String> {
+    let timeout = deadline.saturating_duration_since(Instant::now());
+    ensure!(!timeout.is_zero(), "the shared build window is exhausted");
+    run_command_with_limits(
+        command("nix", args, None),
+        log,
+        CommandLimits {
+            timeout,
+            stdout_bytes: 16 * 1024 * 1024,
+            stderr_bytes: 256 * 1024 * 1024,
+        },
+    )
+}
+
 #[derive(Clone, Copy)]
 pub struct CommandLimits {
     pub timeout: Duration,
@@ -154,10 +180,10 @@ pub fn nix_args(values: &[&str]) -> Vec<String> {
         "2",
         "--option",
         "max-silent-time",
-        "600",
+        "7200",
         "--option",
         "timeout",
-        "1800",
+        "18000",
         "--option",
         "eval-cache",
         "false",
@@ -168,6 +194,33 @@ pub fn nix_args(values: &[&str]) -> Vec<String> {
 #[cfg(all(test, unix))]
 mod tests {
     use super::*;
+
+    #[test]
+    fn build_bounds_fit_inside_the_hosted_review_job() {
+        let job = include_str!("assets/review-repository.yml");
+        assert!(job.contains("    timeout-minutes: 360\n"));
+        assert!(nix_args(&[]).windows(2).any(|w| w == ["timeout", "18000"]));
+        // Release-profile compiles and LTO links stay silent for over 10 minutes;
+        // Hydra's 7200 s applies. The generated action and the engine must agree.
+        assert!(
+            nix_args(&[])
+                .windows(2)
+                .any(|w| w == ["max-silent-time", "7200"])
+        );
+        let setup = include_str!("assets/setup-nix.yml");
+        assert!(setup.contains("timeout = 18000\n"));
+        assert!(setup.contains("max-silent-time = 7200\n"));
+    }
+
+    #[test]
+    fn builds_share_one_window_and_refuse_once_it_is_spent() {
+        let error = run_build(&args(&["--version"]), None, Instant::now()).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("shared build window is exhausted")
+        );
+    }
 
     fn limits() -> CommandLimits {
         CommandLimits {
