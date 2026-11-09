@@ -12,6 +12,7 @@
 - [Repository Review](repository-review.md)
 - [Review Migration Verification](review-migration-verification.md)
 - [CI Adoption Notes](getting-started/ci-adoption.md)
+- [CI Usage Metrics](getting-started/ci-usage.md)
 - [Workstation CI Updates](getting-started/ci-updates.md)
 - [Usage Facts](projects-facts.md)
 - [Installed Custody Acceptance](ci-custody-acceptance.md)

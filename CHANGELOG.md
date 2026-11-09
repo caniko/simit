@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Added: `simit ci usage --repo github:owner/name --repo crow:owner/name`
+  reports the workflows and jobs/steps that consumed the most wall-clock time
+  in a window (`--since`, `--until`, `--top`), with per-repository and
+  per-workflow rollups, failure/OOM/quota counts, runner labels and a stable
+  `--json` schema. GitHub uses `GITHUB_TOKEN`/`GH_TOKEN` (or `gh auth token`);
+  Crow uses `CROW_SERVER`/`CROW_TOKEN`. Pagination and retries are bounded, and
+  exhausted rate limits report their reset time.
+
 - Added: `[winget].arm64_zip_archive` (and `simit dist winget submit
 --arm64-zip-archive`) adds a second `Architecture: arm64` installer to the
   generated winget manifest, so `winget install` works on Windows on ARM.

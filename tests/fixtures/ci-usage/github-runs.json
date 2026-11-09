@@ -1,0 +1,23 @@
+{
+  "total_count": 3,
+  "workflow_runs": [
+    {
+      "id": 1001,
+      "name": "CI",
+      "path": ".github/workflows/ci.yaml",
+      "created_at": "2026-10-02T10:00:00Z"
+    },
+    {
+      "id": 1002,
+      "name": "CI",
+      "path": ".github/workflows/ci.yaml",
+      "created_at": "2026-10-07T23:00:00Z"
+    },
+    {
+      "id": 1003,
+      "name": "Release",
+      "path": ".github/workflows/release.yaml",
+      "created_at": "2026-09-01T00:00:00Z"
+    }
+  ]
+}
