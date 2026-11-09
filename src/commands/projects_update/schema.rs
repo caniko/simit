@@ -584,6 +584,426 @@ impl Config {
     }
 }
 
+impl Inventory {
+    pub fn validate(&self, workspace: &Workspace) -> Result<()> {
+        ensure!(
+            self.schema_version == 1 && self.root == workspace.root,
+            "inventory schema/root mismatch"
+        );
+        let age = chrono::Utc::now()
+            .signed_duration_since(self.observed_at)
+            .num_seconds();
+        ensure!(
+            (-30..=workspace.inventory.max_age_seconds as i64).contains(&age),
+            "inventory is stale or from the future"
+        );
+        ensure!(!self.producer.is_empty(), "inventory producer is required");
+        sha256(&self.policy_digest)?;
+        for p in &self.projects {
+            coordinate(&p.coordinate)?;
+            relative(Path::new(&p.relative_path))?;
+        }
+        Ok(())
+    }
+}
+impl Command {
+    pub fn validate(&self) -> Result<()> {
+        ensure!(
+            self.program.is_absolute() && (1..=900).contains(&self.timeout_seconds),
+            "adapter commands require absolute executables and bounded timeouts"
+        );
+        Ok(())
+    }
+}
+pub fn coordinate(value: &str) -> Result<()> {
+    let host = value.split('/').next().unwrap_or_default();
+    ensure!(
+        host == host.to_ascii_lowercase(),
+        "repository hostnames must use canonical lowercase"
+    );
+    ensure!(
+        value.split('/').count() >= 3
+            && !value.contains(['\\', ':', '\0', '?', '#', '@'])
+            && value.split('/').all(|p| !p.is_empty()
+                && p != "."
+                && p != ".."
+                && !p.chars().any(char::is_whitespace)),
+        "invalid canonical repository coordinate"
+    );
+    Ok(())
+}
+pub fn relative(path: &Path) -> Result<()> {
+    ensure!(
+        !path.as_os_str().is_empty()
+            && path
+                .components()
+                .all(|p| matches!(p, std::path::Component::Normal(_)))
+            && !path
+                .components()
+                .any(|p| p.as_os_str().to_string_lossy().eq_ignore_ascii_case(".git")),
+        "invalid generated repository path"
+    );
+    Ok(())
+}
+fn absolute(path: &Path) -> Result<()> {
+    ensure!(
+        path.is_absolute()
+            && path.components().all(|p| matches!(
+                p,
+                std::path::Component::RootDir | std::path::Component::Normal(_)
+            )),
+        "runtime paths must be absolute and must not contain traversal components"
+    );
+    Ok(())
+}
+
+fn branch(value: &str) -> Result<()> {
+    ensure!(
+        !value.is_empty()
+            && !value.starts_with('-')
+            && std::process::Command::new("git")
+                .args(["check-ref-format", &format!("refs/heads/{value}")])
+                .stdin(std::process::Stdio::null())
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .status()
+                .context("validate branch name with Git")?
+                .success(),
+        "invalid Git branch name"
+    );
+    Ok(())
+}
+
+pub fn resolved_path(path: &Path) -> Result<PathBuf> {
+    absolute(path)?;
+    let mut ancestor = path;
+    let mut missing = Vec::new();
+    loop {
+        match std::fs::symlink_metadata(ancestor) {
+            Ok(_) => {
+                let mut resolved = ancestor.canonicalize()?;
+                for component in missing.into_iter().rev() {
+                    resolved.push(component);
+                }
+                return Ok(resolved);
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                missing.push(
+                    ancestor
+                        .file_name()
+                        .context("missing runtime path ancestor")?,
+                );
+                ancestor = ancestor.parent().context("missing runtime path parent")?;
+            }
+            Err(error) => return Err(error.into()),
+        }
+    }
+}
+pub fn sha256(value: &str) -> Result<()> {
+    ensure!(
+        value.len() == 64
+            && value
+                .bytes()
+                .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)),
+        "invalid SHA-256"
+    );
+    Ok(())
+}
+
+/// Read the verified opened object, not a path that can be redirected after a
+/// canonicalization check. Adapter execution already requires Linux namespaces.
+pub(super) fn credential_bytes(path: &Path) -> Result<Vec<u8>> {
+    #[cfg(target_os = "linux")]
+    {
+        use std::{io::Read, os::fd::AsRawFd};
+        absolute(path)?;
+        let file = std::fs::File::open(path)?;
+        ensure!(
+            file.metadata()?.is_file(),
+            "credential must be a regular runtime file"
+        );
+        let resolved = std::fs::read_link(format!("/proc/self/fd/{}", file.as_raw_fd()))?;
+        ensure!(
+            resolved.is_absolute() && !resolved.starts_with("/nix/store"),
+            "forge credentials must resolve outside the Nix store"
+        );
+        let mut bytes = Vec::new();
+        file.take(crate::review::MAX_JSON_BYTES + 1)
+            .read_to_end(&mut bytes)?;
+        ensure!(
+            bytes.len() as u64 <= crate::review::MAX_JSON_BYTES,
+            "credential file is too large"
+        );
+        Ok(bytes)
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = path;
+        anyhow::bail!("updater credentials require Linux file-identity verification")
+    }
+}
+fn requirements(values: &[Requirement]) -> Result<()> {
+    let mut seen = BTreeSet::new();
+    for r in values {
+        ensure!(
+            !r.name.trim().is_empty()
+                && !r.authority.trim().is_empty()
+                && seen.insert((&r.name, &r.authority)),
+            "invalid/duplicate qualification requirement"
+        );
+    }
+    Ok(())
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct AdapterRequest {
+    pub schema_version: u32,
+    pub operation: String,
+    pub coordinate: String,
+    pub api_url: String,
+    pub credential_file: Option<PathBuf>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ci_credential_file: Option<PathBuf>,
+    pub authority: String,
+    pub revision: Option<String>,
+    pub branch: Option<String>,
+    /// All generated output paths. Each adapter discovers its own workflows and triggers.
+    pub workflows: Vec<String>,
+    pub required_checks: Vec<Requirement>,
+    /// Exact generated bytes for pre-push backend admission. Omitted otherwise.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub plan: Option<crate::project::CiUpdatePlan>,
+    /// `pull-request` relaxes only approval-review protection of the target.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub landing: Option<String>,
+    /// Branch a pull request merges into.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target: Option<String>,
+    /// Forge identifier of an existing pull request.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub change: Option<String>,
+}
+impl AdapterRequest {
+    /// Version 2 marks any request a version-1 adapter could misread. Without
+    /// v2 features the request keeps its version-1 bytes and admission digest.
+    pub fn derived_version(&self) -> u32 {
+        if self.ci_credential_file.is_some()
+            || self.landing.is_some()
+            || self.target.is_some()
+            || self.change.is_some()
+            || matches!(self.operation.as_str(), "propose" | "merge" | "close")
+            || self.plan.as_ref().is_some_and(|plan| {
+                plan.schema == "simit.ci-update-plan.v2" || !plan.patches.is_empty()
+            })
+        {
+            2
+        } else {
+            1
+        }
+    }
+
+    pub fn validate(&self) -> Result<()> {
+        ensure!(
+            self.schema_version == self.derived_version()
+                && matches!(
+                    self.operation.as_str(),
+                    "inspect" | "admit" | "qualify" | "propose" | "merge" | "close"
+                ),
+            "unsupported adapter request"
+        );
+        coordinate(&self.coordinate)?;
+        if let Some(rev) = &self.revision {
+            crate::review::contract::sha(rev)?;
+        }
+        requirements(&self.required_checks)?;
+        ensure!(
+            self.landing
+                .as_deref()
+                .is_none_or(|l| matches!(l, "direct" | "pull-request")),
+            "unsupported landing mode"
+        );
+        let pull_request = self.landing.as_deref() == Some("pull-request");
+        match self.operation.as_str() {
+            "propose" | "merge" | "close" => ensure!(
+                pull_request
+                    && self.revision.is_some()
+                    && self.branch.is_some()
+                    && self.target.is_some()
+                    && (self.operation != "merge" || self.change.is_some()),
+                "pull-request operations need the candidate, its branch, target and change"
+            ),
+            // Inspection observes the target itself; admission relaxes only it.
+            "inspect" => ensure!(
+                self.target.is_none() && self.change.is_none(),
+                "inspection carries no pull request"
+            ),
+            "admit" => ensure!(
+                self.change.is_none() && (self.landing.is_none() || self.target == self.branch),
+                "pull-request admission applies only to its target branch"
+            ),
+            _ => ensure!(
+                self.landing.is_none() && self.target.is_none() && self.change.is_none(),
+                "qualification carries no landing"
+            ),
+        }
+        if self.operation == "admit" {
+            ensure!(
+                self.revision.is_some()
+                    && self.branch.is_some()
+                    && self
+                        .plan
+                        .as_ref()
+                        .is_some_and(crate::project::CiUpdatePlan::schema_matches),
+                "admission needs exact candidate bytes and branch"
+            );
+        } else {
+            ensure!(
+                self.plan.is_none(),
+                "generation plans are only valid for admission"
+            );
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct AdapterResponse {
+    pub schema_version: u32,
+    pub coordinate: String,
+    pub repository_id: String,
+    pub default_branch: String,
+    pub revision: String,
+    pub remote: String,
+    pub policy_digest: String,
+    pub requirements: Vec<Requirement>,
+    pub status: String,
+    pub checks: Vec<Check>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub change: Option<Change>,
+}
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct Change {
+    pub id: String,
+    /// `open`, `merged` or `closed` (without merging).
+    pub state: String,
+    pub head: String,
+    pub base: String,
+    pub merge_commit: Option<String>,
+}
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct Check {
+    pub name: String,
+    pub authority: String,
+    pub revision: String,
+    pub run: String,
+    pub attempt: u32,
+    pub status: String,
+}
+
+impl AdapterResponse {
+    pub fn validate(&self, request: &AdapterRequest) -> Result<()> {
+        ensure!(
+            self.schema_version == request.schema_version
+                && self.coordinate == request.coordinate
+                && !self.repository_id.is_empty(),
+            "adapter identity mismatch"
+        );
+        if !matches!(request.operation.as_str(), "propose" | "merge" | "close") {
+            ensure!(self.change.is_none(), "unexpected pull request");
+        } else if matches!(self.status.as_str(), "success" | "pending") {
+            // Closing an untracked candidate may find no pull request at all;
+            // the common response checks below still apply.
+            if let Some(change) = &self.change {
+                crate::review::contract::sha(&change.head)?;
+                if let Some(commit) = &change.merge_commit {
+                    crate::review::contract::sha(commit)?;
+                }
+                ensure!(
+                    !change.id.is_empty()
+                    && request.change.as_ref().is_none_or(|id| id == &change.id)
+                    // Closing retires a stale change whose head or target moved.
+                    && (request.operation == "close"
+                        || (request.target.as_ref() == Some(&change.base)
+                            && request.revision.as_ref() == Some(&change.head)))
+                    && matches!(change.state.as_str(), "open" | "merged" | "closed")
+                    && (change.state == "merged") == change.merge_commit.is_some()
+                    // Only an unmerged open merge is pending; close never leaves it open.
+                    && match request.operation.as_str() {
+                        "merge" => (self.status == "pending") == (change.state == "open"),
+                        "close" => self.status == "success" && change.state != "open",
+                        _ => self.status == "success",
+                    },
+                    "pull request differs from the qualified candidate or its target"
+                );
+            } else {
+                ensure!(
+                    request.operation == "close"
+                        && request.change.is_none()
+                        && self.status == "success",
+                    "pull-request operation returned no change"
+                );
+            }
+        }
+        crate::review::contract::sha(&self.revision)?;
+        sha256(&self.policy_digest)?;
+        requirements(&self.requirements)?;
+        ensure!(
+            matches!(
+                self.status.as_str(),
+                "success" | "pending" | "failed" | "unsupported"
+            ),
+            "invalid adapter status"
+        );
+        if let Some(rev) = &request.revision {
+            ensure!(&self.revision == rev, "adapter source mismatch");
+        }
+        if request.operation == "admit" && self.status == "success" {
+            let digest = crate::review::canonical_digest(request)?;
+            ensure!(
+                self.checks.len() == 1
+                    && self.checks.iter().all(|c| c.name == "admission"
+                        && c.authority == request.authority
+                        && c.revision == self.revision
+                        && c.attempt == 1
+                        && c.status == "success"
+                        && c.run == digest),
+                "adapter did not attest exact-branch generation-plan admission"
+            );
+        }
+        if request.operation == "qualify" && self.status == "success" {
+            ensure!(
+                !self.checks.is_empty(),
+                "empty qualification is not acceptance"
+            );
+            let mut seen = BTreeSet::new();
+            for check in &self.checks {
+                ensure!(
+                    check.revision == self.revision
+                        && check.attempt == 1
+                        && check.status == "success"
+                        && !check.run.is_empty()
+                        && seen.insert((&check.name, &check.authority)),
+                    "qualification contains non-original, duplicate or non-success cases"
+                );
+            }
+            for required in &request.required_checks {
+                ensure!(
+                    self.checks
+                        .iter()
+                        .any(|c| c.name == required.name && c.authority == required.authority),
+                    "missing required qualification: {}",
+                    required.name
+                );
+            }
+        }
+        Ok(())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1362,425 +1782,5 @@ mod tests {
         // A CI-only credential is valid for public forge repositories.
         cfg.forges.get_mut("example").unwrap().credential_file = None;
         cfg.validate().unwrap();
-    }
-}
-
-impl Inventory {
-    pub fn validate(&self, workspace: &Workspace) -> Result<()> {
-        ensure!(
-            self.schema_version == 1 && self.root == workspace.root,
-            "inventory schema/root mismatch"
-        );
-        let age = chrono::Utc::now()
-            .signed_duration_since(self.observed_at)
-            .num_seconds();
-        ensure!(
-            (-30..=workspace.inventory.max_age_seconds as i64).contains(&age),
-            "inventory is stale or from the future"
-        );
-        ensure!(!self.producer.is_empty(), "inventory producer is required");
-        sha256(&self.policy_digest)?;
-        for p in &self.projects {
-            coordinate(&p.coordinate)?;
-            relative(Path::new(&p.relative_path))?;
-        }
-        Ok(())
-    }
-}
-impl Command {
-    pub fn validate(&self) -> Result<()> {
-        ensure!(
-            self.program.is_absolute() && (1..=900).contains(&self.timeout_seconds),
-            "adapter commands require absolute executables and bounded timeouts"
-        );
-        Ok(())
-    }
-}
-pub fn coordinate(value: &str) -> Result<()> {
-    let host = value.split('/').next().unwrap_or_default();
-    ensure!(
-        host == host.to_ascii_lowercase(),
-        "repository hostnames must use canonical lowercase"
-    );
-    ensure!(
-        value.split('/').count() >= 3
-            && !value.contains(['\\', ':', '\0', '?', '#', '@'])
-            && value.split('/').all(|p| !p.is_empty()
-                && p != "."
-                && p != ".."
-                && !p.chars().any(char::is_whitespace)),
-        "invalid canonical repository coordinate"
-    );
-    Ok(())
-}
-pub fn relative(path: &Path) -> Result<()> {
-    ensure!(
-        !path.as_os_str().is_empty()
-            && path
-                .components()
-                .all(|p| matches!(p, std::path::Component::Normal(_)))
-            && !path
-                .components()
-                .any(|p| p.as_os_str().to_string_lossy().eq_ignore_ascii_case(".git")),
-        "invalid generated repository path"
-    );
-    Ok(())
-}
-fn absolute(path: &Path) -> Result<()> {
-    ensure!(
-        path.is_absolute()
-            && path.components().all(|p| matches!(
-                p,
-                std::path::Component::RootDir | std::path::Component::Normal(_)
-            )),
-        "runtime paths must be absolute and must not contain traversal components"
-    );
-    Ok(())
-}
-
-fn branch(value: &str) -> Result<()> {
-    ensure!(
-        !value.is_empty()
-            && !value.starts_with('-')
-            && std::process::Command::new("git")
-                .args(["check-ref-format", &format!("refs/heads/{value}")])
-                .stdin(std::process::Stdio::null())
-                .stdout(std::process::Stdio::null())
-                .stderr(std::process::Stdio::null())
-                .status()
-                .context("validate branch name with Git")?
-                .success(),
-        "invalid Git branch name"
-    );
-    Ok(())
-}
-
-pub fn resolved_path(path: &Path) -> Result<PathBuf> {
-    absolute(path)?;
-    let mut ancestor = path;
-    let mut missing = Vec::new();
-    loop {
-        match std::fs::symlink_metadata(ancestor) {
-            Ok(_) => {
-                let mut resolved = ancestor.canonicalize()?;
-                for component in missing.into_iter().rev() {
-                    resolved.push(component);
-                }
-                return Ok(resolved);
-            }
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                missing.push(
-                    ancestor
-                        .file_name()
-                        .context("missing runtime path ancestor")?,
-                );
-                ancestor = ancestor.parent().context("missing runtime path parent")?;
-            }
-            Err(error) => return Err(error.into()),
-        }
-    }
-}
-pub fn sha256(value: &str) -> Result<()> {
-    ensure!(
-        value.len() == 64
-            && value
-                .bytes()
-                .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)),
-        "invalid SHA-256"
-    );
-    Ok(())
-}
-
-/// Read the verified opened object, not a path that can be redirected after a
-/// canonicalization check. Adapter execution already requires Linux namespaces.
-pub(super) fn credential_bytes(path: &Path) -> Result<Vec<u8>> {
-    #[cfg(target_os = "linux")]
-    {
-        use std::{io::Read, os::fd::AsRawFd};
-        absolute(path)?;
-        let file = std::fs::File::open(path)?;
-        ensure!(
-            file.metadata()?.is_file(),
-            "credential must be a regular runtime file"
-        );
-        let resolved = std::fs::read_link(format!("/proc/self/fd/{}", file.as_raw_fd()))?;
-        ensure!(
-            resolved.is_absolute() && !resolved.starts_with("/nix/store"),
-            "forge credentials must resolve outside the Nix store"
-        );
-        let mut bytes = Vec::new();
-        file.take(crate::review::MAX_JSON_BYTES + 1)
-            .read_to_end(&mut bytes)?;
-        ensure!(
-            bytes.len() as u64 <= crate::review::MAX_JSON_BYTES,
-            "credential file is too large"
-        );
-        Ok(bytes)
-    }
-    #[cfg(not(target_os = "linux"))]
-    {
-        let _ = path;
-        anyhow::bail!("updater credentials require Linux file-identity verification")
-    }
-}
-fn requirements(values: &[Requirement]) -> Result<()> {
-    let mut seen = BTreeSet::new();
-    for r in values {
-        ensure!(
-            !r.name.trim().is_empty()
-                && !r.authority.trim().is_empty()
-                && seen.insert((&r.name, &r.authority)),
-            "invalid/duplicate qualification requirement"
-        );
-    }
-    Ok(())
-}
-
-#[derive(Debug, Deserialize, Serialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct AdapterRequest {
-    pub schema_version: u32,
-    pub operation: String,
-    pub coordinate: String,
-    pub api_url: String,
-    pub credential_file: Option<PathBuf>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub ci_credential_file: Option<PathBuf>,
-    pub authority: String,
-    pub revision: Option<String>,
-    pub branch: Option<String>,
-    /// All generated output paths. Each adapter discovers its own workflows and triggers.
-    pub workflows: Vec<String>,
-    pub required_checks: Vec<Requirement>,
-    /// Exact generated bytes for pre-push backend admission. Omitted otherwise.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub plan: Option<crate::project::CiUpdatePlan>,
-    /// `pull-request` relaxes only approval-review protection of the target.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub landing: Option<String>,
-    /// Branch a pull request merges into.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub target: Option<String>,
-    /// Forge identifier of an existing pull request.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub change: Option<String>,
-}
-impl AdapterRequest {
-    /// Version 2 marks any request a version-1 adapter could misread. Without
-    /// v2 features the request keeps its version-1 bytes and admission digest.
-    pub fn derived_version(&self) -> u32 {
-        if self.ci_credential_file.is_some()
-            || self.landing.is_some()
-            || self.target.is_some()
-            || self.change.is_some()
-            || matches!(self.operation.as_str(), "propose" | "merge" | "close")
-            || self.plan.as_ref().is_some_and(|plan| {
-                plan.schema == "simit.ci-update-plan.v2" || !plan.patches.is_empty()
-            })
-        {
-            2
-        } else {
-            1
-        }
-    }
-
-    pub fn validate(&self) -> Result<()> {
-        ensure!(
-            self.schema_version == self.derived_version()
-                && matches!(
-                    self.operation.as_str(),
-                    "inspect" | "admit" | "qualify" | "propose" | "merge" | "close"
-                ),
-            "unsupported adapter request"
-        );
-        coordinate(&self.coordinate)?;
-        if let Some(rev) = &self.revision {
-            crate::review::contract::sha(rev)?;
-        }
-        requirements(&self.required_checks)?;
-        ensure!(
-            self.landing
-                .as_deref()
-                .is_none_or(|l| matches!(l, "direct" | "pull-request")),
-            "unsupported landing mode"
-        );
-        let pull_request = self.landing.as_deref() == Some("pull-request");
-        match self.operation.as_str() {
-            "propose" | "merge" | "close" => ensure!(
-                pull_request
-                    && self.revision.is_some()
-                    && self.branch.is_some()
-                    && self.target.is_some()
-                    && (self.operation != "merge" || self.change.is_some()),
-                "pull-request operations need the candidate, its branch, target and change"
-            ),
-            // Inspection observes the target itself; admission relaxes only it.
-            "inspect" => ensure!(
-                self.target.is_none() && self.change.is_none(),
-                "inspection carries no pull request"
-            ),
-            "admit" => ensure!(
-                self.change.is_none() && (self.landing.is_none() || self.target == self.branch),
-                "pull-request admission applies only to its target branch"
-            ),
-            _ => ensure!(
-                self.landing.is_none() && self.target.is_none() && self.change.is_none(),
-                "qualification carries no landing"
-            ),
-        }
-        if self.operation == "admit" {
-            ensure!(
-                self.revision.is_some()
-                    && self.branch.is_some()
-                    && self
-                        .plan
-                        .as_ref()
-                        .is_some_and(crate::project::CiUpdatePlan::schema_matches),
-                "admission needs exact candidate bytes and branch"
-            );
-        } else {
-            ensure!(
-                self.plan.is_none(),
-                "generation plans are only valid for admission"
-            );
-        }
-        Ok(())
-    }
-}
-
-#[derive(Debug, Deserialize, Serialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct AdapterResponse {
-    pub schema_version: u32,
-    pub coordinate: String,
-    pub repository_id: String,
-    pub default_branch: String,
-    pub revision: String,
-    pub remote: String,
-    pub policy_digest: String,
-    pub requirements: Vec<Requirement>,
-    pub status: String,
-    pub checks: Vec<Check>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub change: Option<Change>,
-}
-#[derive(Debug, Deserialize, Serialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct Change {
-    pub id: String,
-    /// `open`, `merged` or `closed` (without merging).
-    pub state: String,
-    pub head: String,
-    pub base: String,
-    pub merge_commit: Option<String>,
-}
-#[derive(Debug, Deserialize, Serialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct Check {
-    pub name: String,
-    pub authority: String,
-    pub revision: String,
-    pub run: String,
-    pub attempt: u32,
-    pub status: String,
-}
-
-impl AdapterResponse {
-    pub fn validate(&self, request: &AdapterRequest) -> Result<()> {
-        ensure!(
-            self.schema_version == request.schema_version
-                && self.coordinate == request.coordinate
-                && !self.repository_id.is_empty(),
-            "adapter identity mismatch"
-        );
-        if !matches!(request.operation.as_str(), "propose" | "merge" | "close") {
-            ensure!(self.change.is_none(), "unexpected pull request");
-        } else if matches!(self.status.as_str(), "success" | "pending") {
-            // Closing an untracked candidate may find no pull request at all;
-            // the common response checks below still apply.
-            if let Some(change) = &self.change {
-                crate::review::contract::sha(&change.head)?;
-                if let Some(commit) = &change.merge_commit {
-                    crate::review::contract::sha(commit)?;
-                }
-                ensure!(
-                    !change.id.is_empty()
-                    && request.change.as_ref().is_none_or(|id| id == &change.id)
-                    // Closing retires a stale change whose head or target moved.
-                    && (request.operation == "close"
-                        || (request.target.as_ref() == Some(&change.base)
-                            && request.revision.as_ref() == Some(&change.head)))
-                    && matches!(change.state.as_str(), "open" | "merged" | "closed")
-                    && (change.state == "merged") == change.merge_commit.is_some()
-                    // Only an unmerged open merge is pending; close never leaves it open.
-                    && match request.operation.as_str() {
-                        "merge" => (self.status == "pending") == (change.state == "open"),
-                        "close" => self.status == "success" && change.state != "open",
-                        _ => self.status == "success",
-                    },
-                    "pull request differs from the qualified candidate or its target"
-                );
-            } else {
-                ensure!(
-                    request.operation == "close"
-                        && request.change.is_none()
-                        && self.status == "success",
-                    "pull-request operation returned no change"
-                );
-            }
-        }
-        crate::review::contract::sha(&self.revision)?;
-        sha256(&self.policy_digest)?;
-        requirements(&self.requirements)?;
-        ensure!(
-            matches!(
-                self.status.as_str(),
-                "success" | "pending" | "failed" | "unsupported"
-            ),
-            "invalid adapter status"
-        );
-        if let Some(rev) = &request.revision {
-            ensure!(&self.revision == rev, "adapter source mismatch");
-        }
-        if request.operation == "admit" && self.status == "success" {
-            let digest = crate::review::canonical_digest(request)?;
-            ensure!(
-                self.checks.len() == 1
-                    && self.checks.iter().all(|c| c.name == "admission"
-                        && c.authority == request.authority
-                        && c.revision == self.revision
-                        && c.attempt == 1
-                        && c.status == "success"
-                        && c.run == digest),
-                "adapter did not attest exact-branch generation-plan admission"
-            );
-        }
-        if request.operation == "qualify" && self.status == "success" {
-            ensure!(
-                !self.checks.is_empty(),
-                "empty qualification is not acceptance"
-            );
-            let mut seen = BTreeSet::new();
-            for check in &self.checks {
-                ensure!(
-                    check.revision == self.revision
-                        && check.attempt == 1
-                        && check.status == "success"
-                        && !check.run.is_empty()
-                        && seen.insert((&check.name, &check.authority)),
-                    "qualification contains non-original, duplicate or non-success cases"
-                );
-            }
-            for required in &request.required_checks {
-                ensure!(
-                    self.checks
-                        .iter()
-                        .any(|c| c.name == required.name && c.authority == required.authority),
-                    "missing required qualification: {}",
-                    required.name
-                );
-            }
-        }
-        Ok(())
     }
 }
