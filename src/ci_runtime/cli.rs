@@ -179,152 +179,6 @@ fn observer_token(primary: Option<String>, fallback: Option<String>) -> Result<S
         .context("missing GitHub token environment variable")
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    #[cfg(any(unix, windows))]
-    #[test]
-    fn source_probe_cancellation_interrupts_a_running_child_and_retains_its_output() {
-        use std::time::{Duration, Instant};
-        let root = tempfile::tempdir().unwrap();
-        let cancellation = super::super::cancellation::Cancellation::default();
-        let token = cancellation.clone();
-        let output = root.path().join("slow-git");
-        let cancel = std::thread::spawn(move || {
-            let deadline = Instant::now() + Duration::from_secs(10);
-            let mut started = false;
-            while Instant::now() < deadline {
-                if std::fs::read(&output)
-                    .is_ok_and(|bytes| bytes == b"probe started\n" || bytes == b"probe started\r\n")
-                {
-                    started = true;
-                    break;
-                }
-                std::thread::sleep(Duration::from_millis(10));
-            }
-            token.cancel();
-            (started, Instant::now())
-        });
-        let start = Instant::now();
-        #[cfg(unix)]
-        let mut command = {
-            let mut command = std::process::Command::new("/bin/sh");
-            command.args(["-c", "printf 'probe started\\n'; while :; do :; done"]);
-            command
-        };
-        #[cfg(windows)]
-        let mut command = {
-            // Native built-ins avoid managed PowerShell startup in the probe's
-            // intentionally cleared environment. /d disables cmd AutoRun hooks.
-            let mut command = std::process::Command::new(r"C:\Windows\System32\cmd.exe");
-            command.args([
-                "/d",
-                "/c",
-                "echo probe started& for /l %i in (0,0,1) do @rem",
-            ]);
-            command
-        };
-        let result = source_probe_bytes(
-            root.path(),
-            "slow-git",
-            &mut command,
-            &SourceControl {
-                deadline: start + Duration::from_secs(15),
-                cancellation: &cancellation,
-            },
-            1024,
-        );
-        let (started, cancelled_at) = cancel.join().unwrap();
-        assert!(
-            started,
-            "probe did not emit its start marker; stderr: {}",
-            String::from_utf8_lossy(&std::fs::read(root.path().join("slow-git.errors")).unwrap())
-        );
-        assert!(result.unwrap_err().to_string().contains("cancelled"));
-        assert!(cancelled_at.elapsed() < Duration::from_secs(3));
-        assert_eq!(
-            String::from_utf8(std::fs::read(root.path().join("slow-git")).unwrap())
-                .unwrap()
-                .replace("\r\n", "\n"),
-            "probe started\n"
-        );
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn source_probe_clears_loader_shell_and_credential_environment_before_launch() {
-        let root = tempfile::tempdir().unwrap();
-        let hook = root.path().join("startup");
-        let marker = root.path().join("injected");
-        std::fs::write(&hook, format!("printf injected > '{}'", marker.display())).unwrap();
-        let cancellation = super::super::cancellation::Cancellation::default();
-        let raw = source_probe_bytes(
-            root.path(),
-            "environment",
-            std::process::Command::new("/bin/sh")
-                .args(["-c", "test -z \"$BASH_ENV$ENV$LD_PRELOAD$LD_LIBRARY_PATH$DYLD_INSERT_LIBRARIES$GH_TOKEN$GITHUB_TOKEN\" && printf clean"])
-                .env("BASH_ENV", &hook)
-                .env("ENV", &hook)
-                .env("LD_PRELOAD", "inert-fixture-library")
-                .env("LD_LIBRARY_PATH", root.path())
-                .env("DYLD_INSERT_LIBRARIES", "inert-fixture-library")
-                .env("GH_TOKEN", "fixture-token")
-                .env("GITHUB_TOKEN", "fixture-token"),
-            &SourceControl {
-                deadline: std::time::Instant::now() + std::time::Duration::from_secs(5),
-                cancellation: &cancellation,
-            },
-            1024,
-        )
-        .unwrap();
-        assert_eq!(raw, b"clean");
-        assert!(!marker.exists());
-    }
-
-    #[test]
-    fn cancellation_before_identity_retains_an_incomplete_preflight_receipt() {
-        for retention in [false, true] {
-            let root = tempfile::tempdir().unwrap();
-            let spec = root.path().join("spec.json");
-            std::fs::write(&spec, b"{}").unwrap();
-            let cancellation = super::super::cancellation::Cancellation::default();
-            cancellation.cancel();
-            let results = root.path().join("packet");
-            let error = observer_inputs(&spec, &results, &cancellation, retention)
-                .err()
-                .unwrap();
-            assert!(error.to_string().contains("cancelled"));
-            let diagnostic = std::fs::read_dir(root.path())
-                .unwrap()
-                .map(|entry| entry.unwrap().path())
-                .find(|path| path.is_dir())
-                .unwrap();
-            let receipt: serde_json::Value =
-                serde_json::from_slice(&std::fs::read(diagnostic.join("receipt.json")).unwrap())
-                    .unwrap();
-            assert_eq!(receipt["capture_complete"], false);
-            assert_eq!(receipt["qualified"], false);
-            assert_eq!(receipt["preflight_complete"], false);
-            assert!(receipt["error"].as_str().unwrap().contains("cancelled"));
-            assert!(!results.exists());
-        }
-    }
-
-    #[test]
-    fn empty_primary_token_uses_nonempty_fallback_without_exposing_credentials() {
-        assert_eq!(
-            observer_token(Some(String::new()), Some("inert-fallback".into())).unwrap(),
-            "inert-fallback"
-        );
-        assert_eq!(
-            observer_token(Some("inert-primary".into()), Some("inert-fallback".into())).unwrap(),
-            "inert-primary"
-        );
-        assert!(observer_token(Some(String::new()), Some(String::new())).is_err());
-        assert!(observer_token(None, None).is_err());
-    }
-}
-
 struct SourceControl<'a> {
     deadline: std::time::Instant,
     cancellation: &'a super::cancellation::Cancellation,
@@ -589,5 +443,151 @@ pub fn run(command: Command) -> Result<()> {
             Ok(())
         }
         Command::Usage(args) => crate::ci_usage::run(args),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[cfg(any(unix, windows))]
+    #[test]
+    fn source_probe_cancellation_interrupts_a_running_child_and_retains_its_output() {
+        use std::time::{Duration, Instant};
+        let root = tempfile::tempdir().unwrap();
+        let cancellation = super::super::cancellation::Cancellation::default();
+        let token = cancellation.clone();
+        let output = root.path().join("slow-git");
+        let cancel = std::thread::spawn(move || {
+            let deadline = Instant::now() + Duration::from_secs(10);
+            let mut started = false;
+            while Instant::now() < deadline {
+                if std::fs::read(&output)
+                    .is_ok_and(|bytes| bytes == b"probe started\n" || bytes == b"probe started\r\n")
+                {
+                    started = true;
+                    break;
+                }
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            token.cancel();
+            (started, Instant::now())
+        });
+        let start = Instant::now();
+        #[cfg(unix)]
+        let mut command = {
+            let mut command = std::process::Command::new("/bin/sh");
+            command.args(["-c", "printf 'probe started\\n'; while :; do :; done"]);
+            command
+        };
+        #[cfg(windows)]
+        let mut command = {
+            // Native built-ins avoid managed PowerShell startup in the probe's
+            // intentionally cleared environment. /d disables cmd AutoRun hooks.
+            let mut command = std::process::Command::new(r"C:\Windows\System32\cmd.exe");
+            command.args([
+                "/d",
+                "/c",
+                "echo probe started& for /l %i in (0,0,1) do @rem",
+            ]);
+            command
+        };
+        let result = source_probe_bytes(
+            root.path(),
+            "slow-git",
+            &mut command,
+            &SourceControl {
+                deadline: start + Duration::from_secs(15),
+                cancellation: &cancellation,
+            },
+            1024,
+        );
+        let (started, cancelled_at) = cancel.join().unwrap();
+        assert!(
+            started,
+            "probe did not emit its start marker; stderr: {}",
+            String::from_utf8_lossy(&std::fs::read(root.path().join("slow-git.errors")).unwrap())
+        );
+        assert!(result.unwrap_err().to_string().contains("cancelled"));
+        assert!(cancelled_at.elapsed() < Duration::from_secs(3));
+        assert_eq!(
+            String::from_utf8(std::fs::read(root.path().join("slow-git")).unwrap())
+                .unwrap()
+                .replace("\r\n", "\n"),
+            "probe started\n"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn source_probe_clears_loader_shell_and_credential_environment_before_launch() {
+        let root = tempfile::tempdir().unwrap();
+        let hook = root.path().join("startup");
+        let marker = root.path().join("injected");
+        std::fs::write(&hook, format!("printf injected > '{}'", marker.display())).unwrap();
+        let cancellation = super::super::cancellation::Cancellation::default();
+        let raw = source_probe_bytes(
+            root.path(),
+            "environment",
+            std::process::Command::new("/bin/sh")
+                .args(["-c", "test -z \"$BASH_ENV$ENV$LD_PRELOAD$LD_LIBRARY_PATH$DYLD_INSERT_LIBRARIES$GH_TOKEN$GITHUB_TOKEN\" && printf clean"])
+                .env("BASH_ENV", &hook)
+                .env("ENV", &hook)
+                .env("LD_PRELOAD", "inert-fixture-library")
+                .env("LD_LIBRARY_PATH", root.path())
+                .env("DYLD_INSERT_LIBRARIES", "inert-fixture-library")
+                .env("GH_TOKEN", "fixture-token")
+                .env("GITHUB_TOKEN", "fixture-token"),
+            &SourceControl {
+                deadline: std::time::Instant::now() + std::time::Duration::from_secs(5),
+                cancellation: &cancellation,
+            },
+            1024,
+        )
+        .unwrap();
+        assert_eq!(raw, b"clean");
+        assert!(!marker.exists());
+    }
+
+    #[test]
+    fn cancellation_before_identity_retains_an_incomplete_preflight_receipt() {
+        for retention in [false, true] {
+            let root = tempfile::tempdir().unwrap();
+            let spec = root.path().join("spec.json");
+            std::fs::write(&spec, b"{}").unwrap();
+            let cancellation = super::super::cancellation::Cancellation::default();
+            cancellation.cancel();
+            let results = root.path().join("packet");
+            let error = observer_inputs(&spec, &results, &cancellation, retention)
+                .err()
+                .unwrap();
+            assert!(error.to_string().contains("cancelled"));
+            let diagnostic = std::fs::read_dir(root.path())
+                .unwrap()
+                .map(|entry| entry.unwrap().path())
+                .find(|path| path.is_dir())
+                .unwrap();
+            let receipt: serde_json::Value =
+                serde_json::from_slice(&std::fs::read(diagnostic.join("receipt.json")).unwrap())
+                    .unwrap();
+            assert_eq!(receipt["capture_complete"], false);
+            assert_eq!(receipt["qualified"], false);
+            assert_eq!(receipt["preflight_complete"], false);
+            assert!(receipt["error"].as_str().unwrap().contains("cancelled"));
+            assert!(!results.exists());
+        }
+    }
+
+    #[test]
+    fn empty_primary_token_uses_nonempty_fallback_without_exposing_credentials() {
+        assert_eq!(
+            observer_token(Some(String::new()), Some("inert-fallback".into())).unwrap(),
+            "inert-fallback"
+        );
+        assert_eq!(
+            observer_token(Some("inert-primary".into()), Some("inert-fallback".into())).unwrap(),
+            "inert-primary"
+        );
+        assert!(observer_token(Some(String::new()), Some(String::new())).is_err());
+        assert!(observer_token(None, None).is_err());
     }
 }
