@@ -1955,6 +1955,84 @@ token_secret = "ATTIC_TOKEN"
 }
 
 #[test]
+#[cfg(unix)]
+fn github_prebuild_attic_publication_retries_transient_failures() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let temp = init_flake_only();
+    fs::write(
+        temp.path().join("simit.toml"),
+        r#"[prebuild]
+publish_attic = true
+attic_app = ".#push-flake-inputs"
+
+[prebuild.system_runners]
+"x86_64-linux" = "ubuntu-24.04"
+
+[ci]
+provider = "actions"
+platform = "github"
+runtime = "nix"
+nix_builds = [".#server"]
+
+[release.attic]
+cache = "demo"
+url = "https://attic.example"
+token_name = "demo"
+token_secret = "ATTIC_TOKEN"
+"#,
+    )
+    .unwrap();
+    let status = simit()
+        .current_dir(temp.path())
+        .args(["init", "ci", "--platform", "github", "--runtime", "nix"])
+        .status()
+        .unwrap();
+    assert!(status.success());
+    let workflow: serde_yaml::Value =
+        serde_yaml::from_str(&read(&temp.path().join(".github/workflows/prebuild.yaml"))).unwrap();
+    let script = workflow["jobs"]["build"]["steps"]
+        .as_sequence()
+        .unwrap()
+        .iter()
+        .find(|step| step["name"].as_str() == Some("Publish flake inputs to Attic"))
+        .unwrap()["run"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+
+    // Stub `nix` fails until its call count reaches `SUCCEED_ON`; `sleep` is stubbed out.
+    let bin = temp.path().join("stub-bin");
+    fs::create_dir_all(&bin).unwrap();
+    for (name, body) in [
+        (
+            "nix",
+            "#!/bin/sh\necho \"$@\" >> \"$CALLS\"\n[ \"$(wc -l < \"$CALLS\")\" -ge \"$SUCCEED_ON\" ]\n",
+        ),
+        ("sleep", "#!/bin/sh\n"),
+    ] {
+        let path = bin.join(name);
+        fs::write(&path, body).unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    for (succeed_on, success, calls) in [(2, true, 2), (9, false, 3)] {
+        let log = temp.path().join(format!("calls-{succeed_on}"));
+        let status = Command::new("bash")
+            .args(["-e", "-c", &script])
+            .env(
+                "PATH",
+                format!("{}:{}", bin.display(), std::env::var("PATH").unwrap()),
+            )
+            .env("CALLS", &log)
+            .env("SUCCEED_ON", succeed_on.to_string())
+            .status()
+            .unwrap();
+        assert_eq!(status.success(), success, "{script}");
+        assert_eq!(read(&log), "run .#push-flake-inputs\n".repeat(calls));
+    }
+}
+
+#[test]
 fn crow_prebuild_publishes_attic_on_default_branch_pushes() {
     let config = r#"[prebuild]
 provider = "crow"
