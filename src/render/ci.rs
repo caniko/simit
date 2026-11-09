@@ -1311,11 +1311,13 @@ pub fn github_prebuild_file_with_policy(
         }
         workflow.push_str("secrets.");
         workflow.push_str(token_secret);
+        // Attic push is idempotent; retry so a brief Attic 5xx does not fail
+        // a default-branch prebuild that already finished building.
         workflow.push_str(
-            " }}\n          HARBOR_ATTIC_MANIFEST: attic-paths.txt\n        run: nix run ",
+            " }}\n          HARBOR_ATTIC_MANIFEST: attic-paths.txt\n        run: |\n          for attempt in 1 2 3; do\n            nix run ",
         );
         workflow.push_str(&shell_quote(attic_app));
-        workflow.push('\n');
+        workflow.push_str(" && exit 0\n            test \"$attempt\" = 3 || sleep $((attempt * 30))\n          done\n          exit 1\n");
         workflow.push_str("      - name: Upload flake input manifest\n        if: ");
         workflow.push_str(publish_if);
         workflow.push_str("\n        uses: ");
