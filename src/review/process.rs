@@ -215,7 +215,11 @@ mod tests {
     #[test]
     fn builds_share_one_window_and_refuse_once_it_is_spent() {
         let error = run_build(&args(&["--version"]), None, Instant::now()).unwrap_err();
-        assert!(error.to_string().contains("shared build window is exhausted"));
+        assert!(
+            error
+                .to_string()
+                .contains("shared build window is exhausted")
+        );
     }
 
     fn limits() -> CommandLimits {
