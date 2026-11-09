@@ -40,6 +40,17 @@ pub(super) fn collect(spec: &RepoSpec, window: &Window) -> Result<(Vec<Sample>, 
     Ok((samples, warnings))
 }
 
+/// The midpoint to split at when a range reports more runs than GitHub lists.
+/// Ranges of an hour or less are not split further.
+fn split_point(
+    total: u64,
+    since: DateTime<Utc>,
+    until: DateTime<Utc>,
+) -> Option<DateTime<Utc>> {
+    (total > GITHUB_RUN_CAP && until - since > chrono::Duration::hours(1))
+        .then(|| since + (until - since) / 2)
+}
+
 /// GitHub silently caps a filtered run listing at 1000 results, newest first,
 /// so a range over the cap is split in half until each part fits.
 fn runs_in_range(
@@ -65,8 +76,7 @@ fn runs_in_range(
         let (reported, page_runs) = parse_runs_page(&api.get(&path)?)?;
         // The page past the cap can report total_count = 0; keep the largest count.
         total = total.max(reported);
-        if page == 1 && total > GITHUB_RUN_CAP && until - since > chrono::Duration::hours(1) {
-            let middle = since + (until - since) / 2;
+        if let Some(middle) = (page == 1).then(|| split_point(total, since, until)).flatten() {
             let mut runs = runs_in_range(api, repo, since, middle, warnings)?;
             runs.extend(runs_in_range(api, repo, middle, until, warnings)?);
             return Ok(runs);
@@ -246,6 +256,16 @@ mod tests {
 
     const RUNS: &str = include_str!("../../tests/fixtures/ci-usage/github-runs.json");
     const JOBS: &str = include_str!("../../tests/fixtures/ci-usage/github-jobs.json");
+
+    #[test]
+    fn ranges_over_the_run_cap_split_at_the_midpoint_down_to_an_hour() {
+        let since = DateTime::from_timestamp(1_794_000_000, 0).unwrap();
+        let until = since + chrono::Duration::days(2);
+        let middle = split_point(1500, since, until).unwrap();
+        assert_eq!(middle, since + chrono::Duration::days(1));
+        assert_eq!(split_point(1000, since, until), None);
+        assert_eq!(split_point(1500, since, since + chrono::Duration::hours(1)), None);
+    }
 
     #[test]
     fn runs_page_parses_and_window_filters_by_created_at() {
