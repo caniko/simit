@@ -38,23 +38,26 @@ Credentials come from the environment and are never printed:
 - **Crow**: one row per executed step, grouped by workflow name; a workflow
   with no timed children falls back to `(workflow)`. Step durations come from
   `finished - started`. OOM-killed containers are detected from the workflow
-  error (and attributed to the failed step, normally exit 137). Scheduling
-  failures with no agent count as `quota_denials` on `(not started)` and do not
-  count as timed runs.
+  error (and attributed to the failed step, normally exit 137). Workflows the CI
+  quota refused count as `quota_denials`; other scheduling failures (for example
+  no agent matching the labels) count as failures. Both appear as `(not started)`
+  rows and do not count as timed runs.
 
 Queued, running, skipped and cancelled records without both timestamps are
 excluded from `runs` and duration statistics. `share` is the fraction of all
 measured wall-clock time in the report. `p95` uses the nearest-rank method.
 
 Rows are sorted by total wall-clock time descending. Per-repository and
-per-workflow rollups cover every collected row; `--top` only truncates the
+per-workflow rollups (keyed by forge, repository and workflow) cover every
+collected row; `--top` only truncates the
 pathway table.
 
 ## Limits and errors
 
-- GitHub caps a filtered workflow-run listing at 1000 results. When the window
-  matches more, the report warns with the retrieved and matched counts; narrow
-  `--since`/`--until` to cover the remainder.
+- GitHub caps a filtered workflow-run listing at 1000 results, so a busier range
+  is split in half until each part fits. Jobs include every attempt of a
+  re-run (`filter=all`). A range of an hour or less that still exceeds the cap is
+  reported as a warning with the retrieved and matched counts.
 - Pagination is bounded: GitHub runs 50 pages, GitHub jobs 10 pages per run,
   Crow pipelines 20 pages. Hitting a bound is an explicit error that names the
   repository.

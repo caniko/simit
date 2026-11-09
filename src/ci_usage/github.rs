@@ -15,6 +15,8 @@ use crate::ci_usage::{
 const PER_PAGE: u32 = 100;
 const MAX_RUN_PAGES: u32 = 50;
 const MAX_JOB_PAGES: u32 = 10;
+/// GitHub returns at most this many runs for one filtered listing.
+const GITHUB_RUN_CAP: u64 = 1000;
 
 pub(super) fn collect(spec: &RepoSpec, window: &Window) -> Result<(Vec<Sample>, Vec<String>)> {
     let token = token()?;
@@ -30,54 +32,68 @@ pub(super) fn collect(spec: &RepoSpec, window: &Window) -> Result<(Vec<Sample>, 
         true,
     )?;
     let repo = format!("{}/{}", spec.owner, spec.name);
+    let mut warnings = Vec::new();
+    let mut samples = Vec::new();
+    for run in runs_in_range(&api, &repo, window.since, window.until, &mut warnings)? {
+        samples.extend(collect_jobs(&api, &repo, &run)?);
+    }
+    Ok((samples, warnings))
+}
+
+/// GitHub silently caps a filtered run listing at 1000 results, newest first,
+/// so a range over the cap is split in half until each part fits.
+fn runs_in_range(
+    api: &JsonApi,
+    repo: &str,
+    since: DateTime<Utc>,
+    until: DateTime<Utc>,
+    warnings: &mut Vec<String>,
+) -> Result<Vec<RunRef>> {
     let range = format!(
         "{}..{}",
-        window.since.to_rfc3339_opts(SecondsFormat::Secs, true),
-        window.until.to_rfc3339_opts(SecondsFormat::Secs, true)
+        since.to_rfc3339_opts(SecondsFormat::Secs, true),
+        until.to_rfc3339_opts(SecondsFormat::Secs, true)
     );
-    let mut samples = Vec::new();
-    let mut warnings = Vec::new();
-    let mut page = 1;
+    let mut runs = Vec::new();
     let mut fetched = 0_u64;
-    let mut total: u64;
-    loop {
-        ensure!(
-            page <= MAX_RUN_PAGES,
-            "GitHub run pagination cap ({MAX_RUN_PAGES} pages) reached for {repo}; narrow --since/--until"
-        );
+    let mut total = 0_u64;
+    for page in 1..=MAX_RUN_PAGES {
         let path = format!(
             "repos/{repo}/actions/runs?per_page={PER_PAGE}&page={page}&created={}",
             encode(&range)
         );
-        let value = api.get(&path)?;
-        let (reported_total, runs) = parse_runs_page(&value)?;
-        total = reported_total;
-        let count = runs.len() as u64;
-        fetched += count;
-        for run in runs {
-            if run.created < window.since || run.created >= window.until {
-                continue;
-            }
-            samples.extend(collect_jobs(&api, &repo, &run)?);
+        let (reported, page_runs) = parse_runs_page(&api.get(&path)?)?;
+        // The page past the cap can report total_count = 0; keep the largest count.
+        total = total.max(reported);
+        if page == 1 && total > GITHUB_RUN_CAP && until - since > chrono::Duration::hours(1) {
+            let middle = since + (until - since) / 2;
+            let mut runs = runs_in_range(api, repo, since, middle, warnings)?;
+            runs.extend(runs_in_range(api, repo, middle, until, warnings)?);
+            return Ok(runs);
         }
+        let count = page_runs.len() as u64;
+        fetched += count;
+        // `created=a..b` is inclusive at both ends; keep [since, until) so split
+        // halves never count a boundary run twice.
+        runs.extend(
+            page_runs
+                .into_iter()
+                .filter(|run| run.created >= since && run.created < until),
+        );
         if count < u64::from(PER_PAGE) {
             break;
         }
-        if page == MAX_RUN_PAGES {
-            bail!(
-                "GitHub run pagination cap ({MAX_RUN_PAGES} pages) reached for {repo}; narrow --since/--until"
-            );
-        }
-        page += 1;
+        ensure!(
+            page < MAX_RUN_PAGES,
+            "GitHub run pagination cap ({MAX_RUN_PAGES} pages) reached for {repo}; narrow --since/--until"
+        );
     }
-    // GitHub silently caps filtered run listings at 1000 results. A short
-    // inventory looks complete, so say so instead of implying full coverage.
-    if total > fetched && fetched >= 1000 {
+    if total > fetched {
         warnings.push(format!(
-            "github:{repo}: GitHub returns at most 1000 filtered workflow runs; retrieved {fetched} of {total} runs; narrow --since/--until to cover the remainder"
+            "github:{repo}: GitHub returned {fetched} of {total} workflow runs created in {range}; the remainder are not counted"
         ));
     }
-    Ok((samples, warnings))
+    Ok(runs)
 }
 
 fn collect_jobs(api: &JsonApi, repo: &str, run: &RunRef) -> Result<Vec<Sample>> {
@@ -90,7 +106,7 @@ fn collect_jobs(api: &JsonApi, repo: &str, run: &RunRef) -> Result<Vec<Sample>> 
             run.id
         );
         let path = format!(
-            "repos/{repo}/actions/runs/{}/jobs?per_page={PER_PAGE}&page={page}",
+            "repos/{repo}/actions/runs/{}/jobs?filter=all&per_page={PER_PAGE}&page={page}",
             run.id
         );
         let value = api.get(&path)?;

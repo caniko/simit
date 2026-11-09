@@ -178,6 +178,22 @@ fn parse_workflow(repo: &str, workflow: &Value) -> Result<Vec<Sample>> {
             });
         }
     }
+    // A workflow refused by the quota has no timed steps but still names itself.
+    if samples.is_empty() && quota_denial(error) {
+        samples.push(Sample {
+            forge: Forge::Crow,
+            repo: repo.to_owned(),
+            workflow: name,
+            unit: "(not started)".to_owned(),
+            unit_kind: UnitKind::Pipeline,
+            seconds: None,
+            failed: false,
+            oom_killed: false,
+            quota_denied: true,
+            runner: None,
+        });
+        return Ok(samples);
+    }
     if samples.is_empty()
         && let (Some(started), Some(finished)) =
             (unix_time(&workflow["started"]), unix_time(&workflow["finished"]))
@@ -212,17 +228,16 @@ fn unix_time(value: &Value) -> Option<DateTime<Utc>> {
     DateTime::from_timestamp(seconds, 0)
 }
 
-/// Crow reports quota denials before a workflow gets an agent.
+/// Crow reports quota denials before a workflow gets an agent. A missing
+/// agent label is a scheduling failure, not a quota denial.
 fn quota_denial(message: &str) -> bool {
-    let message = message.to_ascii_lowercase();
-    message.contains("no agent matching")
-        || message.contains("quota")
-        || (message.contains("cannot be started") && message.contains("agent"))
+    message.to_ascii_lowercase().contains("quota")
 }
 
 fn oom_killed(message: &str) -> bool {
     let message = message.to_ascii_lowercase();
-    message.contains("oom")
+    message.contains("oom-kill")
+        || message.contains("oomkill")
         || message.contains("out of memory")
         || (message.contains("memory") && message.contains("137"))
 }
@@ -277,17 +292,33 @@ mod tests {
     }
 
     #[test]
-    fn quota_denial_names_the_workflow_that_never_started() {
+    fn missing_agent_is_a_scheduling_failure_named_after_its_workflow() {
         let value: Value = serde_json::from_str(QUOTA).unwrap();
         let samples = parse_pipeline("caniko/bekiper", &value).unwrap();
         assert_eq!(samples.len(), 1);
         assert_eq!(samples[0].workflow, "annotation-browser");
         assert_eq!(samples[0].unit, "(not started)");
         assert_eq!(samples[0].unit_kind, UnitKind::Pipeline);
+        assert!(!samples[0].quota_denied);
+        assert!(samples[0].failed);
+        assert_eq!(samples[0].seconds, None);
+        assert!(!quota_denial("No agent matching the required labels was found"));
+        assert!(!oom_killed("no room left on the volume"));
+    }
+
+    #[test]
+    fn workflow_level_quota_denial_is_counted_without_timed_steps() {
+        let workflow = serde_json::json!({
+            "name": "qualify-flake-check",
+            "state": "failure",
+            "error": "CI quota denied (linux): the CI time quota \"CI quota (all)\" is used up",
+            "children": [{ "name": "clone", "state": "skipped", "started": 0, "finished": 0 }]
+        });
+        let samples = parse_workflow("caniko/bekiper", &workflow).unwrap();
+        assert_eq!(samples.len(), 1);
+        assert_eq!(samples[0].workflow, "qualify-flake-check");
         assert!(samples[0].quota_denied);
         assert!(!samples[0].failed);
         assert_eq!(samples[0].seconds, None);
-        assert!(quota_denial("No agent matching the required labels was found"));
-        assert!(!quota_denial("There was an error retrieving the pipeline configuration"));
     }
 }

@@ -297,14 +297,14 @@ impl Builder {
 
         let mut repo_rollup: Vec<RepoRollup> = Vec::new();
         let mut repo_totals: BTreeMap<(Forge, String), RollupTotals> = BTreeMap::new();
-        let mut workflow_totals: BTreeMap<String, RollupTotals> = BTreeMap::new();
+        let mut workflow_totals: BTreeMap<(Forge, String, String), RollupTotals> = BTreeMap::new();
         for pathway in &pathways {
             repo_totals
                 .entry((pathway.forge, pathway.repo.clone()))
                 .or_default()
                 .add(pathway);
             workflow_totals
-                .entry(pathway.workflow.clone())
+                .entry((pathway.forge, pathway.repo.clone(), pathway.workflow.clone()))
                 .or_default()
                 .add(pathway);
         }
@@ -329,7 +329,9 @@ impl Builder {
         });
         let mut workflow_rollup: Vec<WorkflowRollup> = workflow_totals
             .into_iter()
-            .map(|(workflow, totals)| WorkflowRollup {
+            .map(|((forge, repo, workflow), totals)| WorkflowRollup {
+                forge,
+                repo,
                 workflow,
                 runs: totals.runs,
                 total_seconds: round(totals.total_seconds),
@@ -344,6 +346,8 @@ impl Builder {
                 .total_seconds
                 .total_cmp(&left.total_seconds)
                 .then_with(|| right.runs.cmp(&left.runs))
+                .then_with(|| left.forge.cmp(&right.forge))
+                .then_with(|| left.repo.cmp(&right.repo))
                 .then_with(|| left.workflow.cmp(&right.workflow))
         });
 
@@ -471,6 +475,8 @@ pub struct RepoRollup {
 
 #[derive(Debug, Serialize)]
 pub struct WorkflowRollup {
+    pub forge: Forge,
+    pub repo: String,
     pub workflow: String,
     pub runs: u64,
     pub total_seconds: f64,
@@ -557,12 +563,16 @@ fn print_human(report: &Report) {
     if !report.workflow_rollup.is_empty() {
         println!("\nper workflow");
         print_table(
-            &["workflow", "runs", "total_h", "fail", "oom", "quota", "share"],
+            &[
+                "forge", "repo", "workflow", "runs", "total_h", "fail", "oom", "quota", "share",
+            ],
             report
                 .workflow_rollup
                 .iter()
                 .map(|row| {
                     vec![
+                        row.forge.as_str().to_owned(),
+                        row.repo.clone(),
                         row.workflow.clone(),
                         row.runs.to_string(),
                         hours(row.total_seconds),
@@ -573,7 +583,7 @@ fn print_human(report: &Report) {
                     ]
                 })
                 .collect(),
-            1,
+            3,
         );
     }
     if !report.warnings.is_empty() {
