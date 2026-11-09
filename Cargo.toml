@@ -192,3 +192,12 @@ windows-sys = { version = "0.61", features = ["Win32_System_Console"] }
 
 [target.'cfg(all(unix, not(target_os = "macos")))'.dev-dependencies]
 openssl = "0.10"
+
+[package.metadata.binstall.overrides.x86_64-unknown-linux-gnu]
+pkg-url = "{ repo }/releases/download/{ version }/simit-{ version }-x86_64-linux-musl.tar.gz"
+pkg-fmt = "tgz"
+bin-dir = "bin/{ bin }{ binary-ext }"
+[package.metadata.binstall.overrides.x86_64-unknown-linux-musl]
+pkg-url = "{ repo }/releases/download/{ version }/simit-{ version }-x86_64-linux-musl.tar.gz"
+pkg-fmt = "tgz"
+bin-dir = "bin/{ bin }{ binary-ext }"
