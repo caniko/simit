@@ -76,6 +76,7 @@ fn qualification_entrypoints_exist_in_the_candidate_and_packaged_source() {
         "scripts/qualify-native-groups.py",
         "scripts/qualify-updater-sandbox-host.sh",
         "scripts/qualify-updater-generator.py",
+        "scripts/qualify-crow-generator.py",
     ] {
         assert!(
             entrypoints.contains(required),

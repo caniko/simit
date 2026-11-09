@@ -656,7 +656,7 @@ fn crow_path(stem: &str, suffix: Option<&str>, format: CrowWorkflowFormat) -> Pa
     PathBuf::from(".crow").join(format!("{name}.{extension}"))
 }
 
-fn render_workflow(workflow: Workflow, format: CrowWorkflowFormat) -> Result<String> {
+fn render_workflow(workflow: impl Serialize, format: CrowWorkflowFormat) -> Result<String> {
     let yaml = serde_yaml::to_string(&workflow).context("serializing Crow workflow")?;
     match format {
         CrowWorkflowFormat::Yaml => Ok(format!("{}\n{}", ci::GENERATED_WORKFLOW_MARKER, yaml)),
@@ -1013,15 +1013,32 @@ pub fn prebuild_file(
     })
 }
 
+// Parse Nix's own dry-run plan, preserving the selected outputs, not just ^out.
+// Opaque paths and dynamic derivations fail closed in this opt-in mode.
+const QUALIFICATION_TARGETS: &str = r#"plan:
+let
+  selected = builtins.fromJSON plan;
+  target = entry:
+    assert builtins.isAttrs entry && builtins.isString entry.drvPath;
+    assert builtins.match "/nix/store/[0-9a-z]{32}-[A-Za-z0-9+._?=-]+[.]drv" entry.drvPath != null;
+    assert builtins.isAttrs entry.outputs && entry.outputs != {};
+    entry.drvPath + "^" + builtins.concatStringsSep "," (builtins.attrNames entry.outputs);
+in
+assert builtins.isList selected && selected != [];
+builtins.concatStringsSep "\n" (map target selected) + "\n"
+"#;
+
 /// Secret-free workflows that qualify the flake, `[prebuild].qualify` and the
 /// prebuild installables on pull requests and default-branch pushes. Each
 /// command is its own workflow, `.crow/prebuild-qualify-<name>.*`, so every one
-/// gets the repository timeout and they run in parallel.
+/// gets the repository timeout. Optional qualification controls bound and chain
+/// these workflows without granting PRs publication secrets.
 pub fn qualify_files(
     format: CrowWorkflowFormat,
     config: &CrowCiConfig,
     prebuild: &PrebuildConfig,
 ) -> Result<Vec<GeneratedFile>> {
+    prebuild.validate_qualification()?;
     let image = nix_image(config)?;
     let installables = prebuild
         .qualify
@@ -1031,19 +1048,119 @@ pub fn qualify_files(
         .collect::<Vec<_>>();
     let mut jobs = vec![(
         "flake-check".to_owned(),
-        "nix flake check --no-build".to_owned(),
+        "nix flake check --no-build --no-update-lock-file".to_owned(),
+        None,
     )];
     for (installable, job) in installables.iter().zip(qualify_job_names(&installables)) {
         jobs.push((
             job,
             format!(
-                "nix build {} --no-link --print-build-logs",
+                "nix build {} --no-link --print-build-logs --no-update-lock-file",
                 shell_quote(installable)
             ),
+            Some(*installable),
         ));
     }
     let mut files = Vec::new();
-    for (job, command) in jobs {
+    let mut previous = Vec::<String>::new();
+    for (job, mut command, installable) in jobs {
+        let mut lfs_command = "nix build --inputs-from . nixpkgs#git-lfs --no-link --no-update-lock-file --print-out-paths".to_owned();
+        let mut frozen_command = "nix build --stdin --out-link \"$${evidence}/result\" --print-build-logs --no-update-lock-file".to_owned();
+        for bounded in [&mut command, &mut lfs_command, &mut frozen_command] {
+            if let Some(jobs) = prebuild.qualify_max_jobs {
+                bounded.push_str(&format!(" --max-jobs {jobs}"));
+            }
+            if let Some(cores) = prebuild.qualify_cores {
+                bounded.push_str(&format!(" --cores {cores}"));
+            }
+        }
+        if prebuild.qualify_capture_results && installable.is_some() {
+            command.push_str(" --json");
+            frozen_command.push_str(" --json");
+        }
+        let timeout = prebuild
+            .qualify_timeout_minutes
+            .map(|minutes| format!("timeout --signal=TERM --kill-after=30s {minutes}m "))
+            .unwrap_or_default();
+        command = format!("{timeout}{command}");
+        let mut preparation = String::new();
+        if prebuild.qualify_split_evaluation && installable.is_some() {
+            // Nix auto-applies --argstr only while traversing an attribute path.
+            let parser = shell_quote(&format!(
+                "{{ plan }}: {{ targets = ({QUALIFICATION_TARGETS}) plan; }}"
+            ));
+            let plan_command = command.trim_end_matches(" --json");
+            preparation = format!(
+                r#"{plan_command} --dry-run --json > "$${{evidence}}/plan.json"
+{timeout}nix eval --raw --expr {parser} --argstr plan "$(cat "$${{evidence}}/plan.json")" targets > "$${{evidence}}/targets.txt"
+root_parent="$${{NIX_STATE_DIR:-/nix/var/nix}}/gcroots/per-user/$(id -un)"
+mkdir -p "$${{root_parent}}" "$${{evidence}}/roots"
+gcroot="$(mktemp -d "$${{root_parent}}/simit-{job}.XXXXXX")"
+index=0
+while IFS= read -r target; do
+  index=$((index + 1))
+  ln -s "$${{target%%^*}}" "$${{evidence}}/roots/$${{index}}"
+  ln -s "$${{PWD}}/$${{evidence}}/roots/$${{index}}" "$${{gcroot}}/$${{index}}"
+done < "$${{evidence}}/targets.txt"
+"#
+            );
+            command = format!("{timeout}{frozen_command} < \"$${{evidence}}/targets.txt\"");
+        }
+        if prebuild.qualify_capture_results {
+            let installable = shell_quote(&serde_json::to_string(&installable)?);
+            command = format!(
+                r#"set -eu
+mkdir -p .simit-qualification
+evidence="$(mktemp -d '.simit-qualification/{job}.XXXXXX')"
+source_commit="$(git rev-parse HEAD)"
+lock_sha256="$(sha256sum flake.lock)"
+lock_sha256="$${{lock_sha256%% *}}"
+installable={installable}
+memory_snapshot() (
+  printf 'simit.crow-memory.v1 %s\n' "$1"
+  member=""
+  if test -r /proc/self/cgroup; then
+    while IFS=: read -r hierarchy controllers membership; do
+      printf '%s:%s:%s\n' "$${{hierarchy}}" "$${{controllers}}" "$${{membership}}"
+      if test "$${{hierarchy}}" = 0 && test -z "$${{controllers}}"; then member="$${{membership}}"; fi
+    done < /proc/self/cgroup
+  fi
+  memory_dir="/sys/fs/cgroup$${{member%/}}"
+  scope=membership
+  # ponytail: fallback may aggregate workloads; resolve mountinfo if attribution needs it.
+  if test -z "$${{member}}" || ! test -r "$${{memory_dir}}/memory.events"; then
+    memory_dir=/sys/fs/cgroup
+    scope=mount-root-fallback
+  fi
+  printf 'cgroup=%s\nscope=%s\n' "$${{memory_dir}}" "$${{scope}}"
+  for metric in memory.max memory.high memory.current memory.peak memory.swap.max memory.swap.current memory.events memory.events.local; do
+    printf '%s:\n' "$${{metric}}"
+    if test -r "$${{memory_dir}}/$${{metric}}"; then
+      cat "$${{memory_dir}}/$${{metric}}" || printf 'unavailable\n'
+    else
+      printf 'unavailable\n'
+    fi
+  done
+)
+trap 'status=$?; trap - EXIT; memory_snapshot after > "$${{evidence}}/memory-after.txt" || :; printf '\''{{"schema":"simit.crow-qualification.v1","source_commit":"%s","lock_sha256":"%s","installable":%s,"exit_status":%s}}\n'\'' "$${{source_commit}}" "$${{lock_sha256}}" "$${{installable}}" "$${{status}}"; for receipt in "$${{evidence}}/metadata.json" "$${{evidence}}/plan.json" "$${{evidence}}/result.json" "$${{evidence}}/memory-after.txt"; do if test -f "$${{receipt}}"; then cat "$${{receipt}}" || :; fi; done; exit "$${{status}}"' EXIT
+# Print the baseline now: a hard kill skips the EXIT trap.
+memory_snapshot before > "$${{evidence}}/memory-before.txt" || :
+cat "$${{evidence}}/memory-before.txt" || :
+# The clone container's LFS clean filter is not available in this step's image.
+if git grep -q 'filter=lfs' HEAD -- '*.gitattributes'; then
+  git_lfs="$({timeout}{lfs_command})"
+  export PATH="$${{git_lfs}}/bin:$${{PATH}}"
+  git lfs install --local
+fi
+source_status="$(git status --porcelain --untracked-files=no)"
+if test -n "$${{source_status}}"; then
+  printf '%s\n' "$${{source_status}}" >&2
+  exit 1
+fi
+{timeout}nix flake metadata --json --no-update-lock-file > "$${{evidence}}/metadata.json"
+{preparation}{command} > "$${{evidence}}/result.json""#
+            );
+        }
         let mut step = Step::new(job.clone(), &image).command(command);
         add_nix_environment(std::slice::from_mut(&mut step));
         let workflow = Workflow {
@@ -1064,6 +1181,25 @@ pub fn qualify_files(
             variables: config.variables.clone(),
             workspace: None,
             steps: vec![step],
+        };
+        // Flattening adds a workflow dependency, not a step dependency (which
+        // cannot serialize separate Crow workflows).
+        #[derive(Serialize)]
+        struct QualificationWorkflow {
+            #[serde(flatten)]
+            workflow: Workflow,
+            #[serde(skip_serializing_if = "Vec::is_empty")]
+            depends_on: Vec<String>,
+        }
+        let name = workflow.name.clone();
+        let workflow = QualificationWorkflow {
+            workflow,
+            depends_on: previous,
+        };
+        previous = if prebuild.qualify_serial {
+            vec![name]
+        } else {
+            Vec::new()
         };
         files.push(GeneratedFile {
             relative_path: crow_path(&format!("prebuild-qualify-{job}"), None, format),
