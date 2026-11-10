@@ -4946,7 +4946,7 @@ pub(crate) fn github_runner_supports_node24(label: &str) -> bool {
     )
 }
 
-fn github_matrix_action_version<'a>(
+pub(crate) fn github_matrix_action_version<'a>(
     runners: &BTreeMap<String, String>,
     node24: &'a str,
     legacy: &'a str,

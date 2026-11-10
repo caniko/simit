@@ -43,6 +43,8 @@ pub enum Commands {
     Dist(DistCommand),
     #[command(about = "Manage a Keep a Changelog file")]
     Changelog(ChangelogCommand),
+    #[command(about = "Sync cargo-binstall metadata with release bundles")]
+    Binstall(BinstallCommand),
     #[command(about = "Install and verify project Git hooks")]
     Hooks(HooksCommand),
     #[command(about = "Run tests with optional scoped Git fixture isolation")]
@@ -76,6 +78,36 @@ pub struct TestCommand {
         help = "Test executable and arguments, after -- (no shell expansion)"
     )]
     pub command: Vec<OsString>,
+}
+
+#[derive(Debug, Args)]
+pub struct BinstallCommand {
+    #[command(subcommand)]
+    pub action: BinstallAction,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum BinstallAction {
+    #[command(about = "Write [package.metadata.binstall] from the release bundle")]
+    Sync(BinstallSyncCommand),
+}
+
+#[derive(Debug, Args)]
+pub struct BinstallSyncCommand {
+    #[arg(long, help = "Report drifted manifests without writing them")]
+    pub check: bool,
+    #[arg(
+        long,
+        value_name = "NAME",
+        help = "Restrict the sync to these workspace packages"
+    )]
+    pub package: Vec<String>,
+    #[arg(
+        long,
+        value_name = "SYS",
+        help = "Nix system whose binstall-metadata check to read (default: this host)"
+    )]
+    pub system: Option<String>,
 }
 
 #[derive(Debug, Args)]

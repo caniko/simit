@@ -6,6 +6,8 @@
 //! file generation, release preflight checks, and rendering for generated CI,
 //! flake, and Homebrew files.
 
+/// `[package.metadata.binstall]` synchronization with release bundles.
+pub mod binstall;
 /// Shared bounded execution for CI and runtime admission.
 pub mod bounded_process;
 /// Caller-owned cancellation shared by CI and runtime execution.

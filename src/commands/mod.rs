@@ -1,5 +1,6 @@
 pub mod apt;
 pub mod aur;
+pub mod binstall;
 pub mod changelog;
 pub mod chocolatey;
 pub mod commit;
