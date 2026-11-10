@@ -26,7 +26,7 @@ is public.
 - Local release preparation and tagging only. `simit release` runs tests and
   clippy, promotes the changelog, commits, and tags locally; it does not push.
   A pushed tag that ran on a bad commit is repaired explicitly with `release
-  sync-up`.
+sync-up`.
 - Changelogs are strict Keep a Changelog: entries go under `[Unreleased]` with a
   section kind, and a release promotes that section with a date.
 - Generated files are deterministic and re-runnable. `simit upgrade` applies
@@ -57,7 +57,7 @@ is public.
 
 - It does not push release commits. Tag moves and channel pushes require
   explicit opt-in flags (`simit release sync-up --push`, `simit dist … publish
-  --push`); routine publication is the job of the CI the generated workflows
+--push`); routine publication is the job of the CI the generated workflows
   define.
 - It does not invoke the Crow CLI or contact a Crow server. Crow output is
   project-side configuration only.
