@@ -141,6 +141,51 @@ auto_draft = true
 An explicit `nix_bundle_attrs` list still takes precedence when a project
 publishes multiple bundles.
 
+### cargo-binstall
+
+`cargo binstall` reads `[package.metadata.binstall]` from the crate manifest,
+so harbor-rs derives that block from the release bundle and simit keeps the two
+equal. Declare the check next to the bundle:
+
+```nix
+packages.release-bundle = binaryRelease.releaseBundle;
+
+checks.binstall-metadata = harbor.lib.rust.mkBinstallCheck {
+  inherit pkgs;
+  bundle = binaryRelease.releaseBundle;
+  cargoToml = ./Cargo.toml;
+};
+```
+
+`mkBinstallRelease` exposes the release archives per system; the check is
+`binstall-metadata` for a single binary crate and `binstall-metadata-<crate>`
+for a workspace with several.
+
+Build the bundles on native runners and require the metadata in the manifest:
+
+```toml
+[release.artifacts]
+prebuild_binaries = true
+binstall = true
+system_runners = { x86_64-linux = "ubuntu-24.04", aarch64-darwin = "macos-15" }
+```
+
+With `system_runners`, the release workflow builds
+`packages.<system>.<bundle>` in one job per system on the given runner, uploads
+that system's archives and merges them into the single checksummed, signed
+release. Tag validation still runs before any build, and two systems shipping
+the same archive name fails publication. Without `system_runners` the release
+job keeps building the bundle inline as before.
+
+`simit binstall sync` writes the evaluated
+`checks.<system>.binstall-metadata*.toml` into every publishable binary crate's
+`Cargo.toml`, replacing only the `[package.metadata.binstall*]` tables:
+`--check` reports each drifted package with a unified diff and a non-zero exit,
+`--package NAME` limits the selection, and `--system SYS` overrides the host
+system. A crate with binaries but no check is reported as `missing` with the
+hint to expose `mkBinstallRelease` checks. With `binstall = true`,
+`simit release verify` runs the same check fatally.
+
 With `auto_draft`, `simit release` runs `simit changelog draft` before
 promoting `[Unreleased]`. The draft uses the latest reachable semver tag (or
 the root commit for a first release), accepts optional guidance from

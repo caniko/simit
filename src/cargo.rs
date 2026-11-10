@@ -52,6 +52,8 @@ pub struct Target {
     pub doctest: bool,
     #[serde(default)]
     pub kind: Vec<String>,
+    #[serde(default, rename = "required-features")]
+    pub required_features: Vec<String>,
 }
 
 impl Package {
@@ -74,6 +76,16 @@ impl Package {
         self.targets
             .iter()
             .any(|target| target.kind.iter().any(|kind| kind == "bin"))
+    }
+
+    /// Whether `cargo binstall` could fetch this crate from a release archive:
+    /// it is publishable to crates.io and has a binary target that needs no
+    /// feature selection.
+    pub fn publishes_binstall_archive(&self) -> bool {
+        self.is_publishable_to_crates_io()
+            && self.targets.iter().any(|target| {
+                target.kind.iter().any(|kind| kind == "bin") && target.required_features.is_empty()
+            })
     }
 
     pub fn is_publishable_to_crates_io(&self) -> bool {

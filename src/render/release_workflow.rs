@@ -559,7 +559,16 @@ pub fn render(inputs: &ReleaseWorkflowInputs<'_>) -> String {
         }
     });
     let github_prebuild = github_prebuild(inputs);
-    let separate_validation = github_prebuild || !inputs.required_gates.is_empty();
+    let prebuilt_release_archives = inputs
+        .prebuild
+        .is_some_and(|prebuild| prebuild.release_archives)
+        && inputs.platform == Platform::Github;
+    // The reusable prebuild already realizes `release-bundle` per system; the
+    // in-workflow matrix only serves projects without one.
+    let bundle_matrix = !prebuilt_release_archives
+        && !inputs.artifacts.system_runners.is_empty()
+        && !inputs.artifacts.effective_nix_bundle_attrs().is_empty();
+    let separate_validation = github_prebuild || !inputs.required_gates.is_empty() || bundle_matrix;
     if separate_validation {
         // No reusable build or Attic credential is admitted before event-bound
         // signed-tag validation. Every job checks out the same immutable SHA.
@@ -618,10 +627,23 @@ pub fn render(inputs: &ReleaseWorkflowInputs<'_>) -> String {
             writeln!(w, "      {secret}: ${{{{ secrets.{secret} }}}}").expect("write");
         }
     }
+    if bundle_matrix {
+        push_release_bundle_matrix(
+            &mut w,
+            inputs.platform,
+            inputs.artifacts,
+            inputs.preinstalled_nix,
+            not_republish,
+        );
+    }
     w.push_str("  release:\n");
     w.push_str(not_republish);
-    if github_prebuild {
+    if github_prebuild && bundle_matrix {
+        w.push_str("    needs: [validate, prebuild, bundles]\n");
+    } else if github_prebuild {
         w.push_str("    needs: [validate, prebuild]\n");
+    } else if bundle_matrix {
+        w.push_str("    needs: [validate, bundles]\n");
     } else if separate_validation {
         w.push_str("    needs: validate\n");
     }
@@ -677,14 +699,14 @@ pub fn render(inputs: &ReleaseWorkflowInputs<'_>) -> String {
         .prebuild
         .is_some_and(|prebuild| prebuild.release_archives)
         && inputs.platform == Platform::Github;
-    if prebuilt_release_archives {
-        push_download_prebuilt_archives(&mut w, inputs.runner);
+    if prebuilt_release_archives || bundle_matrix {
+        push_download_prebuilt_archives(&mut w, inputs.platform, inputs.runner);
     }
     push_build_artifacts(
         &mut w,
         inputs.platform,
         inputs.artifacts,
-        prebuilt_release_archives,
+        prebuilt_release_archives || bundle_matrix,
     );
     if let Some(apt) = inputs.apt.filter(|_| channel_enabled(inputs, "apt")) {
         push_build_debs(&mut w, apt);
@@ -1667,25 +1689,104 @@ fn push_build_srpm(w: &mut String, copr: &ResolvedCopr) {
     w.push_str("          SCRIPT\n");
 }
 
-fn push_download_prebuilt_archives(w: &mut String, runner: &str) {
+fn push_download_prebuilt_archives(w: &mut String, platform: Platform, runner: &str) {
     w.push_str("      - name: Download native release archives\n        uses: ");
-    let version = if super::ci::github_runner_supports_node24(runner) {
-        "v8.0.2"
+    if platform == Platform::Forgejo {
+        w.push_str(&forgejo_action_ref("download-artifact", "v4.3.0"));
     } else {
-        "v4.3.0"
-    };
-    w.push_str(&github_action_ref("actions/download-artifact", version));
+        let version = if super::ci::github_runner_supports_node24(runner) {
+            "v8.0.2"
+        } else {
+            "v4.3.0"
+        };
+        w.push_str(&github_action_ref("actions/download-artifact", version));
+    }
     w.push_str("\n        with:\n          pattern: release-*\n          path: .simit-prebuilt\n");
-    w.push_str("      - name: Collect native release archives\n        run: |\n          set -euo pipefail\n          mkdir -p release\n          count=0\n          while IFS= read -r file; do\n            name=\"$(basename \"$file\")\"\n            test ! -e \"release/$name\" || { echo \"native release asset collision: $name\" >&2; exit 1; }\n            cp \"$file\" \"release/$name\"\n            count=$((count + 1))\n          done < <(find .simit-prebuilt -mindepth 2 -type f -print | LC_ALL=C sort)\n          test \"$count\" -gt 0\n");
+    w.push_str("      - name: Collect native release archives\n        run: |\n          set -euo pipefail\n          mkdir -p release\n          count=0\n          while IFS= read -r file; do\n            name=\"$(basename \"$file\")\"\n            test ! -e \"release/$name\" || { echo \"release artifact collision: $name\" >&2; exit 1; }\n            cp \"$file\" \"release/$name\"\n            count=$((count + 1))\n          done < <(find .simit-prebuilt -mindepth 2 -type f -print | LC_ALL=C sort)\n          test \"$count\" -gt 0\n");
+}
+
+/// One build job per configured Nix system, so `packages.<system>.<bundle>`
+/// is realized on a native runner and the publish job merges the archives
+/// into the single checksummed, signed release.
+fn push_release_bundle_matrix(
+    w: &mut String,
+    platform: Platform,
+    artifacts: &ArtifactsConfig,
+    preinstalled_nix: bool,
+    not_republish: &str,
+) {
+    let bundle_attrs = artifacts.effective_nix_bundle_attrs();
+    w.push_str("  bundles:\n    needs: validate\n");
+    w.push_str(not_republish);
+    if platform != Platform::Forgejo {
+        w.push_str("    permissions:\n      contents: read\n");
+    }
+    w.push_str("    timeout-minutes: 180\n    strategy:\n      fail-fast: false\n      matrix:\n        include:\n");
+    for (system, runner) in &artifacts.system_runners {
+        writeln!(
+            w,
+            "          - system: {system}\n            runner: {runner}"
+        )
+        .expect("write");
+    }
+    w.push_str("    runs-on: ${{ matrix.runner }}\n");
+    if preinstalled_nix {
+        push_preinstalled_nix_env(w, artifacts);
+    }
+    w.push_str("    steps:\n      - uses: ");
+    if platform == Platform::Forgejo {
+        w.push_str(&forgejo_action_ref("checkout", "v4.3.1"));
+    } else {
+        w.push_str(&github_action_ref(
+            "actions/checkout",
+            super::ci::github_matrix_action_version(&artifacts.system_runners, "v7.0.1", "v4.3.1"),
+        ));
+    }
+    w.push_str("\n        with:\n          fetch-depth: 0\n          ref: ${{ github.sha }}\n          persist-credentials: false\n");
+    if !preinstalled_nix {
+        push_install_nix(w, platform, artifacts);
+    }
+    w.push_str("      - name: Verify native Nix runner\n        env:\n          EXPECTED_NIX_SYSTEM: ${{ matrix.system }}\n        run: test \"$(nix eval --impure --raw --expr builtins.currentSystem)\" = \"$EXPECTED_NIX_SYSTEM\"\n");
+    w.push_str("      - name: Build release bundles\n        env:\n          SYSTEM: ${{ matrix.system }}\n        run: |\n          set -euo pipefail\n          shopt -s nullglob\n          TAG=\"${GITHUB_REF_NAME#v}\"\n          mkdir -p release target\n");
+    for (index, attr) in bundle_attrs.iter().enumerate() {
+        let link = format!("target/simit-release-bundle-{index}");
+        writeln!(
+            w,
+            "          nix build '.#packages.'\"$SYSTEM\".{} --out-link {}",
+            shell_single_quote(attr),
+            shell_single_quote(&link)
+        )
+        .expect("write");
+        w.push_str("          while IFS= read -r file; do\n");
+        w.push_str("            name=\"$(basename \"$file\")\"\n");
+        w.push_str("            test ! -e \"release/$name\" || { echo \"release bundle asset collision: $name\" >&2; exit 1; }\n");
+        w.push_str("            cp -L \"$file\" \"release/$name\"\n");
+        w.push_str("          done < <(find -L ");
+        w.push_str(&shell_single_quote(&link));
+        w.push_str(" -mindepth 1 -maxdepth 1 -type f ! -name '*-release-manifest.json' -print | LC_ALL=C sort)\n");
+        w.push_str("          manifests=(");
+        w.push_str(&shell_single_quote(&link));
+        w.push_str("/*-release-manifest.json)\n          test \"${#manifests[@]}\" -eq 1 || { echo \"expected exactly one release manifest from Nix bundles\" >&2; exit 1; }\n          jq -e --arg version \"$TAG\" '(.schemaVersion == 2) and (.version == $version) and (.artifacts | length > 0)' \"${manifests[0]}\" >/dev/null\n");
+    }
+    w.push_str("      - name: Upload release bundles\n        uses: ");
+    if platform == Platform::Forgejo {
+        w.push_str(&forgejo_action_ref("upload-artifact", "v4.6.2"));
+    } else {
+        w.push_str(&github_action_ref(
+            "actions/upload-artifact",
+            super::ci::github_matrix_action_version(&artifacts.system_runners, "v7.0.2", "v4.6.2"),
+        ));
+    }
+    w.push_str("\n        with:\n          name: release-${{ matrix.system }}\n          path: release\n          if-no-files-found: error\n          retention-days: 1\n");
 }
 
 fn push_build_artifacts(
     w: &mut String,
     platform: Platform,
     artifacts: &ArtifactsConfig,
-    prebuilt_release_archives: bool,
+    external_release_archives: bool,
 ) {
-    let bundle_attrs = if prebuilt_release_archives {
+    let bundle_attrs = if external_release_archives {
         Vec::new()
     } else {
         artifacts.effective_nix_bundle_attrs()
@@ -1735,7 +1836,7 @@ fn push_build_artifacts(
         w.push_str("          jq -e --arg version \"$VERSION\" '(.schemaVersion == 2) and (.version == $version) and (.artifacts | length > 0)' \"${manifests[0]}\" >/dev/null\n");
     }
     if artifacts.build_commands.is_empty() {
-        if bundle_attrs.is_empty() && !prebuilt_release_archives {
+        if bundle_attrs.is_empty() && !external_release_archives {
             w.push_str("          echo \"[release.artifacts] has no Nix bundles or build_commands\" >&2\n          exit 1\n");
         }
     } else {
@@ -3629,6 +3730,8 @@ mod tests {
     fn artifacts() -> ArtifactsConfig {
         ArtifactsConfig {
             prebuild_binaries: false,
+            binstall: false,
+            system_runners: Default::default(),
             runner: Some("atlas".to_owned()),
             substituters: vec!["https://cache.example/c".to_owned()],
             trusted_public_keys: vec!["c:abc=".to_owned()],
@@ -4445,6 +4548,126 @@ esac"#,
         assert!(workflow.contains("nix build '.#release-bundle'"));
         assert!(workflow.contains("expected exactly one release manifest from Nix bundles"));
         assert!(workflow.contains(".schemaVersion == 2"));
+    }
+
+    fn bundle_matrix_workflow(platform: Platform) -> String {
+        let artifacts = ArtifactsConfig {
+            prebuild_binaries: true,
+            system_runners: [
+                ("x86_64-linux".to_owned(), "ubuntu-24.04".to_owned()),
+                ("aarch64-darwin".to_owned(), "macos-15".to_owned()),
+            ]
+            .into_iter()
+            .collect(),
+            build_commands: vec![],
+            ..artifacts()
+        };
+        render(&ReleaseWorkflowInputs {
+            platform,
+            runner: "ubuntu-24.04",
+            preinstalled_nix: false,
+            publish_enforcement: ReleasePublisherEnforcement::Declared,
+            publish: &ReleasePublishConfig::default(),
+            artifacts: &artifacts,
+            prebuild: None,
+            smoke_command: None,
+            release: None,
+            tag_prefix: crate::release_identity::TagPrefix::None,
+            notes_source: None,
+            required_gates: &[],
+            attic: None,
+            aur: None,
+            copr: None,
+            apt: None,
+            homebrew: None,
+            scoop: None,
+            chocolatey: None,
+            windows_signing: None,
+            flatpak: None,
+            winget: None,
+            announce: None,
+            pypi: None,
+        })
+    }
+
+    #[test]
+    fn release_bundle_matrix_builds_per_system_before_the_signed_release() {
+        let workflow = bundle_matrix_workflow(Platform::Github);
+        serde_yaml::from_str::<serde_yaml::Value>(&workflow).unwrap();
+        assert!(
+            workflow.contains(
+                "  bundles:\n    needs: validate\n    permissions:\n      contents: read\n"
+            )
+        );
+        assert!(
+            workflow
+                .contains("          - system: x86_64-linux\n            runner: ubuntu-24.04\n")
+        );
+        assert!(
+            workflow.contains("          - system: aarch64-darwin\n            runner: macos-15\n")
+        );
+        assert!(workflow.contains("nix build '.#packages.'\"$SYSTEM\".'release-bundle'"));
+        assert!(workflow.contains("name: release-${{ matrix.system }}"));
+        assert!(workflow.contains("    needs: [validate, bundles]\n"));
+        // The publish job owns the release set: one download, one checksum pass.
+        assert!(!workflow.contains("nix build '.#release-bundle'"));
+        let download = workflow.find("Download native release archives").unwrap();
+        let checksums = workflow.find("Generate release checksums").unwrap();
+        let sign = workflow
+            .find("Sign checksums and attest release artifacts")
+            .unwrap();
+        assert!(download < checksums && checksums < sign);
+        assert!(workflow.contains("release artifact collision: $name"));
+        // Tag validation runs before any builder, and on the immutable event SHA.
+        assert!(workflow.find("  validate:\n").unwrap() < workflow.find("  bundles:\n").unwrap());
+        assert!(workflow.contains("ref: ${{ github.sha }}"));
+    }
+
+    #[test]
+    fn release_bundle_matrix_uses_forgejo_pinned_actions() {
+        let workflow = bundle_matrix_workflow(Platform::Forgejo);
+        serde_yaml::from_str::<serde_yaml::Value>(&workflow).unwrap();
+        assert!(workflow.contains("https://code.forgejo.org/actions/upload-artifact@"));
+        assert!(workflow.contains("https://code.forgejo.org/actions/download-artifact@"));
+    }
+
+    #[test]
+    fn release_bundle_matrix_is_absent_without_system_runners() {
+        let artifacts = ArtifactsConfig {
+            prebuild_binaries: true,
+            build_commands: vec![],
+            ..artifacts()
+        };
+        let workflow = render(&ReleaseWorkflowInputs {
+            platform: Platform::Github,
+            runner: "ubuntu-24.04",
+            preinstalled_nix: false,
+            publish_enforcement: ReleasePublisherEnforcement::Declared,
+            publish: &ReleasePublishConfig::default(),
+            artifacts: &artifacts,
+            prebuild: None,
+            smoke_command: None,
+            release: None,
+            tag_prefix: crate::release_identity::TagPrefix::None,
+            notes_source: None,
+            required_gates: &[],
+            attic: None,
+            aur: None,
+            copr: None,
+            apt: None,
+            homebrew: None,
+            scoop: None,
+            chocolatey: None,
+            windows_signing: None,
+            flatpak: None,
+            winget: None,
+            announce: None,
+            pypi: None,
+        });
+        assert!(!workflow.contains("  bundles:\n"));
+        assert!(!workflow.contains("Download native release archives"));
+        assert!(workflow.contains("nix build '.#release-bundle'"));
+        assert!(workflow.contains("      - name: Validate tag\n"));
     }
 
     fn sorrel_extract() -> ExtractAssetConfig {

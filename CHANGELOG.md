@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Added: `[release.artifacts].system_runners` builds the configured Nix bundle
+  outputs (`packages.<system>.<bundle>`) in one release-workflow matrix job per
+  system on its native runner, uploads each system's archives and merges them
+  into the single checksummed, signed release; tag validation still runs first
+  and duplicate archive names fail publication. Configs without it render
+  unchanged.
+
+- Added: `simit binstall sync [--check] [--package NAME] [--system SYS]` writes
+  each publishable binary crate's
+  `checks.<system>.binstall-metadata*.toml` block into its
+  `[package.metadata.binstall*]` tables. `--check` reports drift with a unified
+  diff and a non-zero exit; crates without a check are reported as `missing`.
+  `[release.artifacts].binstall = true` makes `simit release verify` run the
+  same check fatally.
+
 - Added: `simit ci usage --repo github:owner/name --repo crow:owner/name`
   reports the workflows and jobs/steps that consumed the most wall-clock time
   in a window (`--since`, `--until`, `--top`), with per-repository and

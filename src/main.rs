@@ -69,6 +69,7 @@ fn run() -> Result<()> {
             DistAction::Apt(command) => commands::apt::run(command),
         },
         Commands::Changelog(command) => commands::changelog::run(command),
+        Commands::Binstall(command) => commands::binstall::run(command),
         Commands::Hooks(command) => match command.action {
             HooksAction::Install(command) => commands::hooks::install(command),
         },

@@ -257,6 +257,9 @@ pub fn run(command: ReleaseCommand) -> Result<()> {
             ));
         }
     }
+    if config.release.artifacts.binstall {
+        results.push(check_binstall(workspace_root, &metadata));
+    }
     // Preserve registry verification for legacy crate projects without a hosted target.
     if (config.ci.publish_crates || (!hosted && command.component.is_none()))
         && packages.iter().any(Package::is_publishable_to_crates_io)
@@ -577,6 +580,61 @@ fn tagged_native_package(
         .context("tagged configuration has no matching release namespace")?;
     let bytes = read(&owner.manifest)?.context("could not read tagged native manifest")?;
     owner.parse(std::str::from_utf8(&bytes)?)
+}
+
+/// `[release.artifacts].binstall = true`: every publishable binary crate must
+/// carry the release bundle's `[package.metadata.binstall]` verbatim.
+fn check_binstall(workspace_root: &Path, metadata: &cargo::Metadata) -> CheckResult {
+    const CHECK: &str = "cargo-binstall metadata";
+    let updated = || {
+        format!(
+            "run `simit binstall sync`; {}",
+            crate::binstall::MISSING_HINT
+        )
+    };
+    let system = match crate::binstall::resolve_system(None) {
+        Ok(system) => system,
+        Err(error) => {
+            return CheckResult::blocked(
+                CHECK,
+                error.to_string(),
+                "run release verification on a supported Linux or macOS host",
+            );
+        }
+    };
+    let updates = match crate::binstall::plan(workspace_root, metadata, &[], &system) {
+        Ok(updates) => updates,
+        Err(error) => return CheckResult::fail(CHECK, error.to_string(), updated()),
+    };
+    if updates.is_empty() {
+        return CheckResult::pass(CHECK, "no publishable binary crate needs binstall metadata");
+    }
+    let drifted = match crate::binstall::check(&updates) {
+        Ok(states) => states
+            .into_iter()
+            .filter(|(_, state)| *state != crate::binstall::State::InSync)
+            .map(|(package, _)| package)
+            .collect::<Vec<_>>(),
+        Err(error) => return CheckResult::fail(CHECK, error.to_string(), updated()),
+    };
+    if drifted.is_empty() {
+        CheckResult::pass(
+            CHECK,
+            format!(
+                "{system} release bundle metadata matches {} manifest(s)",
+                updates.len()
+            ),
+        )
+    } else {
+        CheckResult::fail(
+            CHECK,
+            format!(
+                "{system} binstall metadata drifted in {}",
+                drifted.join(", ")
+            ),
+            updated(),
+        )
+    }
 }
 
 fn check_worktree_clean(workspace_root: &Path) -> CheckResult {

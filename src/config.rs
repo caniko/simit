@@ -1883,6 +1883,16 @@ pub struct ArtifactsConfig {
     /// bundle; the explicit list wins in that case.
     #[serde(default)]
     pub prebuild_binaries: bool,
+    /// Require `[package.metadata.binstall]` to match the release bundle, so
+    /// `cargo binstall <crate>` finds the published archives. Checked by
+    /// `simit release verify` and synced by `simit binstall sync`.
+    #[serde(default)]
+    pub binstall: bool,
+    /// Native Nix system to GitHub-hosted runner label. When set, the release
+    /// workflow builds `packages.<system>.<bundle>` in one matrix job per
+    /// system and merges the archives into the single signed release.
+    #[serde(default)]
+    pub system_runners: BTreeMap<String, String>,
     /// Runner label for the release job; defaults to the CI runner or `atlas`.
     pub runner: Option<String>,
     /// `nix.conf` substituters added in the install-nix step.
@@ -2037,6 +2047,38 @@ impl ArtifactsConfig {
         } else {
             Vec::new()
         }
+    }
+
+    /// Validate the per-system bundle matrix and the binstall opt-in.
+    pub fn validate_release_bundles(&self) -> Result<()> {
+        const P: &str = "simit project config: [release.artifacts].system_runners";
+        const SYSTEMS: [&str; 4] = [
+            "x86_64-linux",
+            "aarch64-linux",
+            "aarch64-darwin",
+            "x86_64-darwin",
+        ];
+        if !self.system_runners.is_empty() {
+            validate_system_runner_map(P, &self.system_runners)?;
+            if let Some(system) = self
+                .system_runners
+                .keys()
+                .find(|system| !SYSTEMS.contains(&system.as_str()))
+            {
+                bail!(
+                    "{P} has unsupported Nix system `{system}`; use one of {}",
+                    SYSTEMS.join(", ")
+                );
+            }
+        }
+        if (self.binstall || !self.system_runners.is_empty())
+            && self.effective_nix_bundle_attrs().is_empty()
+        {
+            bail!(
+                "simit project config: [release.artifacts].binstall and system_runners require prebuild_binaries or nix_bundle_attrs"
+            );
+        }
+        Ok(())
     }
 }
 
@@ -3263,6 +3305,7 @@ impl ProjectConfig {
             )?;
         }
         self.release.artifacts.validate_extract()?;
+        self.release.artifacts.validate_release_bundles()?;
         if let Some(windows) = &self.release.windows_signing {
             windows.validate()?;
         }
@@ -6440,5 +6483,54 @@ mod windows_signing_tests {
             assert!(err.contains(expected), "{toml}: {err}");
         }
         assert!(parse(&format!("{SIGNPATH}typo=1\n")).is_err());
+    }
+}
+
+#[cfg(test)]
+mod release_bundle_tests {
+    use super::*;
+
+    fn parse(toml: &str) -> Result<ArtifactsConfig> {
+        let artifacts: ArtifactsConfig = toml_edit::de::from_str(toml)?;
+        artifacts.validate_release_bundles()?;
+        Ok(artifacts)
+    }
+
+    #[test]
+    fn accepts_a_native_runner_matrix_with_bundle_outputs() {
+        let artifacts = parse(
+            "prebuild_binaries = true\nbinstall = true\n\n[system_runners]\nx86_64-linux = \"ubuntu-24.04\"\naarch64-darwin = \"macos-15\"\n",
+        )
+        .unwrap();
+        assert_eq!(artifacts.system_runners["aarch64-darwin"], "macos-15");
+        assert!(artifacts.binstall);
+        assert!(parse("nix_bundle_attrs = [\"cli-bundle\"]\n\n[system_runners]\nx86_64-linux = \"ubuntu-latest\"\n").is_ok());
+        assert!(parse("").is_ok());
+    }
+
+    #[test]
+    fn rejects_unknown_systems_empty_labels_and_missing_bundles() {
+        for (toml, expected) in [
+            (
+                "prebuild_binaries = true\n\n[system_runners]\nriscv64-linux = \"ubuntu-24.04\"\n",
+                "unsupported Nix system",
+            ),
+            (
+                "prebuild_binaries = true\n\n[system_runners]\nx86_64-linux = \"\"\n",
+                "runner",
+            ),
+            (
+                "[system_runners]\nx86_64-linux = \"ubuntu-24.04\"\n",
+                "require prebuild_binaries or nix_bundle_attrs",
+            ),
+            (
+                "binstall = true\n",
+                "require prebuild_binaries or nix_bundle_attrs",
+            ),
+        ] {
+            let err = parse(toml).unwrap_err().to_string();
+            assert!(err.contains(expected), "{toml}: {err}");
+        }
+        assert!(parse("prebuild_binaries = true\n\n[system_runners]\nx86_64-linux = \"ubuntu-24.04\"\nextra = \"x\"\n").is_err());
     }
 }
