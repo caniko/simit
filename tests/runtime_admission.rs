@@ -67,7 +67,12 @@ fn restoration_within_budget_admits_but_success_is_never_cached() {
 #[test]
 fn exhausted_denial_is_terminal_and_a_new_invocation_has_a_fresh_budget() {
     let root = tempfile::tempdir().unwrap();
-    let validated = spec("exit 7").validate().unwrap();
+    // Exhaustion, not timing, is under test: a 200 ms probe limit turns a
+    // slow `sh` spawn on a loaded builder into ProbeTimedOut.
+    let mut input = spec("exit 7");
+    input.attempt_timeout_ms = 10_000;
+    input.overall_timeout_ms = 60_000;
+    let validated = input.validate().unwrap();
     for name in ["first", "new-request"] {
         let receipt = admit(
             &validated,
