@@ -4758,6 +4758,16 @@ pub(crate) const DOCS_GATE_JOB: &str = "changes";
 /// Display name the gate job reports to the check-run inventory.
 pub(crate) const DOCS_GATE_JOB_NAME: &str = "Classify changed paths";
 
+/// Environment of the classification step; `projects_update` proves it with the script.
+pub(crate) const DOCS_GATE_ENV: [(&str, &str); 3] = [
+    ("PR_BASE", "${{ github.event.pull_request.base.sha }}"),
+    ("EVENT_NAME", "${{ github.event_name }}"),
+    (
+        "DEFAULT_BRANCH",
+        "${{ github.event.repository.default_branch }}",
+    ),
+];
+
 /// Step id that publishes the classification.
 pub(crate) const DOCS_GATE_STEP: &str = "classify";
 
@@ -4811,9 +4821,11 @@ fn push_docs_gate_job(
     workflow.push_str(DOCS_GATE_JOB_NAME);
     workflow.push_str("\n        id: ");
     workflow.push_str(DOCS_GATE_STEP);
-    workflow.push_str(
-        "\n        shell: bash\n        env:\n          BASE_REVISION: ${{ github.event.pull_request.base.sha || github.event.before }}\n          EVENT_NAME: ${{ github.event_name }}\n        run: |\n",
-    );
+    workflow.push_str("\n        shell: bash\n        env:\n");
+    for (name, value) in DOCS_GATE_ENV {
+        workflow.push_str(&format!("          {name}: {value}\n"));
+    }
+    workflow.push_str("        run: |\n");
     workflow.push_str(&docs_gate_script("          "));
 }
 
@@ -4867,20 +4879,30 @@ fn docs_gate_script(indent: &str) -> String {
         "# Root Markdown nobody builds is documentation.".into(),
     ];
     lines.extend(docs_gate_classifier_lines());
-    lines.push("code=true".into());
-    lines.push("if [ \"$EVENT_NAME\" = push ] || [ \"$EVENT_NAME\" = pull_request ]; then".into());
-    lines.push("  # An unreachable or all-zero base has no diff to classify.".into());
-    lines.push(
-        "  if [ -n \"$BASE_REVISION\" ] && [ -n \"${BASE_REVISION//0/}\" ] && git cat-file -e \"$BASE_REVISION^{commit}\" 2>/dev/null; then".into(),
-    );
-    lines.push("    if changed=$(git diff --name-only \"$BASE_REVISION\" HEAD --); then".into());
-    lines.push("      code=false".into());
-    lines.push("      while IFS= read -r path; do".into());
-    lines.push("        [ -z \"$path\" ] || classify \"$path\" || { code=true; break; }".into());
-    lines.push("      done <<< \"$changed\"".into());
-    lines.push("    fi".into());
-    lines.push("  fi".into());
-    lines.push("fi".into());
+    for line in [
+        "code=true",
+        "base=",
+        "# A branch push compares with its fork point, not its previous push, which",
+        "# may never have passed. Default-branch pushes qualify and publish every",
+        "# revision, so they always run.",
+        "if [ \"$EVENT_NAME\" = pull_request ]; then",
+        "  base=$PR_BASE",
+        "elif [ \"$EVENT_NAME\" = push ]; then",
+        "  case \"$GITHUB_REF\" in",
+        "    \"refs/heads/$DEFAULT_BRANCH\") ;;",
+        "    refs/heads/*) base=$(git merge-base \"origin/$DEFAULT_BRANCH\" HEAD 2>/dev/null) || base= ;;",
+        "  esac",
+        "fi",
+        "# A missing or unreachable base, or an empty diff, has nothing to classify.",
+        "if [ -n \"$base\" ] && git cat-file -e \"$base^{commit}\" 2>/dev/null && changed=$(git diff --name-only \"$base\" HEAD --) && [ -n \"$changed\" ]; then",
+        "  code=false",
+        "  while IFS= read -r path; do",
+        "    classify \"$path\" || { code=true; break; }",
+        "  done <<< \"$changed\"",
+        "fi",
+    ] {
+        lines.push(line.into());
+    }
     lines.push("printf 'code=%s\\n' \"$code\" >> \"$GITHUB_OUTPUT\"".into());
     let mut script = String::new();
     for line in lines {
@@ -6377,5 +6399,111 @@ mod docs_gate_tests {
             };
             assert_eq!(line, format!("{expected} {path}"));
         }
+    }
+
+    /// Run the generated gate against a scratch repository for each event shape.
+    #[test]
+    fn gate_compares_branches_with_their_fork_point_and_always_runs_the_default_branch() {
+        let dir = tempfile::tempdir().unwrap();
+        let git = |args: &[&str], input: Option<&str>| -> String {
+            use std::io::Write;
+            let mut child = Command::new("git")
+                .args(args)
+                .current_dir(dir.path())
+                // Disposable fixture: plumbing only, so no hooks or identity policy apply.
+                .env("GIT_CONFIG_GLOBAL", "/dev/null")
+                .env("GIT_CONFIG_NOSYSTEM", "1")
+                .env("GIT_AUTHOR_NAME", "fixture")
+                .env("GIT_AUTHOR_EMAIL", "fixture@example.invalid")
+                .env("GIT_COMMITTER_NAME", "fixture")
+                .env("GIT_COMMITTER_EMAIL", "fixture@example.invalid")
+                .stdin(std::process::Stdio::piped())
+                .stdout(std::process::Stdio::piped())
+                .spawn()
+                .unwrap();
+            child
+                .stdin
+                .take()
+                .unwrap()
+                .write_all(input.unwrap_or("").as_bytes())
+                .unwrap();
+            let output = child.wait_with_output().unwrap();
+            assert!(output.status.success(), "git {args:?}");
+            String::from_utf8(output.stdout).unwrap().trim().to_owned()
+        };
+        git(&["init", "-q", "--template="], None);
+        let commit = |parent: Option<&str>, path: &str| {
+            let blob = git(&["hash-object", "-w", "--stdin"], Some(path));
+            git(
+                &[
+                    "update-index",
+                    "--add",
+                    "--cacheinfo",
+                    &format!("100644,{blob},{path}"),
+                ],
+                None,
+            );
+            let tree = git(&["write-tree"], None);
+            let mut args = vec!["commit-tree", tree.as_str(), "-m", path];
+            if let Some(parent) = parent {
+                args.extend(["-p", parent]);
+            }
+            git(&args, None)
+        };
+        let trunk = commit(None, "src/lib.rs");
+        let code = commit(Some(&trunk), "src/main.rs");
+        let docs_after_code = commit(Some(&code), "VISION.md");
+        git(&["read-tree", &trunk], None);
+        let docs = commit(Some(&trunk), "VISION.md");
+        git(&["update-ref", "refs/remotes/origin/trunk", &trunk], None);
+
+        let run = |head: &str, event: &str, git_ref: &str, pr_base: &str| -> String {
+            git(&["checkout", "-q", "--detach", head], None);
+            let out = dir.path().join("out");
+            let status = Command::new("bash")
+                .arg("-c")
+                .arg(super::docs_gate_source())
+                .current_dir(dir.path())
+                .env("GIT_CONFIG_GLOBAL", "/dev/null")
+                .env("PR_BASE", pr_base)
+                .env("EVENT_NAME", event)
+                .env("DEFAULT_BRANCH", "trunk")
+                .env("GITHUB_REF", git_ref)
+                .env("GITHUB_OUTPUT", &out)
+                .status()
+                .unwrap();
+            assert!(status.success());
+            let code = std::fs::read_to_string(&out).unwrap();
+            std::fs::remove_file(&out).unwrap();
+            code.trim().to_owned()
+        };
+        let branch = "refs/heads/feature";
+        assert_eq!(
+            run(&docs, "pull_request", "refs/pull/1/merge", &trunk),
+            "code=false"
+        );
+        assert_eq!(
+            run(&code, "pull_request", "refs/pull/1/merge", &trunk),
+            "code=true"
+        );
+        assert_eq!(run(&docs, "push", branch, ""), "code=false");
+        // The previous push may have failed; a docs-only follow-up must not hide it.
+        assert_eq!(run(&docs_after_code, "push", branch, ""), "code=true");
+        assert_eq!(run(&docs, "push", "refs/heads/trunk", ""), "code=true");
+        assert_eq!(run(&docs, "push", "refs/tags/v1", ""), "code=true");
+        assert_eq!(run(&docs, "workflow_dispatch", branch, ""), "code=true");
+        assert_eq!(
+            run(&trunk, "pull_request", "refs/pull/1/merge", &trunk),
+            "code=true"
+        );
+        assert_eq!(
+            run(
+                &docs,
+                "pull_request",
+                "refs/pull/1/merge",
+                "0000000000000000000000000000000000000000"
+            ),
+            "code=true"
+        );
     }
 }
