@@ -3271,16 +3271,18 @@ fn push_required_gate_jobs(
         // Gate env is scoped to this job only. Values may reference
         // `${{ secrets.X }}` for project-owned test credentials; release
         // secrets (CRATES_IO_API_TOKEN, minisign, etc.) must never appear here.
-        if !gate.env.is_empty() {
-            workflow.push_str("    env:\n");
-            for (key, value) in &gate.env {
-                workflow.push_str("      ");
-                workflow.push_str(key);
-                workflow.push_str(": \"");
-                workflow.push_str(&yaml_double_quote(value));
-                workflow.push_str("\"\n");
-            }
-        }
+        // The project env comes first, as in the release gates, so a gate
+        // passes CI under the same RUSTDOCFLAGS etc. that release enforces.
+        let mut gate_env: std::collections::BTreeMap<String, String> =
+            options.extra_env.iter().cloned().collect();
+        gate_env.extend(gate.env.clone());
+        push_job_env(
+            workflow,
+            platform,
+            runtime,
+            &gate_env.into_iter().collect::<Vec<_>>(),
+            true,
+        );
         workflow.push_str("    steps:\n");
         if options.independent_lanes {
             push_source_head_checkout(workflow, &runners.ci);

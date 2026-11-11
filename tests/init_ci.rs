@@ -521,8 +521,9 @@ fn github_required_gates_have_job_scoped_permissions() {
 platform = "github"
 provider = "actions"
 runtime = "nix"
+extra_env = { RUSTDOCFLAGS = "-D warnings", SHARED = "project" }
 required_gates = [
-    { id = "integration", run = "nix run .#integration" },
+    { id = "integration", run = "nix run .#integration", env = { SHARED = "gate" } },
     { id = "module-smoke", run = "nix build .#module-smoke" },
 ]
 "#,
@@ -536,10 +537,18 @@ required_gates = [
     assert!(status.success());
     let workflow = fs::read_to_string(temp.path().join(".github/workflows/ci.yaml")).unwrap();
     let yaml: serde_yaml::Value = serde_yaml::from_str(&workflow).unwrap();
-    for id in ["gate-integration", "gate-module-smoke"] {
+    for (id, shared) in [
+        ("gate-integration", "gate"),
+        ("gate-module-smoke", "project"),
+    ] {
         let job = &yaml["jobs"][id];
         assert_eq!(job["permissions"]["contents"].as_str(), Some("read"));
         assert!(job["steps"].as_sequence().is_some());
+        // Gates run under the project env the release gates use; a gate's own
+        // env wins on conflicts.
+        assert_eq!(job["env"]["RUSTDOCFLAGS"].as_str(), Some("-D warnings"));
+        assert_eq!(job["env"]["CARGO_HOME"].as_str(), Some("/tmp/.cargo"));
+        assert_eq!(job["env"]["SHARED"].as_str(), Some(shared));
     }
 }
 
