@@ -739,12 +739,16 @@ fn publish_workspace_workflow(
         w.push('\n');
         w.push_str(&format!("    timeout-minutes: {}\n", gate.timeout_minutes));
         push_release_permissions(&mut w, platform);
-        let gate_env: Vec<_> = gate
-            .env
-            .iter()
-            .map(|(key, value)| (key.clone(), value.clone()))
-            .collect();
-        push_job_env(&mut w, platform, runtime, &gate_env, true);
+        let mut gate_env: std::collections::BTreeMap<String, String> =
+            options.extra_env.iter().cloned().collect();
+        gate_env.extend(gate.env.clone());
+        push_job_env(
+            &mut w,
+            platform,
+            runtime,
+            &gate_env.into_iter().collect::<Vec<_>>(),
+            true,
+        );
         w.push_str("    steps:\n");
         push_event_checkout_step(&mut w, platform, Some(runner));
         if runtime == Runtime::Nix {
