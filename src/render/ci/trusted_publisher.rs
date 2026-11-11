@@ -258,10 +258,8 @@ pub(super) fn source_workflow_with_namespace(
     }
     w.push_str("permissions:\n  contents: read\n\nconcurrency:\n  group: ${{ github.workflow_ref }}-${{ github.ref }}\n  cancel-in-progress: false\n\njobs:\n  build:\n    runs-on: ");
     w.push_str(CANDIDATE_RUNNER);
-    w.push_str(&format!(
-        "\n    timeout-minutes: {}\n",
-        crate::config::required_gate_job_timeout(&options.required_gates, CANDIDATE_JOB_MINUTES)
-    ));
+    // The source build runs no gates; the first trusted verify job owns them.
+    w.push_str(&format!("\n    timeout-minutes: {CANDIDATE_JOB_MINUTES}\n"));
     push_job_env(&mut w, Platform::Github, runtime, &options.extra_env, true);
     w.push_str("    steps:\n");
     push_event_checkout_step(&mut w, Platform::Github, None);
@@ -438,13 +436,12 @@ pub(super) fn publisher_file_with_namespace(
         w.push_str("    if: github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.event == 'push'\n");
         w.push_str("    runs-on: ");
         w.push_str(CANDIDATE_RUNNER);
-        w.push_str(&format!(
-            "\n    timeout-minutes: {}\n    steps:\n",
-            crate::config::required_gate_job_timeout(
-                &options.required_gates,
-                CANDIDATE_JOB_MINUTES
-            )
-        ));
+        let timeout = if index == 0 {
+            crate::config::required_gate_job_timeout(&options.required_gates, CANDIDATE_JOB_MINUTES)
+        } else {
+            CANDIDATE_JOB_MINUTES
+        };
+        w.push_str(&format!("\n    timeout-minutes: {timeout}\n    steps:\n"));
         bootstrap(&mut w);
         if runtime == Runtime::Nix {
             push_install_nix_step_with_cache(

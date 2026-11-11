@@ -161,6 +161,98 @@ fn assert_trusted_credential_boundary(mode: &str) {
     // operator-owned acceptance gates, not properties this YAML test can prove.
 }
 
+/// Gates run in one verify job per publisher; every other verify job must
+/// still be unable to start unless that job succeeded in the same run.
+#[test]
+fn every_verify_job_depends_on_the_single_gated_verify_job() {
+    for mode in ["single", "members", "coordinated"] {
+        let temp = publisher_project(mode);
+        let config = fs::read_to_string(temp.path().join("simit.toml")).unwrap();
+        fs::write(
+            temp.path().join("simit.toml"),
+            format!("{config}\n[[ci.required_gates]]\nid='first'\nrun='cargo test'\n"),
+        )
+        .unwrap();
+        let output = common::simit()
+            .current_dir(temp.path())
+            .args(["init", "ci"])
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "{mode}: {output:?}");
+        let mut publishers = 0;
+        for entry in fs::read_dir(temp.path().join(".github/workflows")).unwrap() {
+            let path = entry.unwrap().path();
+            if !path
+                .file_name()
+                .unwrap()
+                .to_string_lossy()
+                .starts_with("trusted-publish-")
+            {
+                continue;
+            }
+            publishers += 1;
+            let workflow: Value =
+                serde_yaml::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+            let jobs = workflow["jobs"].as_mapping().unwrap();
+            let id = |key: &Value| key.as_str().unwrap().to_owned();
+            let gated: Vec<String> = jobs
+                .iter()
+                .filter(|(_, job)| {
+                    job["steps"].as_sequence().unwrap().iter().any(|step| {
+                        step["name"]
+                            .as_str()
+                            .is_some_and(|name| name.starts_with("Required gate "))
+                    })
+                })
+                .map(|(key, _)| id(key))
+                .collect();
+            assert_eq!(gated.len(), 1, "{mode} {path:?}: {gated:?}");
+            assert!(gated[0].starts_with("verify-"), "{mode}: {gated:?}");
+            let needs = |job: &str| -> Vec<String> {
+                match &workflow["jobs"][job]["needs"] {
+                    Value::String(need) => vec![need.clone()],
+                    Value::Sequence(needs) => needs
+                        .iter()
+                        .map(|need| need.as_str().unwrap().to_owned())
+                        .collect(),
+                    _ => Vec::new(),
+                }
+            };
+            for (key, job) in jobs {
+                let job_id = id(key);
+                if job_id == "publish-report" {
+                    continue;
+                }
+                // A status function would let a job run after a failed gate.
+                if let Some(condition) = job["if"].as_str() {
+                    for function in ["always()", "failure()", "cancelled()"] {
+                        assert!(
+                            !condition.contains(function),
+                            "{mode} {job_id}: {condition}"
+                        );
+                    }
+                }
+                if !job_id.starts_with("verify-") || job_id == gated[0] {
+                    continue;
+                }
+                let mut pending = needs(&job_id);
+                let mut seen = std::collections::BTreeSet::new();
+                while let Some(next) = pending.pop() {
+                    if seen.insert(next.clone()) {
+                        pending.extend(needs(&next));
+                    }
+                }
+                assert!(
+                    seen.contains(&gated[0]),
+                    "{mode} {path:?}: {job_id} does not depend on {}",
+                    gated[0]
+                );
+            }
+        }
+        assert!(publishers >= 1, "{mode}");
+    }
+}
+
 #[test]
 fn single_crate_credentials_are_outside_the_tag_controlled_workflow() {
     assert_trusted_credential_boundary("single");

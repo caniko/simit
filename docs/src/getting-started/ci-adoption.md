@@ -1475,9 +1475,8 @@ timeout must be at most 345 minutes. Other gates retain their existing limit.
 A GitHub crates.io publication runs every gate once, serially, in the first
 trusted verification job of its plan; the credential-free source build and the
 later verification jobs, which depend on that first job, do not repeat them.
-The budget still covers every verification job and the source build: they add
-all gate command deadlines and five minutes per
-diagnostic upload to their own sixty-minute limit, which stays reserved for
+That job adds all gate command deadlines and five minutes per
+diagnostic upload to its own sixty-minute limit, which stays reserved for
 setup, the workspace lane and packaging. Hosted-release validation jobs add the
 same gate budget to ten setup minutes. Configurations exceeding the shared
 360-minute publishing job limit are rejected; independent CI gates do not share

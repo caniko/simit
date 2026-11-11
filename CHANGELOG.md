@@ -11,7 +11,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   per plan, in the first trusted `verify-<crate>` job, instead of repeating the
   same candidate checks in every verify job and again in the credential-free
   source build. The first verify job still uploads the gate diagnostics and
-  every later verify job depends on it transitively.
+  every later verify job depends on it transitively. Gate artifacts named
+  `<artifact>.source` and `<artifact>.<later-package>` are no longer produced,
+  and the source build and later verify jobs keep only the base 60-minute
+  timeout. Regenerate the publish workflows on the default branch before the
+  next tag: the publisher refuses a source workflow that differs from the
+  enrolled one.
 
 - Added: `[release.artifacts].system_runners` builds the configured Nix bundle
   outputs (`packages.<system>.<bundle>`) in one release-workflow matrix job per
