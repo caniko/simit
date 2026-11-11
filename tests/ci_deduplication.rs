@@ -824,7 +824,11 @@ fn github_ci_gates_every_job_on_a_cheap_root_docs_classification() {
     let script = gate["steps"][1]["run"].as_str().unwrap();
     assert!(script.contains("    README.md) return 1 ;;"));
     assert!(script.contains("    *.md) return 0 ;;"));
-    assert!(script.contains("git cat-file -e \"$BASE_REVISION^{commit}\""));
+    assert!(script.contains("git merge-base \"origin/$DEFAULT_BRANCH\" HEAD"));
+    assert_eq!(
+        gate["steps"][1]["env"]["PR_BASE"],
+        "${{ github.event.pull_request.base.sha }}"
+    );
     for (id, job) in jobs {
         if id.as_str() == Some("changes") {
             continue;

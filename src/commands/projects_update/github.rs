@@ -279,6 +279,19 @@ fn is_generated_docs_gate(workflow: &serde_yaml::Value) -> bool {
                 steps.iter().any(|step| {
                     step.get("id").and_then(serde_yaml::Value::as_str)
                         == Some(crate::render::ci::DOCS_GATE_STEP)
+                        && step
+                            .get("env")
+                            .and_then(serde_yaml::Value::as_mapping)
+                            .is_some_and(|env| {
+                                env.len() == crate::render::ci::DOCS_GATE_ENV.len()
+                                    && crate::render::ci::DOCS_GATE_ENV.iter().all(
+                                        |(name, value)| {
+                                            env.get(serde_yaml::Value::String((*name).into()))
+                                                .and_then(serde_yaml::Value::as_str)
+                                                == Some(*value)
+                                        },
+                                    )
+                            })
                         && step.get("run").and_then(serde_yaml::Value::as_str)
                             == Some(source.as_str())
                 })

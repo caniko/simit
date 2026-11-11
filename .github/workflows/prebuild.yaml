@@ -156,8 +156,9 @@ jobs:
         id: classify
         shell: bash
         env:
-          BASE_REVISION: ${{ github.event.pull_request.base.sha || github.event.before }}
+          PR_BASE: ${{ github.event.pull_request.base.sha }}
           EVENT_NAME: ${{ github.event_name }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
         run: |
           set -euo pipefail
           # Root Markdown nobody builds is documentation.
@@ -170,15 +171,23 @@ jobs:
             esac
           }
           code=true
-          if [ "$EVENT_NAME" = push ] || [ "$EVENT_NAME" = pull_request ]; then
-            # An unreachable or all-zero base has no diff to classify.
-            if [ -n "$BASE_REVISION" ] && [ -n "${BASE_REVISION//0/}" ] && git cat-file -e "$BASE_REVISION^{commit}" 2>/dev/null; then
-              if changed=$(git diff --name-only "$BASE_REVISION" HEAD --); then
-                code=false
-                while IFS= read -r path; do
-                  [ -z "$path" ] || classify "$path" || { code=true; break; }
-                done <<< "$changed"
-              fi
-            fi
+          base=
+          # A branch push compares with its fork point, not its previous push, which
+          # may never have passed. Default-branch pushes qualify and publish every
+          # revision, so they always run.
+          if [ "$EVENT_NAME" = pull_request ]; then
+            base=$PR_BASE
+          elif [ "$EVENT_NAME" = push ]; then
+            case "$GITHUB_REF" in
+              "refs/heads/$DEFAULT_BRANCH") ;;
+              refs/heads/*) base=$(git merge-base "origin/$DEFAULT_BRANCH" HEAD 2>/dev/null) || base= ;;
+            esac
+          fi
+          # A missing or unreachable base, or an empty diff, has nothing to classify.
+          if [ -n "$base" ] && git cat-file -e "$base^{commit}" 2>/dev/null && changed=$(git diff --name-only "$base" HEAD --) && [ -n "$changed" ]; then
+            code=false
+            while IFS= read -r path; do
+              classify "$path" || { code=true; break; }
+            done <<< "$changed"
           fi
           printf 'code=%s\n' "$code" >> "$GITHUB_OUTPUT"
