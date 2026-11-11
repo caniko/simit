@@ -470,6 +470,20 @@ fn coordinated_gate_artifacts_are_unique_across_hyphenated_packages() {
         gated[0]
     );
     assert_eq!(uploads, artifacts.len());
+    // These crates are independent, so only the plan's sequencing edge makes
+    // the ungated verify job wait for the gated one.
+    let other = packages.iter().find(|name| **name != package).unwrap();
+    let needs = workflow["jobs"][format!("verify-{other}")]["needs"].clone();
+    let needs: Vec<&str> = match &needs {
+        serde_yaml::Value::String(need) => vec![need.as_str()],
+        serde_yaml::Value::Sequence(needs) => needs.iter().map(|n| n.as_str().unwrap()).collect(),
+        _ => Vec::new(),
+    };
+    assert_eq!(needs, [format!("publish-{package}")], "verify-{other}");
+    assert_eq!(
+        workflow["jobs"][format!("publish-{package}")]["needs"],
+        serde_yaml::Value::from(vec![format!("verify-{package}")])
+    );
     for artifact in artifacts {
         assert!(
             names.contains(format!("{artifact}.{package}").as_str()),
