@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Fixed: required-gate jobs in CI and in non-GitHub crate publish workflows
+  now run under the project env (`[ci].extra_env`, and for Nix the usual
+  `NIX_CONFIG`/`XDG_CACHE_HOME`/`CARGO_HOME`), with a gate's own `env` taking
+  precedence, like the trusted release gates. Regenerated `ci.yaml` files gain
+  that `env:` block.
+
+- Fixed: the README crates.io badge appears only with `[ci].publish_crates`;
+  an unset `publish` key alone no longer advertises a crate. Projects that
+  publish but configure CI only through generated workflows should run
+  `simit init ci` once to persist `publish_crates`.
+
 - Added: `[release.artifacts].system_runners` builds the configured Nix bundle
   outputs (`packages.<system>.<bundle>`) in one release-workflow matrix job per
   system on its native runner, uploads each system's archives and merges them
