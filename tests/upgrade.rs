@@ -142,7 +142,8 @@ fn upgrade_current_workspace_writes_managed_badge_block() {
 
     let readme = read(&project.path().join("README.md"));
     assert!(readme.contains("<!-- simit:badges:start -->"));
-    assert!(readme.contains("https://img.shields.io/badge/crates.io-publishable-f46623"));
+    // No `[ci].publish_crates`: nothing is published, so no crates.io badge.
+    assert!(!readme.contains("crates.io"), "{readme}");
     assert!(readme.contains("# upgrade-current\n\n<!-- simit:badges:start -->"));
 }
 
@@ -174,7 +175,7 @@ fn badge_plan_patches_only_an_existing_marker_block() {
     assert_eq!(patched["schema"], "simit.ci-update-plan.v2");
     assert_eq!(patched["patches"][0]["relative_path"], "README.md");
     let content = patched["patches"][0]["content"].as_str().unwrap();
-    assert!(content.contains("crates.io-publishable") && !content.contains("stale"));
+    assert!(content.contains("<!-- simit:badges:start -->") && !content.contains("stale"));
     assert_eq!(read(&readme), stale);
     // A workspace subdirectory plans the same workspace README.
     assert_eq!(plan_in(&project.path().join("src")), patched);
@@ -459,6 +460,7 @@ fn crate_badge_follows_primary_package_in_a_virtual_workspace() {
         fs::write(crate_dir.join("src/lib.rs"), "").unwrap();
     }
     fs::write(root.join("README.md"), "# primary\n\nbody\n").unwrap();
+    fs::write(root.join("simit.toml"), "[ci]\npublish_crates = true\n").unwrap();
     let upgrade = || {
         simit()
             .current_dir(root)
@@ -484,7 +486,7 @@ fn crate_badge_follows_primary_package_in_a_virtual_workspace() {
 
     fs::write(
         root.join("simit.toml"),
-        "primary_package = \"beta-annotate\"\n",
+        "primary_package = \"beta-annotate\"\n\n[ci]\npublish_crates = true\n",
     )
     .unwrap();
     assert_ok(&upgrade());
