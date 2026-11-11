@@ -926,7 +926,7 @@ fn required_gate_artifacts_use_the_effective_cli_backend() {
 
 #[test]
 fn required_gate_artifact_upload_matches_the_ci_runner() {
-    for (runner, version) in [("ubuntu-24.04", "v7.0.1"), ("private-linux", "v4.6.2")] {
+    for (runner, version) in [("ubuntu-24.04", "v7.0.2"), ("private-linux", "v4.6.2")] {
         let temp = init_package(true);
         fs::write(temp.path().join("simit.toml"), format!("[ci]\nplatform='github'\nruntime='cargo'\nrunner='{runner}'\n[[ci.required_gates]]\nid='browser'\nrun='false'\n[ci.required_gates.artifacts]\nname='evidence'\npaths=['target/evidence']\n")).unwrap();
         let output = simit()

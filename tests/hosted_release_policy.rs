@@ -58,7 +58,7 @@ fn github_release_gates_retain_evidence_without_ignoring_failure() {
 
 #[test]
 fn required_gate_artifacts_follow_the_effective_release_backend_and_runner() {
-    for (runner, version) in [("ubuntu-24.04", "v7.0.1"), ("private-linux", "v4.6.2")] {
+    for (runner, version) in [("ubuntu-24.04", "v7.0.2"), ("private-linux", "v4.6.2")] {
         let dir = project(&format!(
             "[ci]\nplatform='forgejo'\nprovider='crow'\n[[ci.required_gates]]\nid='first'\nrun='false'\n[ci.required_gates.artifacts]\nname='first'\npaths=['target/evidence/']\n[[ci.required_gates]]\nid='second'\nrun='false'\n[ci.required_gates.artifacts]\nname='second'\npaths=['target/evidence/']\n[release.github]\nrepo='example/player'\n[release.artifacts]\nrunner='{runner}'\nprebuild_binaries=true\nsign=false\n"
         ));

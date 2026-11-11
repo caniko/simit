@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Fixed: required-gate evidence uploads on GitHub-hosted runners use
+  `actions/upload-artifact` v7.0.2, like every other generated upload step,
+  instead of v7.0.1. Regenerated `ci.yaml` files with gate artifacts change
+  that one pin.
+
 - Fixed: required-gate jobs in CI and in non-GitHub crate publish workflows
   now run under the project env (`[ci].extra_env`, and for Nix the usual
   `NIX_CONFIG`/`XDG_CACHE_HOME`/`CARGO_HOME`), with a gate's own `env` taking

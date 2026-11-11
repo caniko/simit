@@ -3610,7 +3610,7 @@ pub(crate) fn push_required_gate_artifacts(
         Platform::Github,
         runner,
         "upload-artifact",
-        "v7.0.1",
+        "v7.0.2",
         "v4.6.2",
     );
     workflow.push_str(&format!(
