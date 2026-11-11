@@ -161,6 +161,98 @@ fn assert_trusted_credential_boundary(mode: &str) {
     // operator-owned acceptance gates, not properties this YAML test can prove.
 }
 
+/// Gates run in one verify job per publisher; every other verify job must
+/// still be unable to start unless that job succeeded in the same run.
+#[test]
+fn every_verify_job_depends_on_the_single_gated_verify_job() {
+    for mode in ["single", "members", "coordinated"] {
+        let temp = publisher_project(mode);
+        let config = fs::read_to_string(temp.path().join("simit.toml")).unwrap();
+        fs::write(
+            temp.path().join("simit.toml"),
+            format!("{config}\n[[ci.required_gates]]\nid='first'\nrun='cargo test'\n"),
+        )
+        .unwrap();
+        let output = common::simit()
+            .current_dir(temp.path())
+            .args(["init", "ci"])
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "{mode}: {output:?}");
+        let mut publishers = 0;
+        for entry in fs::read_dir(temp.path().join(".github/workflows")).unwrap() {
+            let path = entry.unwrap().path();
+            if !path
+                .file_name()
+                .unwrap()
+                .to_string_lossy()
+                .starts_with("trusted-publish-")
+            {
+                continue;
+            }
+            publishers += 1;
+            let workflow: Value =
+                serde_yaml::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+            let jobs = workflow["jobs"].as_mapping().unwrap();
+            let id = |key: &Value| key.as_str().unwrap().to_owned();
+            let gated: Vec<String> = jobs
+                .iter()
+                .filter(|(_, job)| {
+                    job["steps"].as_sequence().unwrap().iter().any(|step| {
+                        step["name"]
+                            .as_str()
+                            .is_some_and(|name| name.starts_with("Required gate "))
+                    })
+                })
+                .map(|(key, _)| id(key))
+                .collect();
+            assert_eq!(gated.len(), 1, "{mode} {path:?}: {gated:?}");
+            assert!(gated[0].starts_with("verify-"), "{mode}: {gated:?}");
+            let needs = |job: &str| -> Vec<String> {
+                match &workflow["jobs"][job]["needs"] {
+                    Value::String(need) => vec![need.clone()],
+                    Value::Sequence(needs) => needs
+                        .iter()
+                        .map(|need| need.as_str().unwrap().to_owned())
+                        .collect(),
+                    _ => Vec::new(),
+                }
+            };
+            for (key, job) in jobs {
+                let job_id = id(key);
+                if job_id == "publish-report" {
+                    continue;
+                }
+                // A status function would let a job run after a failed gate.
+                if let Some(condition) = job["if"].as_str() {
+                    for function in ["always()", "failure()", "cancelled()"] {
+                        assert!(
+                            !condition.contains(function),
+                            "{mode} {job_id}: {condition}"
+                        );
+                    }
+                }
+                if !job_id.starts_with("verify-") || job_id == gated[0] {
+                    continue;
+                }
+                let mut pending = needs(&job_id);
+                let mut seen = std::collections::BTreeSet::new();
+                while let Some(next) = pending.pop() {
+                    if seen.insert(next.clone()) {
+                        pending.extend(needs(&next));
+                    }
+                }
+                assert!(
+                    seen.contains(&gated[0]),
+                    "{mode} {path:?}: {job_id} does not depend on {}",
+                    gated[0]
+                );
+            }
+        }
+        assert!(publishers >= 1, "{mode}");
+    }
+}
+
 #[test]
 fn single_crate_credentials_are_outside_the_tag_controlled_workflow() {
     assert_trusted_credential_boundary("single");
@@ -282,8 +374,9 @@ fn trusted_nix_gates_provision_runtime_before_execution_without_upload_credentia
             {
                 continue;
             }
-            let text = fs::read_to_string(path).unwrap();
+            let text = fs::read_to_string(&path).unwrap();
             let workflow: Value = serde_yaml::from_str(&text).unwrap();
+            let mut gated = 0;
             for (name, job) in workflow["jobs"].as_mapping().unwrap() {
                 if !name.as_str().unwrap().starts_with("verify-") {
                     continue;
@@ -296,12 +389,7 @@ fn trusted_nix_gates_provision_runtime_before_execution_without_upload_credentia
                             .as_str()
                             .is_some_and(|uses| uses.starts_with("cachix/install-nix-action@"))
                     })
-                    .expect("credential-free Nix gates need a provisioned Nix runtime");
-                let gate = steps
-                    .iter()
-                    .position(|step| step["name"] == "Required gate nix-integration")
-                    .unwrap();
-                assert!(install < gate);
+                    .expect("credential-free Nix verification needs a provisioned Nix runtime");
                 let checkout = steps
                     .iter()
                     .position(|step| step["with"]["path"] == ".simit-release-source")
@@ -335,7 +423,22 @@ fn trusted_nix_gates_provision_runtime_before_execution_without_upload_credentia
                         .iter()
                         .all(|step| step["env"]["CRATES_IO_API_TOKEN"].is_null())
                 );
+                // Every verify job checks out the same candidate; only the
+                // first one runs the gates.
+                if let Some(gate) = steps
+                    .iter()
+                    .position(|step| step["name"] == "Required gate nix-integration")
+                {
+                    assert!(install < gate);
+                    gated += 1;
+                }
             }
+            assert_eq!(
+                gated,
+                1,
+                "{mode}: {} must gate only its first verify job",
+                path.display()
+            );
         }
     }
 }
@@ -793,21 +896,25 @@ fn artifact_gate_job_budgets_cover_all_commands_and_uploads() {
             }
             let workflow: Value =
                 serde_yaml::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
-            for job in workflow["jobs"].as_mapping().unwrap().values() {
+            for (id, job) in workflow["jobs"].as_mapping().unwrap() {
                 if job["steps"]
                     .as_sequence()
                     .unwrap()
                     .iter()
                     .any(|step| step["name"] == "Required gate first")
                 {
-                    // Single/member source jobs retain GitHub's 360-minute default.
+                    // Gates run once per plan, in the first trusted verify job.
+                    assert!(
+                        id.as_str().unwrap().starts_with("verify-"),
+                        "{mode}: {path:?}"
+                    );
                     let timeout = job["timeout-minutes"].as_u64().unwrap_or(360);
                     assert!((180..=360).contains(&timeout), "{mode}: {path:?}");
                     jobs += 1;
                 }
             }
         }
-        assert!(jobs >= 2, "{mode}");
+        assert_eq!(jobs, if mode == "members" { 2 } else { 1 }, "{mode}");
         fs::write(
             temp.path().join("simit.toml"),
             format!(
@@ -866,21 +973,26 @@ fn gate_job_budgets_cover_gates_without_artifacts() {
             }
             let workflow: Value =
                 serde_yaml::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
-            for job in workflow["jobs"].as_mapping().unwrap().values() {
+            for (id, job) in workflow["jobs"].as_mapping().unwrap() {
                 if job["steps"]
                     .as_sequence()
                     .unwrap()
                     .iter()
                     .any(|step| step["name"] == "Required gate first")
                 {
-                    // Both gates add to the job's own 60 minutes: 60 + 150 + 150.
+                    // Both gates run once, in the first verify job; each adds to
+                    // that job's own 60 minutes: 60 + 150 + 150.
+                    assert!(
+                        id.as_str().unwrap().starts_with("verify-"),
+                        "{mode}: {path:?}"
+                    );
                     let timeout = job["timeout-minutes"].as_u64().unwrap_or(360);
                     assert_eq!(timeout, 360, "{mode}: {path:?}");
                     jobs += 1;
                 }
             }
         }
-        assert!(jobs >= 2, "{mode}");
+        assert_eq!(jobs, if mode == "members" { 2 } else { 1 }, "{mode}");
         fs::write(
             temp.path().join("simit.toml"),
             format!(

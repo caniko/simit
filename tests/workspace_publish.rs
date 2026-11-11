@@ -280,41 +280,50 @@ paths = ["target/evidence/"]
         Some("/tmp/.cargo")
     );
     let steps = parsed["jobs"]["build"]["steps"].as_sequence().unwrap();
-    let gate = steps
-        .iter()
-        .position(|step| step["name"] == "Required gate gel-integration")
-        .unwrap();
-    assert_eq!(steps[gate + 1]["with"]["name"], "gel-evidence.source");
-    assert_eq!(
-        steps[gate + 1]["if"],
-        "always() && steps.simit-required-gate-gel-integration.outcome != '' && steps.simit-required-gate-gel-integration.outcome != 'skipped'"
+    // The source build only produces the candidate archives. Required gates run
+    // once for the whole plan, in the authoritative verify job.
+    assert!(
+        !steps.iter().any(|step| step["name"]
+            .as_str()
+            .is_some_and(|name| name.starts_with("Required gate "))),
+        "the source build must not repeat the verifier's gates"
     );
     // Gate failure blocks publication via needs chain.
     let parsed: serde_yaml::Value = serde_yaml::from_str(&trusted).unwrap();
-    for member in ["a", "b", "c", "d"] {
-        let upload = parsed["jobs"][format!("verify-{member}")]["steps"]
-            .as_sequence()
-            .unwrap()
-            .last()
-            .unwrap();
-        assert_eq!(
-            upload["if"],
-            "always() && steps.simit-required-gate-gel-integration.outcome != '' && steps.simit-required-gate-gel-integration.outcome != 'skipped'"
-        );
-        assert_eq!(upload["with"]["name"], format!("gel-evidence.{member}"));
-        assert_eq!(
-            upload["with"]["path"],
-            ".simit-release-source/target/evidence/\n"
-        );
-    }
+    assert_eq!(publish.matches("Required gate gel-integration").count(), 0);
+    assert_eq!(trusted.matches("Required gate gel-integration").count(), 1);
+    let first = &parsed["jobs"]["verify-a"];
+    assert!(first["needs"].is_null(), "verify-a is the first verify job");
+    let upload = first["steps"].as_sequence().unwrap().last().unwrap();
+    assert_eq!(
+        upload["if"],
+        "always() && steps.simit-required-gate-gel-integration.outcome != '' && steps.simit-required-gate-gel-integration.outcome != 'skipped'"
+    );
+    assert_eq!(upload["with"]["name"], "gel-evidence.a");
+    assert_eq!(
+        upload["with"]["path"],
+        ".simit-release-source/target/evidence/\n"
+    );
     assert!(
-        parsed["jobs"]["verify-a"]["steps"]
+        first["steps"]
             .as_sequence()
             .unwrap()
             .iter()
             .any(|step| step["name"] == "Required gate gel-integration"
                 && step["timeout-minutes"] == 30)
     );
+    for member in ["b", "c", "d"] {
+        assert!(
+            !parsed["jobs"][format!("verify-{member}")]["steps"]
+                .as_sequence()
+                .unwrap()
+                .iter()
+                .any(|step| step["name"].as_str().is_some_and(|name| {
+                    name.starts_with("Required gate ") || name == "Retain required gate evidence"
+                })),
+            "verify-{member} must not repeat the first verify job's gates"
+        );
+    }
     assert_eq!(parsed["jobs"]["publish-a"]["needs"][0], "verify-a");
     // Dependency order via explicit needs: b/c need a, d needs b+c.
     let b_job = trusted.find("verify-b:").expect("verify-b job");
@@ -424,16 +433,26 @@ fn coordinated_gate_artifacts_are_unique_across_hyphenated_packages() {
         .output()
         .unwrap();
     assert!(output.status.success(), "{output:?}");
-    let workflow: serde_yaml::Value = serde_yaml::from_str(&read(
+    let trusted = read(
         &temp
             .path()
             .join(".github/workflows/trusted-publish-workspace.yaml"),
-    ))
-    .unwrap();
+    );
+    let workflow: serde_yaml::Value = serde_yaml::from_str(&trusted).unwrap();
+    let source = read(&temp.path().join(".github/workflows/publish-workspace.yaml"));
     let mut names = std::collections::BTreeSet::new();
     let mut uploads = 0;
-    for job in workflow["jobs"].as_mapping().unwrap().values() {
-        for step in job["steps"].as_sequence().unwrap() {
+    let mut gated = Vec::new();
+    for (id, job) in workflow["jobs"].as_mapping().unwrap() {
+        let steps = job["steps"].as_sequence().unwrap();
+        if steps.iter().any(|step| {
+            step["name"]
+                .as_str()
+                .is_some_and(|name| name.starts_with("Required gate "))
+        }) {
+            gated.push(id.as_str().unwrap().to_owned());
+        }
+        for step in steps {
             if step["name"] == "Retain required gate evidence" {
                 let name = step["with"]["name"].as_str().unwrap();
                 assert!(names.insert(name), "duplicate gate artifact: {name}");
@@ -441,11 +460,46 @@ fn coordinated_gate_artifacts_are_unique_across_hyphenated_packages() {
             }
         }
     }
-    assert_eq!(uploads, packages.len() * artifacts.len());
+    // Every verify job checks out the same candidate; only the first, which
+    // every later verify job depends on transitively, runs the gates.
+    assert_eq!(gated.len(), 1, "{gated:?}");
+    let package = gated[0].strip_prefix("verify-").unwrap();
+    assert!(
+        workflow["jobs"][gated[0].as_str()]["needs"].is_null(),
+        "{} must be the first verify job",
+        gated[0]
+    );
+    assert_eq!(uploads, artifacts.len());
+    // These crates are independent, so only the plan's sequencing edge makes
+    // the ungated verify job wait for the gated one.
+    let other = packages.iter().find(|name| **name != package).unwrap();
+    let needs = workflow["jobs"][format!("verify-{other}")]["needs"].clone();
+    let needs: Vec<&str> = match &needs {
+        serde_yaml::Value::String(need) => vec![need.as_str()],
+        serde_yaml::Value::Sequence(needs) => needs.iter().map(|n| n.as_str().unwrap()).collect(),
+        _ => Vec::new(),
+    };
+    assert_eq!(needs, [format!("publish-{package}")], "verify-{other}");
+    assert_eq!(
+        workflow["jobs"][format!("publish-{package}")]["needs"],
+        serde_yaml::Value::from(vec![format!("verify-{package}")])
+    );
     for artifact in artifacts {
-        for package in packages {
-            assert!(names.contains(format!("{artifact}.{package}").as_str()));
-        }
+        assert!(
+            names.contains(format!("{artifact}.{package}").as_str()),
+            "{names:?}"
+        );
+    }
+    // Each gate renders exactly once for the whole plan: none in the source
+    // build, one in the trusted verifier's first verify job.
+    for index in 0..artifacts.len() {
+        let gate = format!("Required gate gate-{index}");
+        assert_eq!(
+            source.matches(&gate).count(),
+            0,
+            "{gate} in the source build"
+        );
+        assert_eq!(trusted.matches(&gate).count(), 1, "{gate} in the verifier");
     }
 }
 

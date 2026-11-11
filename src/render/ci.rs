@@ -3750,10 +3750,6 @@ fn publish_workflow(
                 options.tag_prefix,
             ));
             push_extra_setup_steps(&mut workflow, &options.extra_setup);
-            // Retain failing source gates before the success-gated verifier.
-            if platform == Platform::Github {
-                trusted_publisher::push_source_required_gates(&mut workflow, &options);
-            }
             match options.om_ci {
                 OmCiMode::Off => {
                     push_nix_publish_legacy_steps(&mut workflow, platform, package, &options);
@@ -3790,9 +3786,6 @@ fn publish_workflow(
                 options.tag_prefix,
             ));
             push_extra_setup_steps(&mut workflow, &options.extra_setup);
-            if platform == Platform::Github {
-                trusted_publisher::push_source_required_gates(&mut workflow, &options);
-            }
             push_test_steps(&mut workflow, runtime, package, &options);
             push_quality_tool_install_steps(&mut workflow, runtime, &options);
             push_optional_publish_steps(&mut workflow, runtime, package, &options);

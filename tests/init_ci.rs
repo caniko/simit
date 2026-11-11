@@ -675,7 +675,6 @@ retention_days = 14
     }
     for (file, prefix, suffix) in [
         ("ci.yaml", "", ""),
-        ("publish-crate.yaml", "", ".source"),
         (
             "trusted-publish-crate.yaml",
             ".simit-release-source/",
@@ -724,6 +723,21 @@ retention_days = 14
         assert_eq!(upload["with"]["retention-days"], 14);
         assert!(steps[gate]["continue-on-error"].is_null());
     }
+    // The tag-triggered source build only retains the immutable crate archive;
+    // the trusted verifier is the one authoritative gate.
+    let source: serde_yaml::Value = serde_yaml::from_str(&read(
+        &temp.path().join(".github/workflows/publish-crate.yaml"),
+    ))
+    .unwrap();
+    assert!(
+        !source["jobs"]["publish"]["steps"]
+            .as_sequence()
+            .unwrap()
+            .iter()
+            .any(|step| step["name"]
+                .as_str()
+                .is_some_and(|name| name.starts_with("Required gate ")))
+    );
     let ci: serde_yaml::Value =
         serde_yaml::from_str(&read(&temp.path().join(".github/workflows/ci.yaml"))).unwrap();
     assert_eq!(ci["jobs"]["gate-browser"]["timeout-minutes"], 75);
@@ -745,22 +759,35 @@ fn required_gate_source_evidence_names_do_not_alias_crate_archives() {
             .output()
             .unwrap();
         assert!(output.status.success(), "{output:?}");
+        // The tag-triggered source build retains only the immutable crate
+        // archive; the gates run in the trusted verifier.
         let workflow: serde_yaml::Value = serde_yaml::from_str(&read(
             &temp.path().join(".github/workflows/publish-crate.yaml"),
         ))
         .unwrap();
-        let uploads = workflow["jobs"]["publish"]["steps"]
-            .as_sequence()
-            .unwrap()
+        let steps = workflow["jobs"]["publish"]["steps"].as_sequence().unwrap();
+        let uploads = steps
             .iter()
             .filter_map(|step| step["with"]["name"].as_str())
             .collect::<Vec<_>>();
-        assert!(uploads.contains(&"simit-crate-demo-${{ github.run_attempt }}"));
+        assert_eq!(uploads, ["simit-crate-demo-${{ github.run_attempt }}"]);
         assert!(
-            uploads.contains(&"simit-crate-demo-1.source"),
-            "{uploads:?}"
+            !steps
+                .iter()
+                .any(|step| step["name"] == "Retain required gate evidence")
         );
-        assert!(!uploads.contains(&"simit-crate-demo-1"));
+        let trusted: serde_yaml::Value = serde_yaml::from_str(&read(
+            &temp
+                .path()
+                .join(".github/workflows/trusted-publish-crate.yaml"),
+        ))
+        .unwrap();
+        let upload = trusted["jobs"]["verify-demo"]["steps"]
+            .as_sequence()
+            .unwrap()
+            .last()
+            .unwrap();
+        assert_eq!(upload["with"]["name"], "simit-crate-demo-1.demo");
     }
 }
 

@@ -1472,9 +1472,11 @@ files explicitly, even when they start with a dot.
 Artifact-bearing CI gates apply `timeout_minutes` to the command step and give
 the job fifteen extra minutes for setup and upload, so their configured command
 timeout must be at most 345 minutes. Other gates retain their existing limit.
-Signed-source and trusted verification jobs run every gate serially, with or
-without artifacts. They add all gate command deadlines and five minutes per
-diagnostic upload to their own sixty-minute limit, which stays reserved for
+A GitHub crates.io publication runs every gate once, serially, in the first
+trusted verification job of its plan; the credential-free source build and the
+later verification jobs, which depend on that first job, do not repeat them.
+That job adds all gate command deadlines and five minutes per
+diagnostic upload to its own sixty-minute limit, which stays reserved for
 setup, the workspace lane and packaging. Hosted-release validation jobs add the
 same gate budget to ten setup minutes. Configurations exceeding the shared
 360-minute publishing job limit are rejected; independent CI gates do not share
@@ -1494,11 +1496,10 @@ Artifact expressions cannot reference the `env` context: upload actions do not
 inherit candidate gate environments. Use literal values or `runner`, `github`
 or `vars` contexts instead.
 Artifact names and paths in credential-free publishing cannot reference GitHub
-secrets or authentication contexts. Signed-tag source builds
-also retain gate failures before the success-gated trusted publisher can start.
-Their diagnostics use `<artifact-name>.source` to avoid crate archive names.
-Trusted crate publishers use `<artifact-name>.<package-name>` to avoid collisions
-between gate/member pairs, including hyphenated names. Hosted-release validation
+secrets or authentication contexts. Trusted crate publishers upload the gate
+diagnostics from their first verification job as
+`<artifact-name>.<package-name>`, which keeps them apart from crate archive
+names, including hyphenated ones. Hosted-release validation
 uses `gate.<artifact-name>` to avoid the reusable prebuild's `release-<system>`
 and `flake-inputs-<system>` artifact namespaces. Ordinary CI names are unchanged.
 Forgejo and Crow reject

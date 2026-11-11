@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Fixed: GitHub crates.io releases run each `[ci].required_gates` entry once
+  per plan, in the first trusted `verify-<crate>` job, instead of repeating the
+  same candidate checks in every verify job and again in the credential-free
+  source build. The first verify job still uploads the gate diagnostics and
+  every later verify job depends on it transitively. Gate artifacts named
+  `<artifact>.source` and `<artifact>.<later-package>` are no longer produced,
+  and the source build and later verify jobs keep only the base 60-minute
+  timeout. Regenerate the publish workflows on the default branch before the
+  next tag: the publisher refuses a source workflow that differs from the
+  enrolled one.
+
 - Fixed: required-gate evidence uploads on GitHub-hosted runners use
   `actions/upload-artifact` v7.0.2, like every other generated upload step,
   instead of v7.0.1. Regenerated `ci.yaml` files with gate artifacts change
