@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Fixed: GitHub crates.io releases run each `[ci].required_gates` entry once
+  per plan, in the first trusted `verify-<crate>` job, instead of repeating the
+  same candidate checks in every verify job and again in the credential-free
+  source build. The first verify job still uploads the gate diagnostics and
+  every later verify job depends on it transitively.
+
 - Added: `[release.artifacts].system_runners` builds the configured Nix bundle
   outputs (`packages.<system>.<bundle>`) in one release-workflow matrix job per
   system on its native runner, uploads each system's archives and merges them

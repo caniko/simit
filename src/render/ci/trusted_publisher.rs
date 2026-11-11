@@ -10,7 +10,7 @@ pub(super) const CANDIDATE_RUNNER: &str = "ubuntu-24.04";
 // Setup, the workspace lane and packaging; required gates add their deadlines.
 const CANDIDATE_JOB_MINUTES: u64 = 60;
 
-/// Validates a source/publisher pair whose build and verify jobs run `options`
+/// Validates a source/publisher pair whose first verify job runs `options`
 /// gates serially.
 pub(super) fn validate_credential_free_source(workflow: &str, options: &CiOptions) -> Result<()> {
     crate::config::validate_required_gate_job_budget(
@@ -294,7 +294,6 @@ pub(super) fn source_workflow_with_namespace(
     if options.with_deny {
         push_deny_step(&mut w, command_prefix(runtime));
     }
-    push_source_required_gates(&mut w, options);
     let manifest = manifest_argument(options);
     for name in names {
         let prefix = command_prefix(runtime);
@@ -342,33 +341,6 @@ pub(super) fn source_workflow_with_namespace(
     }
     trim_trailing_blank_lines(&mut w);
     w
-}
-
-pub(super) fn push_source_required_gates(w: &mut String, options: &CiOptions) {
-    for gate in &options.required_gates {
-        w.push_str(&format!(
-            "      - name: Required gate {}\n        timeout-minutes: {}\n        env:\n",
-            gate.id, gate.timeout_minutes
-        ));
-        if gate.env.is_empty() {
-            w.push_str("          SIMIT_REQUIRED_GATE: \"1\"\n");
-        }
-        for (key, value) in &gate.env {
-            w.push_str(&format!(
-                "          {key}: \"{}\"\n",
-                yaml_double_quote(value)
-            ));
-        }
-        if gate.artifacts.is_some() {
-            w.push_str(&format!(
-                "        id: simit-required-gate-{}\n",
-                sanitize_gate_id(&gate.id)
-            ));
-        }
-        w.push_str(&format!("        run: {}\n", gate.run));
-        // Keep diagnostics outside the immutable simit-crate-<package>-<attempt> namespace.
-        push_required_gate_artifacts(w, gate, None, "", ("", ".source"));
-    }
 }
 
 pub(crate) fn bootstrap(w: &mut String) {
@@ -443,7 +415,7 @@ pub(super) fn publisher_file_with_namespace(
         ),
         None => namespace_argument,
     };
-    for (name, dependencies) in plan {
+    for (index, (name, dependencies)) in plan.iter().enumerate() {
         // Cargo names already use GitHub's permitted job-ID alphabet. Keep
         // their spelling: collapsing '-'/'_' or case aliases distinct crates.
         let id = name;
@@ -511,7 +483,11 @@ pub(super) fn publisher_file_with_namespace(
         w.push_str(&format!("      - name: Verify packaged contents {name}\n"));
         candidate_context(&mut w);
         w.push_str(&format!("        run: {prefix}cargo publish --dry-run --locked --manifest-path \"$RUNNER_TEMP/verified-{id}/Cargo.toml\"\n"));
-        if !options.required_gates.is_empty() {
+        // Every verify job checks out the same candidate commit, and each one
+        // after the first depends on the first through its publish predecessor.
+        // The first verify job is the authoritative gate: running the same
+        // gates in each verify job would repeat identical work.
+        if index == 0 {
             for gate in &options.required_gates {
                 w.push_str(&format!(
                     "      - name: Required gate {}\n        timeout-minutes: {}\n",
