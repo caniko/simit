@@ -27,6 +27,7 @@ pub mod cli;
 pub mod commands;
 /// Project configuration loaded from supported simit project config sources.
 pub mod config;
+pub mod docs_only;
 /// Git preflight, staging, commit, and tag helpers.
 pub mod git;
 /// Declarative mixed-language repository components and qualification plans.

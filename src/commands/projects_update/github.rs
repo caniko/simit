@@ -246,6 +246,43 @@ fn workflow_source(path: &str, file: &Value) -> Result<serde_yaml::Value> {
 struct PushSteps {
     jobs: Option<BTreeSet<String>>,
     outcomes: BTreeMap<u64, (String, bool)>,
+    /// API job names whose steps the conditional binding covers.
+    outcome_jobs: BTreeSet<String>,
+    /// The workflow carries the generated docs-only gate, so a successful run
+    /// may leave its gated jobs skipped.
+    docs_gate: bool,
+}
+
+/// Prove the docs-only gate is exactly the generated job. A skipped job in a
+/// successful run can then only come from that gate's own classification.
+fn is_generated_docs_gate(workflow: &serde_yaml::Value) -> bool {
+    let Some(job) = workflow["jobs"].as_mapping().and_then(|jobs| {
+        jobs.get(serde_yaml::Value::String(
+            crate::render::ci::DOCS_GATE_JOB.into(),
+        ))
+    }) else {
+        return false;
+    };
+    let output = crate::render::ci::docs_gate_output();
+    let source = crate::render::ci::docs_gate_source();
+    job.get("if").is_none()
+        && job.get("needs").is_none()
+        && job
+            .get("outputs")
+            .and_then(|outputs| outputs.get("code"))
+            .and_then(serde_yaml::Value::as_str)
+            == Some(output.as_str())
+        && job
+            .get("steps")
+            .and_then(serde_yaml::Value::as_sequence)
+            .is_some_and(|steps| {
+                steps.iter().any(|step| {
+                    step.get("id").and_then(serde_yaml::Value::as_str)
+                        == Some(crate::render::ci::DOCS_GATE_STEP)
+                        && step.get("run").and_then(serde_yaml::Value::as_str)
+                            == Some(source.as_str())
+                })
+            })
 }
 
 fn push_step_runs(condition: &str, default_branch: bool) -> Result<bool> {
@@ -269,18 +306,29 @@ fn push_steps(workflow: &serde_yaml::Value, default_branch: bool) -> Result<Push
     let jobs = workflow["jobs"]
         .as_mapping()
         .context("missing workflow jobs")?;
-    let mut expected = PushSteps::default();
-    if !jobs.values().any(|job| {
-        job["steps"]
-            .as_sequence()
-            .is_some_and(|steps| steps.iter().any(|step| step.get("if").is_some()))
-    }) {
+    let mut expected = PushSteps {
+        docs_gate: is_generated_docs_gate(workflow)
+            && jobs.values().any(|job| job.get("if").is_some()),
+        ..PushSteps::default()
+    };
+    let conditional = jobs
+        .iter()
+        .filter(|(_, job)| {
+            job["steps"]
+                .as_sequence()
+                .is_some_and(|steps| steps.iter().any(|step| step.get("if").is_some()))
+        })
+        .collect::<Vec<_>>();
+    if conditional.is_empty() {
         return Ok(expected);
     }
     // ponytail: conditional steps support one source job and a static include
     // matrix; add provider-native job-id binding before supporting other shapes.
-    ensure!(jobs.len() == 1, "conditional steps require one source job");
-    for (id, job) in jobs {
+    ensure!(
+        conditional.len() == 1,
+        "conditional steps require one source job"
+    );
+    for (id, job) in conditional {
         let steps = job["steps"]
             .as_sequence()
             .context("missing workflow steps")?;
@@ -314,7 +362,7 @@ fn push_steps(workflow: &serde_yaml::Value, default_branch: bool) -> Result<Push
                 !name.is_empty() && !name.contains("${{"),
                 "conditional steps need a literal job name"
             );
-            let names = if let Some(matrix) = job
+            let mut names = if let Some(matrix) = job
                 .get("strategy")
                 .and_then(|strategy| strategy.get("matrix"))
             {
@@ -363,6 +411,27 @@ fn push_steps(workflow: &serde_yaml::Value, default_branch: bool) -> Result<Push
             } else {
                 BTreeSet::from([name.to_owned()])
             };
+            expected.outcome_jobs = names.clone();
+            // Every other source job reports a literal name, which keeps the
+            // completed-run inventory exact.
+            for (other, source) in jobs {
+                if other == id {
+                    continue;
+                }
+                let name = source
+                    .get("name")
+                    .unwrap_or(other)
+                    .as_str()
+                    .context("conditional steps require literal job names")?;
+                ensure!(
+                    !name.is_empty() && !name.contains("${{"),
+                    "conditional steps require literal job names"
+                );
+                ensure!(
+                    names.insert(name.to_owned()),
+                    "conditional matrix job names collide"
+                );
+            }
             expected.jobs = Some(names);
         }
     }
@@ -393,11 +462,16 @@ fn push_workflow(path: &str, file: &Value, branch: Option<&str>) -> Result<bool>
             .and_then(serde_yaml::Value::as_mapping)
             .context("missing workflow jobs")?;
         ensure!(!jobs.is_empty(), "empty workflow job inventory");
+        let condition = crate::render::ci::docs_gate_condition();
+        let mut gated = false;
         for job in jobs.values() {
-            ensure!(
-                job.get("if").is_none(),
-                "conditional jobs or steps require an adapter with job-outcome admission"
-            );
+            if let Some(source) = job.get("if") {
+                ensure!(
+                    source.as_str() == Some(condition.as_str()),
+                    "conditional jobs or steps require an adapter with job-outcome admission"
+                );
+                gated = true;
+            }
             ensure!(
                 job.get("concurrency").is_none(),
                 "job concurrency requires an adapter with cancellation-safe scheduling admission"
@@ -419,6 +493,10 @@ fn push_workflow(path: &str, file: &Value, branch: Option<&str>) -> Result<bool>
                 );
             }
         }
+        ensure!(
+            !gated || is_generated_docs_gate(&yaml),
+            "docs-only gate is not the generated classification job"
+        );
         push_steps(&yaml, false)?;
     }
     Ok(trigger.is_some())
@@ -1470,17 +1548,41 @@ fn admit_run(
                 && job["run_attempt"] == 1
                 && job["head_sha"] == revision
                 && job["status"] == "completed"
-                && job["conclusion"] == "success"
                 && seen.insert(number(job, "/id")?),
             "job is missing, duplicated, rerun or non-success"
         );
+        let skipped = job["conclusion"] == "skipped";
+        // A successful run cannot contain a failed or cancelled job. Only the
+        // generated docs gate may skip one, and a skipped job ran no steps.
+        ensure!(
+            job["conclusion"] == "success" || (skipped && expected.docs_gate),
+            "job is missing, duplicated, rerun or non-success"
+        );
+        if skipped {
+            ensure!(
+                job["steps"]
+                    .as_array()
+                    .is_none_or(|steps| steps.iter().all(|step| {
+                        step["status"] == "completed" && step["conclusion"] == "skipped"
+                    })),
+                "skipped job reports executed steps"
+            );
+            continue;
+        }
         let steps = job["steps"].as_array().context("missing step inventory")?;
         ensure!(!steps.is_empty(), "job has an empty step inventory");
-        let mut outcomes = expected.outcomes.clone();
+        let bound = job["name"]
+            .as_str()
+            .is_some_and(|name| expected.outcome_jobs.contains(name));
+        let mut outcomes = if bound {
+            expected.outcomes.clone()
+        } else {
+            BTreeMap::new()
+        };
         let mut step_numbers = BTreeSet::new();
         for step in steps {
             ensure!(
-                expected.outcomes.is_empty()
+                !bound
                     || step["number"]
                         .as_u64()
                         .is_some_and(|number| step_numbers.insert(number)),
@@ -2154,7 +2256,7 @@ mod tests {
             ("include:", "other: [x86_64-linux]\n        include:"),
             (
                 "  build:\n",
-                "  extra:\n    steps:\n      - name: Extra\n        run: true\n  build:\n",
+                "  extra:\n    steps:\n      - name: Extra\n        if: false\n        run: true\n  build:\n",
             ),
         ] {
             let changed = json!({"path":path,"type":"file","encoding":"base64",
@@ -2197,9 +2299,11 @@ mod tests {
                 steps.push(json!({"number":index+2,"name":name,"status":"completed","conclusion":if runs {"success"} else {"skipped"}}));
             }
             steps.push(json!({"number":100,"name":"Post Checkout","status":"completed","conclusion":"success"}));
-            let jobs = json!({"total_count":2,"jobs":[
+            let jobs = json!({"total_count":3,"jobs":[
                 {"id":8,"run_id":42,"run_attempt":1,"head_sha":revision,"name":"build (aarch64-darwin, macos-15)","status":"completed","conclusion":"success","steps":steps},
-                {"id":9,"run_id":42,"run_attempt":1,"head_sha":revision,"name":"build (x86_64-linux, ubuntu-24.04)","status":"completed","conclusion":"success","steps":steps}
+                {"id":9,"run_id":42,"run_attempt":1,"head_sha":revision,"name":"build (x86_64-linux, ubuntu-24.04)","status":"completed","conclusion":"success","steps":steps},
+                // The docs gate itself always runs; only its gated jobs may skip.
+                {"id":7,"run_id":42,"run_attempt":1,"head_sha":revision,"name":"Classify changed paths","status":"completed","conclusion":"success","steps":[{"number":1,"name":"Set up job","status":"completed","conclusion":"success"}]}
             ]});
             let replay = |request: &AdapterRequest, jobs: &Value| {
                 execute_with(

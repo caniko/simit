@@ -102,6 +102,7 @@ pub(super) fn job(
         "\n  dependencies:\n    runs-on: {}\n",
         runs_on(runner)
     ));
+    push_docs_gate_keys(workflow, Platform::Github, &[]);
     if let Some(timeout) = options.timeout_minutes {
         workflow.push_str(&format!("    timeout-minutes: {timeout}\n"));
     }

@@ -62,6 +62,12 @@ pub(super) fn render(
             runs_on(runner)
         }
     ));
+    let build_needs = if options.dependency_installables.is_empty() {
+        Vec::new()
+    } else {
+        vec!["dependencies"]
+    };
+    push_docs_gate_keys(&mut workflow, Platform::Github, &build_needs);
     if let Some(timeout) = options.timeout_minutes {
         workflow.push_str(&format!("    timeout-minutes: {timeout}\n"));
     }
@@ -80,10 +86,6 @@ pub(super) fn render(
                 yaml_double_quote(&options.system_runners[system]),
             ));
         }
-    }
-    if !options.dependency_installables.is_empty() {
-        // The build job consumes only a complete same-run dependency producer.
-        workflow.push_str("    needs: [dependencies]\n");
     }
     // Producer shell startup files/configuration cannot participate in bootstrap.
     workflow
@@ -216,6 +218,12 @@ pub(super) fn render(
         options,
         installables,
     )?;
+    push_docs_gate_job(
+        &mut workflow,
+        Platform::Github,
+        nix_build_action_version(runner, options, "v7.0.1", "v4.3.1"),
+        None,
+    );
     // Include every group spec, repeated fallback hook, YAML escape and transport
     // step in GitHub's decimal 500 KB workflow-file budget before any writes.
     ensure!(

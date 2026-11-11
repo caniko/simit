@@ -323,8 +323,16 @@ fn ordinary_github_jobs_admit_prs_and_default_branch_pushes_without_cross_event_
         let workflow =
             fs::read_to_string(temp.path().join(".github/workflows").join(path)).unwrap();
         let yaml: serde_yaml::Value = serde_yaml::from_str(&workflow).unwrap();
-        for (_, job) in yaml["jobs"].as_mapping().unwrap() {
-            assert!(job["if"].is_null());
+        for (id, job) in yaml["jobs"].as_mapping().unwrap() {
+            if id.as_str() == Some("changes") {
+                assert!(job["if"].is_null() && job["needs"].is_null());
+                continue;
+            }
+            assert_eq!(
+                job["if"], "${{ needs.changes.outputs.code == 'true' }}",
+                "{path}"
+            );
+            assert_eq!(job["needs"], serde_yaml::to_value(["changes"]).unwrap());
         }
         assert_eq!(
             yaml["on"]["push"]["branches"],
@@ -359,7 +367,13 @@ fn explicitly_separate_github_events_keep_both_producers() {
     generate(temp.path(), false);
     let workflow = fs::read_to_string(temp.path().join(".github/workflows/ci.yaml")).unwrap();
     let yaml: serde_yaml::Value = serde_yaml::from_str(&workflow).unwrap();
-    assert!(yaml["jobs"]["test"]["if"].is_null());
+    // The docs gate is the only job condition; explicit event separation keeps
+    // both producers inside the same workflow.
+    assert_eq!(
+        yaml["jobs"]["test"]["if"],
+        "${{ needs.changes.outputs.code == 'true' }}"
+    );
+    assert!(yaml["jobs"]["changes"]["if"].is_null());
     generate(temp.path(), true);
 }
 
@@ -774,4 +788,58 @@ fn aggregate_unit_test_selection_uses_all_selected_members() {
             "{workflow}"
         );
     }
+}
+
+#[test]
+fn github_ci_gates_every_job_on_a_cheap_root_docs_classification() {
+    let temp = TempDir::new().unwrap();
+    project(temp.path(), "demo");
+    fs::write(temp.path().join("flake.nix"), "{}\n").unwrap();
+    fs::write(
+        temp.path().join("simit.toml"),
+        "[ci]\nplatform = \"github\"\nruntime = \"nix\"\nrequired_gates = [{ id = \"shared\", run = \"nix run .#shared-contract\" }]\n",
+    )
+    .unwrap();
+    generate(temp.path(), false);
+    let workflow = fs::read_to_string(temp.path().join(".github/workflows/ci.yaml")).unwrap();
+    // The gate is last: runner inference reads the first `runs-on` of the file.
+    assert!(
+        workflow
+            .trim_end()
+            .ends_with("printf 'code=%s\\n' \"$code\" >> \"$GITHUB_OUTPUT\"")
+    );
+    let yaml: serde_yaml::Value = serde_yaml::from_str(&workflow).unwrap();
+    let jobs = yaml["jobs"].as_mapping().unwrap();
+    let gate = &yaml["jobs"]["changes"];
+    assert!(gate["if"].is_null() && gate["needs"].is_null());
+    assert_eq!(gate["runs-on"], "ubuntu-latest");
+    assert_eq!(gate["timeout-minutes"], 5);
+    assert_eq!(gate["permissions"]["contents"], "read");
+    assert_eq!(
+        gate["outputs"]["code"],
+        "${{ steps.classify.outputs.code }}"
+    );
+    assert_eq!(gate["steps"][0]["with"]["fetch-depth"], 0);
+    assert_eq!(gate["steps"][0]["with"]["persist-credentials"], false);
+    let script = gate["steps"][1]["run"].as_str().unwrap();
+    assert!(script.contains("    README.md) return 1 ;;"));
+    assert!(script.contains("    *.md) return 0 ;;"));
+    assert!(script.contains("git cat-file -e \"$BASE_REVISION^{commit}\""));
+    for (id, job) in jobs {
+        if id.as_str() == Some("changes") {
+            continue;
+        }
+        assert_eq!(
+            job["if"], "${{ needs.changes.outputs.code == 'true' }}",
+            "{id:?}"
+        );
+        assert!(
+            job["needs"]
+                .as_sequence()
+                .unwrap()
+                .contains(&serde_yaml::Value::from("changes")),
+            "{id:?}"
+        );
+    }
+    generate(temp.path(), true);
 }

@@ -6,6 +6,7 @@ use anyhow::{Context, Result, bail};
 use serde::Serialize;
 
 use super::{Graph, covers, validate_relative_path};
+use crate::docs_only::is_docs_only_path;
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -23,7 +24,9 @@ pub fn select(graph: &Graph, paths: &[String], all: bool) -> Result<Plan> {
     let paths: BTreeSet<_> = paths.iter().cloned().collect();
     for path in &paths {
         validate_relative_path(path)?;
-        if graph.ignore_paths.iter().any(|p| covers(p, path)) {
+        // Root documentation changes no component, so they select nothing and
+        // must not fall through to the unowned full run.
+        if is_docs_only_path(path) || graph.ignore_paths.iter().any(|p| covers(p, path)) {
             continue;
         }
         let owners: Vec<_> = graph
@@ -175,6 +178,57 @@ fn git(root: &Path, args: &[&str]) -> Result<Vec<u8>> {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeMap;
+
+    use super::super::{Component, Graph};
+
+    fn graph() -> Graph {
+        let component = |id: &str, path: &str| Component {
+            id: id.into(),
+            paths: vec![path.into()],
+            cargo_packages: Vec::new(),
+            cargo_manifest: None,
+            releases: Vec::new(),
+            depends_on: Vec::new(),
+            systems: Vec::new(),
+            checks: Vec::new(),
+            job: None,
+        };
+        Graph {
+            components: BTreeMap::from([
+                ("python".into(), component("python", "python")),
+                ("rust".into(), component("rust", "rust")),
+            ]),
+            shared_paths: Vec::new(),
+            ignore_paths: Vec::new(),
+            order: vec!["rust".into(), "python".into()],
+        }
+    }
+
+    #[test]
+    fn root_documentation_selects_no_component_while_readmes_and_nested_docs_still_do() {
+        let plan = super::select(&graph(), &["VISION.md".into()], false).unwrap();
+        assert!(plan.selected.is_empty(), "{plan:?}");
+        assert!(!plan.full);
+
+        for path in ["README.md", "docs/VISION.md"] {
+            let plan = super::select(&graph(), &[path.into()], false).unwrap();
+            assert!(plan.full, "{path}: {plan:?}");
+            assert_eq!(plan.selected, ["rust", "python"], "{path}");
+        }
+
+        let plan = super::select(&graph(), &["python/NOTES.md".into()], false).unwrap();
+        assert_eq!(plan.selected, ["python"]);
+
+        let plan = super::select(
+            &graph(),
+            &["VISION.md".into(), "python/server.py".into()],
+            false,
+        )
+        .unwrap();
+        assert_eq!(plan.selected, ["python"]);
+    }
+
     #[test]
     fn byte_path_decoder_preserves_known_paths_and_forces_full_qualification() {
         let changed = super::decode_paths(b"python/server.py\0python/invalid-\xff.py\0");

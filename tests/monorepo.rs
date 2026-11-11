@@ -2998,6 +2998,23 @@ fn grouped_components_share_one_job_with_member_guards_and_ci_cache() {
     let value: Value = serde_json::from_slice(&output.stdout).unwrap();
     assert_eq!(value["selected"], serde_json::json!([]));
     assert!(!value["full"].as_bool().unwrap());
+    // Root documentation is not unowned work: it skips every component too.
+    let output = plan(temp.path(), &["VISION.md"]);
+    assert!(output.status.success(), "{output:?}");
+    let value: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(value["selected"], serde_json::json!([]));
+    assert!(!value["full"].as_bool().unwrap());
+    // A crate README is compiled into the package, so it still qualifies.
+    let output = plan(temp.path(), &["README.md"]);
+    assert!(output.status.success(), "{output:?}");
+    let value: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert!(value["full"].as_bool().unwrap());
+    // A cancelled plan leaves the selection empty; qualification must then fail
+    // on the plan result instead of crashing jq's --argjson.
+    assert_eq!(
+        qualified["env"]["SELECTED"].as_str(),
+        Some("${{ needs.plan.outputs.selected || '[]' }}")
+    );
     write(
         temp.path(),
         "simit.toml",

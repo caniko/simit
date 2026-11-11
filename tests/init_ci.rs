@@ -7913,7 +7913,8 @@ fn target_smokes_render_build_and_smoke_jobs_and_round_trip() {
     assert!(yaml["on"]["push"]["branches"].is_sequence());
     assert_eq!(yaml["permissions"]["contents"].as_str(), Some("read"));
     assert!(yaml["concurrency"]["cancel-in-progress"].as_bool().unwrap());
-    assert_eq!(yaml["jobs"].as_mapping().unwrap().len(), 4);
+    // Two smoke jobs per entry plus the docs-only gate.
+    assert_eq!(yaml["jobs"].as_mapping().unwrap().len(), 5);
 
     let build = &yaml["jobs"]["build-target-smoke-windows"];
     assert_eq!(build["permissions"]["contents"].as_str(), Some("read"));
@@ -7926,8 +7927,8 @@ fn target_smokes_render_build_and_smoke_jobs_and_round_trip() {
 
     let smoke = &yaml["jobs"]["target-smoke-windows"];
     assert_eq!(
-        smoke["needs"][0].as_str(),
-        Some("build-target-smoke-windows")
+        smoke["needs"],
+        serde_yaml::to_value(["changes", "build-target-smoke-windows"]).unwrap()
     );
     assert_eq!(smoke["runs-on"].as_str(), Some("windows-2025"));
     assert_eq!(smoke["permissions"]["contents"].as_str(), Some("read"));
@@ -8193,7 +8194,8 @@ fn native_tests_render_a_job_per_entry_and_round_trip() {
     assert!(yaml["on"]["pull_request"].is_null());
     assert_eq!(yaml["permissions"]["contents"].as_str(), Some("read"));
     assert!(yaml["concurrency"]["cancel-in-progress"].as_bool().unwrap());
-    assert_eq!(yaml["jobs"].as_mapping().unwrap().len(), 2);
+    // One job per entry plus the docs-only gate.
+    assert_eq!(yaml["jobs"].as_mapping().unwrap().len(), 3);
 
     let windows = &yaml["jobs"]["native-test-windows"];
     assert_eq!(windows["runs-on"].as_str(), Some("windows-2025"));
