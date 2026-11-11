@@ -1024,7 +1024,11 @@ fn independent_rust_evaluation_and_realization_lanes_preserve_all_steps() {
     .unwrap();
     for name in ["rust", "evaluation", "realization"] {
         assert!(value["jobs"][name]["steps"].is_sequence(), "{value:?}");
-        assert!(value["jobs"][name]["needs"].is_null());
+        // Independent lanes depend only on the docs-only gate.
+        assert_eq!(
+            value["jobs"][name]["needs"],
+            serde_yaml::to_value(["changes"]).unwrap()
+        );
         let steps = value["jobs"][name]["steps"].as_sequence().unwrap();
         let cargo_path = steps
             .iter()

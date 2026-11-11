@@ -340,7 +340,9 @@ pub(crate) fn files(
         job["steps"] = json!(steps);
         jobs.insert(id, job);
     }
-    let mut require = json!({"name": "Require every selected component", "env": {"RESULTS": "${{ toJSON(needs) }}", "SELECTED": "${{ needs.plan.outputs.selected }}"}, "run": "printf '%s' \"$RESULTS\" | jq -e --argjson selected \"$SELECTED\" '. as $jobs | $jobs.plan.result == \"success\" and all($selected[]; $jobs[\"component-\" + .].result == \"success\")'"});
+    // A cancelled plan leaves the output empty; default it so the cancelled
+    // result, not a jq parse error, is what fails qualification.
+    let mut require = json!({"name": "Require every selected component", "env": {"RESULTS": "${{ toJSON(needs) }}", "SELECTED": "${{ needs.plan.outputs.selected || '[]' }}"}, "run": "printf '%s' \"$RESULTS\" | jq -e --argjson selected \"$SELECTED\" '. as $jobs | $jobs.plan.result == \"success\" and all($selected[]; $jobs[\"component-\" + .].result == \"success\")'"});
     if graph.components.values().any(|c| c.job_id() != c.id) {
         let owners: serde_json::Map<_, _> = graph
             .components

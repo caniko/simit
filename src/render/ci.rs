@@ -1057,7 +1057,9 @@ pub(crate) fn nix_flake_ci_file_with_events(
     } else {
         push_platform_concurrency(&mut workflow, platform);
     }
-    workflow.push_str("jobs:\n  flake-check:\n");
+    workflow.push_str("jobs:\n");
+    workflow.push_str("  flake-check:\n");
+    push_docs_gate_keys(&mut workflow, platform, &[]);
     if system_runners.is_empty() {
         workflow.push_str("    runs-on: ");
         workflow.push_str(&runs_on(runner));
@@ -1124,6 +1126,16 @@ pub(crate) fn nix_flake_ci_file_with_events(
             workflow.push('\n');
         }
     }
+    push_docs_gate_job(
+        &mut workflow,
+        platform,
+        if system_runners.is_empty() {
+            github_action_version(Some(runner), "v7.0.1", "v4.3.1")
+        } else {
+            github_matrix_action_version(system_runners, "v7.0.1", "v4.3.1")
+        },
+        None,
+    );
     Ok(GeneratedFile {
         relative_path: PathBuf::from(platform.workflow_dir()).join("ci.yaml"),
         content: workflow,
@@ -1222,9 +1234,9 @@ pub fn github_prebuild_file_with_policy(
         "${{ github.event_name == 'push' || github.event_name == 'pull_request' }}"
     });
     workflow.push_str("\n\n");
-    workflow.push_str(
-        "jobs:\n  build:\n    strategy:\n      fail-fast: false\n      matrix:\n        include:\n",
-    );
+    workflow.push_str("jobs:\n  build:\n");
+    push_docs_gate_keys(&mut workflow, Platform::Github, &[]);
+    workflow.push_str("    strategy:\n      fail-fast: false\n      matrix:\n        include:\n");
     for (system, runner) in system_runners {
         workflow.push_str("          - system: ");
         workflow.push_str(system);
@@ -1328,6 +1340,12 @@ pub fn github_prebuild_file_with_policy(
         workflow.push_str("\n        with:\n          name: flake-inputs-${{ matrix.system }}\n          path: attic-paths.txt\n          if-no-files-found: error\n          retention-days: 7\n");
     }
 
+    push_docs_gate_job(
+        &mut workflow,
+        Platform::Github,
+        github_matrix_action_version(system_runners, "v7.0.1", "v4.3.1"),
+        None,
+    );
     Ok(GeneratedFile {
         relative_path: PathBuf::from(".github/workflows/prebuild.yaml"),
         content: workflow,
@@ -1427,7 +1445,9 @@ pub fn nix_build_matrix_file_with_options(
     } else {
         push_platform_concurrency(&mut workflow, platform);
     }
-    workflow.push_str("jobs:\n  build:\n    runs-on: ");
+    workflow.push_str("jobs:\n  build:\n");
+    push_docs_gate_keys(&mut workflow, platform, &[]);
+    workflow.push_str("    runs-on: ");
     if native_runners {
         workflow.push_str("${{ matrix.runner }}\n    name: build (${{ matrix.installable }})");
     } else {
@@ -1544,6 +1564,12 @@ pub fn nix_build_matrix_file_with_options(
         workflow.push_str(&format!("        run: {command} \"$INSTALLABLE\"\n"));
     }
 
+    push_docs_gate_job(
+        &mut workflow,
+        platform,
+        nix_build_action_version(runner, options, "v7.0.1", "v4.3.1"),
+        None,
+    );
     Ok(GeneratedFile {
         relative_path: PathBuf::from(platform.workflow_dir()).join("nix-builds.yaml"),
         content: workflow,
@@ -2500,6 +2526,7 @@ fn python_ci_workflow(
     push_provider_concurrency(&mut workflow, platform);
     workflow.push_str("jobs:\n");
     workflow.push_str("  test:\n");
+    push_docs_gate_keys(&mut workflow, platform, &[]);
     workflow.push_str("    runs-on: ");
     workflow.push_str(&runs_on(runner));
     workflow.push('\n');
@@ -2550,6 +2577,12 @@ fn python_ci_workflow(
     }
 
     trim_trailing_blank_lines(&mut workflow);
+    push_docs_gate_job(
+        &mut workflow,
+        platform,
+        github_action_version(Some(runner), "v7.0.1", "v4.3.1"),
+        None,
+    );
     workflow
 }
 
@@ -2751,6 +2784,7 @@ fn ci_workflow_single_job(
     workflow.push_str("jobs:\n");
     workflow.push_str("  test:\n");
     push_member_job_name(&mut workflow, package, &options, "test");
+    push_docs_gate_keys(&mut workflow, platform, &[]);
     workflow.push_str("    runs-on: ");
     workflow.push_str(&runs_on(&runners.ci));
     workflow.push('\n');
@@ -2849,8 +2883,22 @@ fn ci_workflow_single_job(
     }
 
     push_sccache_stats_step(&mut workflow, platform, runtime);
-    push_required_gate_jobs(&mut workflow, platform, runtime, package, runners, &options);
+    push_required_gate_jobs(
+        &mut workflow,
+        platform,
+        runtime,
+        package,
+        runners,
+        &options,
+        true,
+    );
     trim_trailing_blank_lines(&mut workflow);
+    push_docs_gate_job(
+        &mut workflow,
+        platform,
+        github_action_version(Some(&runners.ci), "v7.0.1", "v4.3.1"),
+        options.package_scoped.then_some(package.name.as_str()),
+    );
     workflow
 }
 
@@ -3103,7 +3151,9 @@ fn ci_workflow_multi_job(
         workflow.push_str(&format!("  {}:\n", job.name));
         push_member_job_name(&mut workflow, package, &options, &job.name);
         if idx > 0 {
-            workflow.push_str(&format!("    needs: [{first_job_name}]\n"));
+            push_docs_gate_keys(&mut workflow, platform, &[&first_job_name]);
+        } else {
+            push_docs_gate_keys(&mut workflow, platform, &[]);
         }
         workflow.push_str("    runs-on: ");
         workflow.push_str(&runs_on(job.runner));
@@ -3143,8 +3193,22 @@ fn ci_workflow_multi_job(
         push_sccache_stats_step(&mut workflow, platform, runtime);
     }
 
-    push_required_gate_jobs(&mut workflow, platform, runtime, package, runners, &options);
+    push_required_gate_jobs(
+        &mut workflow,
+        platform,
+        runtime,
+        package,
+        runners,
+        &options,
+        true,
+    );
     trim_trailing_blank_lines(&mut workflow);
+    push_docs_gate_job(
+        &mut workflow,
+        platform,
+        github_action_version(Some(&runners.ci), "v7.0.1", "v4.3.1"),
+        options.package_scoped.then_some(package.name.as_str()),
+    );
     workflow
 }
 
@@ -3185,6 +3249,7 @@ fn push_required_gate_jobs(
     package: &Package,
     runners: &ResolvedCiRunners,
     options: &CiOptions,
+    docs_gate: bool,
 ) {
     if !options.repository_checks {
         return;
@@ -3194,6 +3259,9 @@ fn push_required_gate_jobs(
         trim_trailing_blank_lines(workflow);
         workflow.push_str(&format!("\n  {job}:\n"));
         push_member_job_name(workflow, package, options, &job);
+        if docs_gate {
+            push_docs_gate_keys(workflow, platform, &[]);
+        }
         workflow.push_str("    runs-on: ");
         workflow.push_str(&runs_on(&runners.ci));
         workflow.push('\n');
@@ -3275,6 +3343,7 @@ pub fn manual_gates_file(
         package,
         runners,
         &options,
+        false,
     );
     GeneratedFile {
         relative_path: PathBuf::from(Platform::Github.workflow_dir()).join("manual-gates.yaml"),
@@ -3301,13 +3370,20 @@ pub fn target_smokes_file(
     workflow.push_str("    tags-ignore: [\"**\"]\n  pull_request:\n\n");
     push_github_read_permissions(&mut workflow, platform);
     push_github_concurrency(&mut workflow);
-    workflow.push_str("jobs:");
+    workflow.push_str("jobs:\n");
+    let mut first_smoke = true;
     for smoke in smokes {
         let id = sanitize_gate_id(&smoke.id);
         let dir = format!("target-smoke-{id}");
         let target = ResolvedRunner::literal(&smoke.runner)?;
         // Build on the Linux CI runner with the shared Nix setup and caches.
-        workflow.push_str(&format!("\n  build-target-smoke-{id}:\n    runs-on: "));
+        if !first_smoke {
+            workflow.push('\n');
+        }
+        first_smoke = false;
+        workflow.push_str(&format!("  build-target-smoke-{id}:\n"));
+        push_docs_gate_keys(&mut workflow, platform, &[]);
+        workflow.push_str("    runs-on: ");
         workflow.push_str(&runs_on(ci_runner));
         workflow.push_str("\n    timeout-minutes: 60\n");
         push_job_github_read_permissions(&mut workflow, platform);
@@ -3333,9 +3409,10 @@ pub fn target_smokes_file(
         ));
 
         // Run on the target OS against the downloaded output.
-        workflow.push_str(&format!(
-            "\n  target-smoke-{id}:\n    needs: [build-target-smoke-{id}]\n    runs-on: "
-        ));
+        let build_job = format!("build-target-smoke-{id}");
+        workflow.push_str(&format!("\n  target-smoke-{id}:\n"));
+        push_docs_gate_keys(&mut workflow, platform, &[&build_job]);
+        workflow.push_str("    runs-on: ");
         workflow.push_str(&runs_on(&target));
         workflow.push_str(&format!(
             "\n    timeout-minutes: {}\n",
@@ -3386,6 +3463,12 @@ pub fn target_smokes_file(
         push_required_gate_artifacts(&mut workflow, &gate, Some(&target), "", ("", ""));
     }
     trim_trailing_blank_lines(&mut workflow);
+    push_docs_gate_job(
+        &mut workflow,
+        platform,
+        github_action_version(Some(ci_runner), "v7.0.1", "v4.3.1"),
+        None,
+    );
     Ok(GeneratedFile {
         relative_path: PathBuf::from(Platform::Github.workflow_dir()).join("target-smokes.yaml"),
         content: workflow,
@@ -3426,7 +3509,8 @@ pub fn native_tests_file(
     workflow.push_str("    tags-ignore: [\"**\"]\n  pull_request:\n\n");
     push_github_read_permissions(&mut workflow, platform);
     push_github_concurrency(&mut workflow);
-    workflow.push_str("jobs:");
+    workflow.push_str("jobs:\n");
+    let mut first_test = true;
     for test in tests {
         let id = sanitize_gate_id(&test.id);
         let runner = ResolvedRunner::literal(&test.runner)?;
@@ -3435,7 +3519,13 @@ pub fn native_tests_file(
             .as_deref()
             .or(default_toolchain)
             .unwrap_or("stable");
-        workflow.push_str(&format!("\n  native-test-{id}:\n    runs-on: "));
+        if !first_test {
+            workflow.push('\n');
+        }
+        first_test = false;
+        workflow.push_str(&format!("  native-test-{id}:\n"));
+        push_docs_gate_keys(&mut workflow, platform, &[]);
+        workflow.push_str("    runs-on: ");
         workflow.push_str(&runs_on(&runner));
         // Checkout and toolchain installation get 15 minutes on top of `cargo test`,
         // and the setup step its own limit.
@@ -3488,6 +3578,7 @@ pub fn native_tests_file(
         workflow.push_str(&format!("        run: cargo test {}\n", test.args.trim()));
     }
     trim_trailing_blank_lines(&mut workflow);
+    push_docs_gate_job(&mut workflow, platform, "v7.0.1", None);
     Ok(GeneratedFile {
         relative_path: PathBuf::from(Platform::Github.workflow_dir()).join("native-tests.yaml"),
         content: workflow,
@@ -4658,6 +4749,146 @@ fn push_ci_branches(workflow: &mut String, branches: &[String]) {
             workflow.push_str(&format!("      - \"{}\"\n", yaml_double_quote(branch)));
         }
     }
+}
+
+/// Job id that classifies a push/pull-request diff. Required status checks see
+/// an `if:`-skipped job as success, so skipping stays a job-level decision.
+pub(crate) const DOCS_GATE_JOB: &str = "changes";
+
+/// Display name the gate job reports to the check-run inventory.
+pub(crate) const DOCS_GATE_JOB_NAME: &str = "Classify changed paths";
+
+/// Step id that publishes the classification.
+pub(crate) const DOCS_GATE_STEP: &str = "classify";
+
+/// Output expression wiring the classification to every gated job.
+pub(crate) fn docs_gate_output() -> String {
+    format!("${{{{ steps.{DOCS_GATE_STEP}.outputs.code }}}}")
+}
+
+/// Condition carried by every job that must not run for a docs-only change.
+/// `projects_update` proves this exact literal before pushing a candidate.
+pub(crate) fn docs_gate_condition() -> String {
+    format!("${{{{ needs.{DOCS_GATE_JOB}.outputs.code == 'true' }}}}")
+}
+
+/// Emit the cheap gate job. It runs no Nix and adds its own read-only scope.
+/// Package-scoped member workflows prefix the name so check contexts stay unique.
+fn push_docs_gate_job(
+    workflow: &mut String,
+    platform: Platform,
+    checkout_version: &str,
+    member: Option<&str>,
+) {
+    if platform != Platform::Github {
+        return;
+    }
+    workflow.push_str("\n  ");
+    workflow.push_str(DOCS_GATE_JOB);
+    workflow.push_str(":\n    name: ");
+    if let Some(member) = member {
+        workflow.push_str(&format!(
+            "\"{}\"",
+            yaml_double_quote(&format!("{member} / {DOCS_GATE_JOB}"))
+        ));
+    } else {
+        workflow.push_str(DOCS_GATE_JOB_NAME);
+    }
+    workflow.push_str(
+        "\n    runs-on: ubuntu-latest\n    timeout-minutes: 5\n    permissions:\n      contents: read\n    outputs:\n      code: ",
+    );
+    workflow.push_str(&docs_gate_output());
+    workflow.push_str("\n    steps:\n");
+    push_checkout_step_with_version(workflow, platform, checkout_version);
+    // The checkout helper already ends with a blank separator line.
+    while workflow.ends_with('\n') {
+        workflow.pop();
+    }
+    workflow.push_str(
+        "\n        with:\n          fetch-depth: 0\n          persist-credentials: false\n",
+    );
+    workflow.push_str("      - name: ");
+    workflow.push_str(DOCS_GATE_JOB_NAME);
+    workflow.push_str("\n        id: ");
+    workflow.push_str(DOCS_GATE_STEP);
+    workflow.push_str(
+        "\n        shell: bash\n        env:\n          BASE_REVISION: ${{ github.event.pull_request.base.sha || github.event.before }}\n          EVENT_NAME: ${{ github.event_name }}\n        run: |\n",
+    );
+    workflow.push_str(&docs_gate_script("          "));
+}
+
+/// Gate a job on the shared classification, keeping any existing `needs`.
+fn push_docs_gate_keys(workflow: &mut String, platform: Platform, needs: &[&str]) {
+    if platform != Platform::Github {
+        return;
+    }
+    workflow.push_str("    needs: [");
+    workflow.push_str(DOCS_GATE_JOB);
+    for need in needs {
+        workflow.push_str(", ");
+        workflow.push_str(need);
+    }
+    workflow.push_str("]\n    if: ");
+    workflow.push_str(&docs_gate_condition());
+    workflow.push('\n');
+}
+
+/// The classification script as a YAML block scalar body. Paths come from
+/// [`crate::docs_only`], and every failure mode (missing, all-zero or
+/// unreachable base, failed diff) keeps `code=true` so jobs still run.
+pub(crate) fn docs_gate_source() -> String {
+    docs_gate_script("")
+}
+
+/// The shell classifier, one definition shared by every emitted script and by
+/// the unit test that binds it to [`crate::docs_only::is_docs_only_path`].
+fn docs_gate_classifier_lines() -> Vec<String> {
+    let mut lines: Vec<String> = vec![
+        "classify() {".into(),
+        "  case \"$1\" in".into(),
+        "    */*) return 1 ;;".into(),
+    ];
+    for path in crate::docs_only::DOCS_ONLY_EXCLUDED_PATHS {
+        lines.push(format!("    {path}) return 1 ;;"));
+    }
+    lines.push(format!(
+        "    *.{}) return 0 ;;",
+        crate::docs_only::DOCS_ONLY_EXTENSION
+    ));
+    lines.push("    *) return 1 ;;".into());
+    lines.push("  esac".into());
+    lines.push("}".into());
+    lines
+}
+
+fn docs_gate_script(indent: &str) -> String {
+    let mut lines: Vec<String> = vec![
+        "set -euo pipefail".into(),
+        "# Root Markdown nobody builds is documentation.".into(),
+    ];
+    lines.extend(docs_gate_classifier_lines());
+    lines.push("code=true".into());
+    lines.push("if [ \"$EVENT_NAME\" = push ] || [ \"$EVENT_NAME\" = pull_request ]; then".into());
+    lines.push("  # An unreachable or all-zero base has no diff to classify.".into());
+    lines.push(
+        "  if [ -n \"$BASE_REVISION\" ] && [ -n \"${BASE_REVISION//0/}\" ] && git cat-file -e \"$BASE_REVISION^{commit}\" 2>/dev/null; then".into(),
+    );
+    lines.push("    if changed=$(git diff --name-only \"$BASE_REVISION\" HEAD --); then".into());
+    lines.push("      code=false".into());
+    lines.push("      while IFS= read -r path; do".into());
+    lines.push("        [ -z \"$path\" ] || classify \"$path\" || { code=true; break; }".into());
+    lines.push("      done <<< \"$changed\"".into());
+    lines.push("    fi".into());
+    lines.push("  fi".into());
+    lines.push("fi".into());
+    lines.push("printf 'code=%s\\n' \"$code\" >> \"$GITHUB_OUTPUT\"".into());
+    let mut script = String::new();
+    for line in lines {
+        script.push_str(indent);
+        script.push_str(&line);
+        script.push('\n');
+    }
+    script
 }
 
 fn push_github_read_permissions(workflow: &mut String, platform: Platform) {
@@ -6105,4 +6336,46 @@ fn publish_crate_steps(
           done
 "#
     )
+}
+
+#[cfg(test)]
+mod docs_gate_tests {
+    use std::process::Command;
+
+    /// The generated shell classifier and the Rust matcher used by monorepo
+    /// planning must agree; one definition cannot drift from the other.
+    #[test]
+    fn shell_classification_agrees_with_the_docs_only_matcher() {
+        let mut script = super::docs_gate_classifier_lines().join("\n");
+        script.push_str(
+            "\nfor path in \"$@\"; do if classify \"$path\"; then echo \"code $path\"; else echo \"run $path\"; fi; done\n",
+        );
+        let paths = [
+            "VISION.md",
+            "CHANGELOG.md",
+            "README.md",
+            "docs/VISION.md",
+            "crates/demo/README.md",
+            "src/main.rs",
+            "LICENSE",
+            "",
+        ];
+        let output = Command::new("bash")
+            .arg("-c")
+            .arg(&script)
+            .arg("docs-gate")
+            .args(paths)
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "{output:?}");
+        let classified = String::from_utf8(output.stdout).unwrap();
+        for (path, line) in paths.iter().zip(classified.lines()) {
+            let expected = if crate::docs_only::is_docs_only_path(path) {
+                "code"
+            } else {
+                "run"
+            };
+            assert_eq!(line, format!("{expected} {path}"));
+        }
+    }
 }

@@ -482,14 +482,16 @@ fn member_workflows_have_unique_check_names_for_single_split_and_gate_jobs() {
                 workflow["name"].as_str(),
                 Some(format!("CI ({member})").as_str())
             );
+            // Generated GitHub workflows also carry the docs-only gate job.
+            let docs_gate = usize::from(platform == "github");
             let jobs = workflow["jobs"].as_mapping().unwrap();
             assert_eq!(
                 jobs.len(),
                 match (member, split) {
-                    ("a", true) => 4,
-                    ("a", false) => 2,
-                    (_, true) => 3,
-                    (_, false) => 1,
+                    ("a", true) => 4 + docs_gate,
+                    ("a", false) => 2 + docs_gate,
+                    (_, true) => 3 + docs_gate,
+                    (_, false) => 1 + docs_gate,
                 }
             );
             for (id, job) in jobs {

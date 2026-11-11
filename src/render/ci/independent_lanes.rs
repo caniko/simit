@@ -33,6 +33,7 @@ pub(super) fn render(
     for lane in lanes {
         workflow.push_str(&format!("  {lane}:\n"));
         push_member_job_name(&mut workflow, package, &options, lane);
+        push_docs_gate_keys(&mut workflow, platform, &[]);
         workflow.push_str(&format!("    runs-on: {}\n", runs_on(&runners.ci)));
         push_job_env(
             &mut workflow,
@@ -78,7 +79,14 @@ pub(super) fn render(
         package,
         runners,
         &options,
+        true,
     );
     trim_trailing_blank_lines(&mut workflow);
+    push_docs_gate_job(
+        &mut workflow,
+        platform,
+        github_action_version(Some(&runners.ci), "v7.0.1", "v4.3.1"),
+        options.package_scoped.then_some(package.name.as_str()),
+    );
     workflow
 }

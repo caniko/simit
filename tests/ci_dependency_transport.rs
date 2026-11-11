@@ -79,7 +79,10 @@ fn dependency_transport_is_same_run_and_runtime_jobs_still_execute_fresh() {
         &fs::read_to_string(temp.path().join(".github/workflows/nix-builds.yaml")).unwrap(),
     )
     .unwrap();
-    assert_eq!(value["jobs"]["build"]["needs"][0], "dependencies");
+    assert_eq!(
+        value["jobs"]["build"]["needs"],
+        serde_yaml::to_value(["changes", "dependencies"]).unwrap()
+    );
     for job in ["dependencies", "build"] {
         assert_eq!(
             value["jobs"][job]["env"]["NIX_CONFIG"],
