@@ -3009,11 +3009,17 @@ fn grouped_components_share_one_job_with_member_guards_and_ci_cache() {
     assert!(output.status.success(), "{output:?}");
     let value: Value = serde_json::from_slice(&output.stdout).unwrap();
     assert!(value["full"].as_bool().unwrap());
-    // A cancelled plan leaves the selection empty; qualification must then fail
-    // on the plan result instead of crashing jq's --argjson.
+    // A plan that reports nothing leaves the selection empty; qualification must
+    // then fail on the plan result instead of crashing jq's --argjson.
     assert_eq!(
         qualified["env"]["SELECTED"].as_str(),
         Some("${{ needs.plan.outputs.selected || '[]' }}")
+    );
+    // A superseded run is cancelled as a whole, so its aggregate is skipped
+    // instead of reporting that cancellation as a qualification failure.
+    assert_eq!(
+        yaml["jobs"]["qualified"]["if"].as_str(),
+        Some("${{ always() && !cancelled() }}")
     );
     write(
         temp.path(),

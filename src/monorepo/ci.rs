@@ -339,8 +339,8 @@ pub(crate) fn files(
         job["steps"] = json!(steps);
         jobs.insert(id, job);
     }
-    // A cancelled plan leaves the output empty; default it so the cancelled
-    // result, not a jq parse error, is what fails qualification.
+    // A plan that did not report leaves the output empty; default it so the
+    // failed plan result, not a jq parse error, is what fails qualification.
     let mut require = json!({"name": "Require every selected component", "env": {"RESULTS": "${{ toJSON(needs) }}", "SELECTED": "${{ needs.plan.outputs.selected || '[]' }}"}, "run": "printf '%s' \"$RESULTS\" | jq -e --argjson selected \"$SELECTED\" '. as $jobs | $jobs.plan.result == \"success\" and all($selected[]; $jobs[\"component-\" + .].result == \"success\")'"});
     if graph.components.values().any(|c| c.job_id() != c.id) {
         let owners: serde_json::Map<_, _> = graph
@@ -353,10 +353,12 @@ pub(crate) fn files(
             "printf '%s' \"$RESULTS\" | jq -e --argjson selected \"$SELECTED\" --argjson owners \"$OWNERS\" '. as $jobs | $jobs.plan.result == \"success\" and all($selected[]; $jobs[\"component-\" + $owners[.]].result == \"success\")'"
         );
     }
+    // A superseded run is cancelled as a whole; its aggregate must not report
+    // that cancellation as a qualification failure on the same commit.
     jobs.insert(
         "qualified".into(),
         json!({
-            "needs": needs, "if": "${{ always() }}", "runs-on": runner, "timeout-minutes": 5,
+            "needs": needs, "if": "${{ always() && !cancelled() }}", "runs-on": runner, "timeout-minutes": 5,
             "steps": [require]
         }),
     );
