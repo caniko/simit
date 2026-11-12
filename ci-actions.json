@@ -128,11 +128,6 @@
     },
     {
       "name": "https://github.com/cachix/install-nix-action",
-      "version": "v31",
-      "sha": "630ae543ea3a38a9a4166f03376c02c50f408342"
-    },
-    {
-      "name": "https://github.com/cachix/install-nix-action",
       "version": "v31.11.1",
       "sha": "13d8dd58da0234aa297dedd986986ccb8e7f3e24"
     },

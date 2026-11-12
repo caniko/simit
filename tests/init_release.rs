@@ -163,7 +163,7 @@ fn bootstraps_release_workflow_for_enabled_channels() {
     );
     assert!(workflow.contains("git checkout --detach \"$validated_sha\""));
     assert!(workflow.contains(
-        "uses: https://github.com/cachix/install-nix-action@630ae543ea3a38a9a4166f03376c02c50f408342 # v31"
+        "uses: https://github.com/cachix/install-nix-action@13d8dd58da0234aa297dedd986986ccb8e7f3e24 # v31.11.1"
     ));
 
     let stdout = String::from_utf8(output.stdout).unwrap();

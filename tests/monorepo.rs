@@ -2554,7 +2554,7 @@ fn qualification_actions_follow_hosted_and_mixed_private_capacity() {
             assert_eq!(actions[0], expected.split(" #").next().unwrap());
             let expected = simit::render::ci::github_action_ref(
                 "cachix/install-nix-action",
-                if hosted { "v31.11.1" } else { "v31" },
+                simit::render::ci::INSTALL_NIX_ACTION_VERSION,
             );
             assert_eq!(actions[1], expected.split(" #").next().unwrap());
         }
