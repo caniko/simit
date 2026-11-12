@@ -84,16 +84,22 @@ def release_sha(event_sha, prs, commits):
     return sha if ancestor.returncode == 0 else event_sha
 
 
+GATE_STEP = "Require the preceding release-plz event to succeed"
+SELECTION_STEP = "Resolve release-plz immutable revision"
+
+
 def predecessor_state(repo, run):
-    """Classify a completed predecessor from its own job outcomes.
+    """Classify a completed predecessor from its own job and step outcomes.
 
     `published` completed the publication stage, `empty` selected no release
-    and published nothing, and `unresolved` may have lost a selected release or
-    left a half-finished publication behind.
+    and published nothing, `unexamined` never examined its push range because
+    it failed at the predecessor gate, and `unresolved` may have lost a
+    selected release or left a half-finished publication behind.
     """
     if run["conclusion"] == "skipped":
-        # GitHub reports `skipped` only when no job ran.
-        return "empty"
+        # GitHub reports `skipped` only when no job ran, so no selection looked
+        # at this push range.
+        return "unexamined"
     jobs = api(f"repos/{repo}/actions/runs/{int(run['id'])}/jobs?filter=latest&per_page=100", "jobs")
     conclusions = {job["name"]: job["conclusion"] for job in jobs}
     publish = conclusions.get("publish")
@@ -106,12 +112,16 @@ def predecessor_state(repo, run):
         # Failed, cancelled or timed out inside publication: crates or tags
         # may be half-published.
         return "unresolved"
-    # `qualify` runs only for a non-empty selection, so a completed selection
-    # followed by a skipped qualification means this event had nothing to
-    # publish. Anything else may have selected a release that the successor's
-    # push range never reselects.
-    if conclusions.get("select") == "success" and conclusions.get("qualify") == "skipped":
-        return "empty"
+    if conclusions.get("select") == "success":
+        # `qualify` runs only for a non-empty selection, so a skipped
+        # qualification means this event had nothing to publish.
+        return "empty" if conclusions.get("qualify") == "skipped" else "unresolved"
+    steps = {step["name"]: step["conclusion"] for job in jobs if job["name"] == "select"
+             for step in job.get("steps") or []}
+    if steps.get(GATE_STEP) == "failure" and steps.get(SELECTION_STEP) != "success":
+        # The run failed at the predecessor gate before selection started, so
+        # its push range is still unexamined and has to be selected here.
+        return "unexamined"
     return "unresolved"
 
 
@@ -129,7 +139,11 @@ def prior_run():
     predecessors = sorted((run for run in runs if run["run_number"] < current["run_number"]),
                           key=lambda run: run["run_number"], reverse=True)
     deadline = time.monotonic() + 350 * 60
-    for previous in predecessors:
+    # Range that still needs selection because a predecessor failed at the gate
+    # before looking at it. `select` starts from this revision instead of the
+    # push's own `before`.
+    base = ""
+    for index, previous in enumerate(predecessors):
         if previous["status"] != "completed":
             jobs = api(f"repos/{repo}/actions/runs/{int(previous['id'])}/jobs?filter=latest&per_page=100", "jobs")
             if not any(job["name"] == "select" and job["status"] == "completed"
@@ -142,22 +156,33 @@ def prior_run():
                 raise RuntimeError(f"release-plz predecessor run {previous['id']} did not complete within the wait budget")
             time.sleep(15)
             previous = github("GET", f"repos/{repo}/actions/runs/{previous['id']}", {})
-        if previous["conclusion"] == "success":
-            return
         state = predecessor_state(repo, previous)
         if state == "published":
             # Publication completed here; nothing older can still be pending.
-            return
+            break
         if state == "empty":
             # This event published nothing and selected no release, so pass it
             # over and keep looking for an older unresolved publication.
             print(f"release-plz predecessor run {previous['id']} ended as {previous['conclusion']} without a selection or publication")
             continue
+        if state == "unexamined":
+            if index + 1 >= len(predecessors):
+                raise RuntimeError(f"release-plz predecessor run {previous['id']} never examined its push range and no earlier event bounds it; reconcile it before advancing")
+            # The event before this one closes the range that still has to be
+            # selected. Older unexamined events widen it further, so keep
+            # walking and let the oldest one win.
+            base = predecessors[index + 1]["head_sha"]
+            print(f"release-plz predecessor run {previous['id']} never examined its push range; selecting from {base}")
+            continue
         raise RuntimeError(f"release-plz predecessor run {previous['id']} must succeed; retry/reconcile it before advancing")
-    # Filtered Actions queries expose at most 1,000 results. Never mistake a
-    # truncated historical run for initial enrollment when many newer runs exist.
-    if len(runs) >= 1000:
-        raise RuntimeError("release-plz predecessor is outside the provider history window")
+    else:
+        # Filtered Actions queries expose at most 1,000 results. Never mistake a
+        # truncated historical run for initial enrollment when many newer runs exist.
+        if len(runs) >= 1000:
+            raise RuntimeError("release-plz predecessor is outside the provider history window")
+    if base:
+        with open(os.environ["GITHUB_ENV"], "a", encoding="utf-8") as output:
+            output.write(f"SIMIT_RELEASE_BASE={base}\n")
 
 
 def select():
@@ -178,7 +203,20 @@ def select():
     ).returncode:
         raise RuntimeError("release selection requires complete fast-forward push history; reconcile it before advancing")
     repo = os.environ["GITHUB_REPOSITORY"]
-    revisions = git("rev-list", "--reverse", f"{before}..{event_sha}" if before != "0" * 40 else event_sha).splitlines()
+    start = before
+    base = os.environ.get("SIMIT_RELEASE_BASE", "")
+    if base and base != before:
+        # A predecessor that failed at the gate never examined its push range.
+        # Select from the last event that did, so a release merge in the gap is
+        # qualified and published now instead of being silently dropped.
+        if (not re.fullmatch(r"[0-9a-f]{40}", base) or base == "0" * 40
+            or before == "0" * 40 or subprocess.run(
+                ["git", "merge-base", "--is-ancestor", base, before],
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            ).returncode):
+            raise RuntimeError("release selection requires a predecessor base inside the push history")
+        start = base
+    revisions = git("rev-list", "--reverse", f"{start}..{event_sha}" if start != "0" * 40 else event_sha).splitlines()
     releases = {}
     for revision in revisions:
         for pr in api(f"repos/{repo}/commits/{revision}/pulls?per_page=100"):
@@ -198,6 +236,9 @@ def select():
         raise RuntimeError("release-plz revision changed after qualification")
     with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as output:
         output.write(f"release_sha={sha}\n")
+        # The publish job rechecks this selection; hand it the extended base so
+        # it recomputes the same revision instead of the bare push range.
+        output.write(f"release_base={'' if start == before else start}\n")
 
 
 def cargo():

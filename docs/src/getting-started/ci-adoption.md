@@ -295,22 +295,29 @@ Before selecting, the gate walks the default-branch history newest first and
 reads each predecessor's job outcomes; publication is the only irreversible step.
 
 - A predecessor whose `publish` job succeeded ends the walk: nothing older can
-  still be pending.
+  still be pending. An overall-successful run that skipped publication is not a
+  stopping point; it is classified like any other.
 - A predecessor whose `publish` failed, was canceled or timed out, or whose jobs
   cannot be identified, blocks until it is retried or reconciled, because crates
   or tags may be half-published.
-- A predecessor that selected no release (a completed `select` with no
-  `qualify` job to run) is passed over and the walk continues, so one event's
-  delivery failure cannot hide an older unresolved publication.
 - A predecessor that selected a release but never published it — typically a
-  failed `qualify` after a release-version bump merged, or a failed `select`
-  whose push range cannot be shown to hold no release merge — blocks. The
-  successor's selection only covers its own push range, so advancing would
-  silently drop that version.
+  failed `qualify` after a release-version bump merged — blocks. The successor's
+  selection only covers its own push range, so advancing would silently drop
+  that version.
+- A predecessor that selected no release and published nothing is passed over,
+  and the walk continues, so one event's delivery failure cannot hide an older
+  unresolved publication.
+- A predecessor that failed at the predecessor gate (`Require the preceding
+release-plz event to succeed` failed, `Resolve release-plz immutable revision`
+  never ran) never examined its push range. The successor extends its own
+  selection back to the last event that did complete a selection, and the
+  publish recheck receives the same base, so a release merge in that gap is
+  qualified and published now. A run whose `skipped` conclusion means no job ran
+  is treated the same way. If no earlier event bounds that range, the gate fails
+  closed instead of advancing.
 
 A half-delivered release PR is resumed or refused by the successor's signed-head
-guard. An entire-run `skipped` event ran no job and is passed over. Incomplete
-provider history fails closed. Actionlint 1.7.12 does not yet support `queue`;
+guard. Incomplete provider history fails closed. Actionlint 1.7.12 does not yet support `queue`;
 Simit's Nix development/test environments use `nix/actionlint-queue.patch` to
 validate `single|max` and reject `max` with literal `cancel-in-progress: true`,
 without suppressing any other lint checks. Downstream lint environments need
