@@ -279,9 +279,7 @@ Superseded events never create or update a PR, including on retry. A current-sou
 successor may replace an interrupted older signed update only when its exact
 prior-body binding still matches and its single source parent is ancestral to the
 current event; it delivers newly admitted current-source data, not the stale tree.
-Failed publication also blocks the next PR update until it is reconciled; a
-failed qualification or PR delivery is superseded by the next default-branch
-event.
+Failed publication also blocks the next PR update until it is reconciled.
 
 Each immutable push keeps a separate run with no in-progress cancellation. Its
 selection job uses GitHub's native `queue: max` admission group: waiting behind
@@ -291,15 +289,28 @@ through the read-only Actions API. A predecessor must have already completed its
 own selection, so the budget excludes that predecessor's admission wait.
 [GitHub queues up to 100 pending jobs](https://docs.github.com/en/actions/how-tos/write-workflows/choose-when-workflows-run/control-workflow-concurrency#example-queueing-multiple-pending-runs);
 overflow is canceled, and FIFO follows queue arrival, not event/run-number order.
-Out-of-order admission fails rather than deadlocking the occupied slot. A
-predecessor that never started publication — a failed, canceled or skipped
-`select`, `qualify` or PR delivery — does not block later events: selection and
-qualification are read-only, and a half-delivered release PR is resumed or
-refused by the successor's own signed-head guard. The successor prints the
-predecessor it skipped. A predecessor whose `publish` job failed, was canceled
-or timed out must be retried or reconciled in run-number order first, since
-crates or tags may be half-published. An unrecognizable predecessor job set and
-incomplete provider history both fail closed. Actionlint 1.7.12 does not yet support `queue`;
+Out-of-order admission fails rather than deadlocking the occupied slot.
+
+Before selecting, the gate walks the default-branch history newest first and
+reads each predecessor's job outcomes; publication is the only irreversible step.
+
+- A predecessor whose `publish` job succeeded ends the walk: nothing older can
+  still be pending.
+- A predecessor whose `publish` failed, was canceled or timed out, or whose jobs
+  cannot be identified, blocks until it is retried or reconciled, because crates
+  or tags may be half-published.
+- A predecessor that selected no release (a completed `select` with no
+  `qualify` job to run) is passed over and the walk continues, so one event's
+  delivery failure cannot hide an older unresolved publication.
+- A predecessor that selected a release but never published it — typically a
+  failed `qualify` after a release-version bump merged, or a failed `select`
+  whose push range cannot be shown to hold no release merge — blocks. The
+  successor's selection only covers its own push range, so advancing would
+  silently drop that version.
+
+A half-delivered release PR is resumed or refused by the successor's signed-head
+guard. An entire-run `skipped` event ran no job and is passed over. Incomplete
+provider history fails closed. Actionlint 1.7.12 does not yet support `queue`;
 Simit's Nix development/test environments use `nix/actionlint-queue.patch` to
 validate `single|max` and reject `max` with literal `cancel-in-progress: true`,
 without suppressing any other lint checks. Downstream lint environments need

@@ -8,13 +8,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 - Fixed: a release-plz predecessor that ended before publication no longer
-  wedges every later default-branch event. `select`, `qualify` and PR delivery
-  publish nothing, so their failure, cancellation or skip is reported and
-  skipped instead of blocking run-number successors; a predecessor whose
-  `publish` job failed, was canceled or timed out still requires
-  reconciliation before the next publication, and an unrecognizable
-  predecessor job set still fails closed. Regenerate `.simit/release-plz.py`
-  (and the `release-plz.yaml` it runs from) to pick this up.
+  wedges every later default-branch event. The gate now walks the history
+  newest first and reads each predecessor's job outcomes: a completed
+  publication ends the walk; a failed, canceled or timed-out publication, an
+  unrecognizable job set, a failed selection and a selected release whose
+  qualification failed all still block, because crates, tags or an unpublished
+  version may be pending; only an event that selected no release is passed
+  over. Regenerate `.simit/release-plz.py` (and the `release-plz.yaml` it runs
+  from) to pick this up.
 
 - Fixed: GitHub crates.io releases run each `[ci].required_gates` entry once
   per plan, in the first trusted `verify-<crate>` job, instead of repeating the

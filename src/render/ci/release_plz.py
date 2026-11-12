@@ -84,13 +84,35 @@ def release_sha(event_sha, prs, commits):
     return sha if ancestor.returncode == 0 else event_sha
 
 
-def publication_started(repo, run):
+def predecessor_state(repo, run):
+    """Classify a completed predecessor from its own job outcomes.
+
+    `published` completed the publication stage, `empty` selected no release
+    and published nothing, and `unresolved` may have lost a selected release or
+    left a half-finished publication behind.
+    """
+    if run["conclusion"] == "skipped":
+        # GitHub reports `skipped` only when no job ran.
+        return "empty"
     jobs = api(f"repos/{repo}/actions/runs/{int(run['id'])}/jobs?filter=latest&per_page=100", "jobs")
-    if not any(job["name"] == "publish" for job in jobs):
+    conclusions = {job["name"]: job["conclusion"] for job in jobs}
+    publish = conclusions.get("publish")
+    if publish is None:
         # An unrecognizable predecessor cannot prove publication never started.
-        return True
-    return any(job["name"] == "publish" and job["conclusion"] not in ("success", "skipped")
-               for job in jobs)
+        return "unresolved"
+    if publish == "success":
+        return "published"
+    if publish != "skipped":
+        # Failed, cancelled or timed out inside publication: crates or tags
+        # may be half-published.
+        return "unresolved"
+    # `qualify` runs only for a non-empty selection, so a completed selection
+    # followed by a skipped qualification means this event had nothing to
+    # publish. Anything else may have selected a release that the successor's
+    # push range never reselects.
+    if conclusions.get("select") == "success" and conclusions.get("qualify") == "skipped":
+        return "empty"
+    return "unresolved"
 
 
 def prior_run():
@@ -101,37 +123,41 @@ def prior_run():
     runs = api(f"repos/{repo}/actions/workflows/{int(current['workflow_id'])}/runs?event=push&branch={branch}&per_page=100", "workflow_runs")
     if current["id"] != run_id or not any(run["id"] == run_id for run in runs):
         raise RuntimeError("release-plz workflow-run history is incomplete")
-    previous = max((run for run in runs if run["run_number"] < current["run_number"]),
-                   key=lambda run: run["run_number"], default=None)
+    # Newest first. An event that ended before publishing may be followed by
+    # further events that also published nothing, and the publication they
+    # skipped can still be pending further back.
+    predecessors = sorted((run for run in runs if run["run_number"] < current["run_number"]),
+                          key=lambda run: run["run_number"], reverse=True)
+    deadline = time.monotonic() + 350 * 60
+    for previous in predecessors:
+        if previous["status"] != "completed":
+            jobs = api(f"repos/{repo}/actions/runs/{int(previous['id'])}/jobs?filter=latest&per_page=100", "jobs")
+            if not any(job["name"] == "select" and job["status"] == "completed"
+                       and job["conclusion"] == "success" for job in jobs):
+                # The queued select job owns the admission slot. Waiting for a
+                # predecessor that still needs that slot would deadlock the queue.
+                raise RuntimeError(f"release-plz predecessor run {previous['id']} has not completed admission; retry in run order")
+        while previous["status"] != "completed":
+            if time.monotonic() >= deadline:
+                raise RuntimeError(f"release-plz predecessor run {previous['id']} did not complete within the wait budget")
+            time.sleep(15)
+            previous = github("GET", f"repos/{repo}/actions/runs/{previous['id']}", {})
+        if previous["conclusion"] == "success":
+            return
+        state = predecessor_state(repo, previous)
+        if state == "published":
+            # Publication completed here; nothing older can still be pending.
+            return
+        if state == "empty":
+            # This event published nothing and selected no release, so pass it
+            # over and keep looking for an older unresolved publication.
+            print(f"release-plz predecessor run {previous['id']} ended as {previous['conclusion']} without a selection or publication")
+            continue
+        raise RuntimeError(f"release-plz predecessor run {previous['id']} must succeed; retry/reconcile it before advancing")
     # Filtered Actions queries expose at most 1,000 results. Never mistake a
     # truncated historical run for initial enrollment when many newer runs exist.
-    if previous is None and len(runs) >= 1000:
+    if len(runs) >= 1000:
         raise RuntimeError("release-plz predecessor is outside the provider history window")
-    if previous and previous["status"] != "completed":
-        jobs = api(f"repos/{repo}/actions/runs/{int(previous['id'])}/jobs?filter=latest&per_page=100", "jobs")
-        if not any(job["name"] == "select" and job["status"] == "completed"
-                   and job["conclusion"] == "success" for job in jobs):
-            # The queued select job owns the admission slot. Waiting for a
-            # predecessor that still needs that slot would deadlock the queue.
-            raise RuntimeError(f"release-plz predecessor run {previous['id']} has not completed admission; retry in run order")
-    deadline = time.monotonic() + 350 * 60
-    while previous:
-        if previous["status"] == "completed":
-            if previous["conclusion"] == "success":
-                break
-            if publication_started(repo, previous):
-                raise RuntimeError(f"release-plz predecessor run {previous['id']} must succeed; retry/reconcile it before advancing")
-            # Nothing outside this run was published: selection and
-            # qualification are read-only, and a half-delivered release PR is
-            # resumed or refused by the successor's own signed-head guard.
-            # Advancing past their failure is what keeps one bad event from
-            # blocking every later default-branch push.
-            print(f"release-plz predecessor run {previous['id']} ended as {previous['conclusion']} before publication")
-            break
-        if time.monotonic() >= deadline:
-            raise RuntimeError(f"release-plz predecessor run {previous['id']} did not complete within the wait budget")
-        time.sleep(15)
-        previous = github("GET", f"repos/{repo}/actions/runs/{previous['id']}", {})
 
 
 def select():

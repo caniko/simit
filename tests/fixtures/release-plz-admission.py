@@ -25,19 +25,62 @@ os.environ.update({"GITHUB_REPOSITORY": "owner/repo", "GITHUB_REF_NAME": "trunk"
 current_run = {"id": 20, "workflow_id": 9, "run_number": 5}
 predecessor = {"id": 19, "run_number": 4, "status": "completed", "conclusion": "success"}
 newer = {"id": 21, "run_number": 6, "status": "queued", "conclusion": None}
+
+
+def job(name, conclusion):
+    return {"name": name, "status": "completed", "conclusion": conclusion}
+
+
+predecessor_jobs = [job("select", "success"), job("qualify", "skipped"), job("publish", "skipped")]
+jobs_by_run = {19: predecessor_jobs}
+runs = [newer, current_run, predecessor]
 original_api, original_github = admission.api, admission.github
 original_sleep, original_monotonic = admission.time.sleep, admission.time.monotonic
-runs = [newer, current_run, predecessor]
-predecessor_jobs = [{"name": "select", "status": "completed", "conclusion": "success"}]
-publish_job = {"name": "publish", "status": "completed", "conclusion": "skipped"}
-predecessor_jobs.append(publish_job)
 admission.github = lambda method, path, payload: current_run if path.endswith("/20") else predecessor
-admission.api = lambda path, key=None: predecessor_jobs if key == "jobs" else runs
-# Selection, qualification and PR delivery publish nothing: their failure must
-# not block every later default-branch event forever.
-for conclusion in ["failure", "cancelled", "skipped", "timed_out"]:
+
+
+def api(path, key=None):
+    # Every run carries its own job list; walking predecessors needs both.
+    return runs if key != "jobs" else jobs_by_run[int(path.split("/runs/")[1].split("/")[0])]
+
+
+admission.api = api
+publish_job = predecessor_jobs[2]
+qualify_job = predecessor_jobs[1]
+select_job = predecessor_jobs[0]
+
+
+def scenario(*older):
+    global runs
+    runs = [newer, current_run, predecessor, *older]
+
+
+# An event that selected no release and published nothing must not block every
+# later default-branch event forever.
+for conclusion in ["failure", "cancelled", "timed_out", "skipped"]:
     predecessor.update(status="completed", conclusion=conclusion)
     admission.prior_run()
+# A selection that failed cannot prove its push range held no release merge, so
+# the missed release could no longer be reselected: keep failing closed.
+select_job.update(conclusion="failure")
+predecessor.update(status="completed", conclusion="failure")
+try:
+    admission.prior_run()
+    raise AssertionError("advanced past a predecessor whose selection failed")
+except RuntimeError as error:
+    assert "predecessor run 19" in str(error)
+select_job.update(conclusion="success")
+# A release was selected and its qualification failed: advancing would drop the
+# version, because the successor only selects its own push range.
+for conclusion in ["failure", "cancelled", "timed_out"]:
+    predecessor.update(status="completed", conclusion=conclusion)
+    qualify_job.update(conclusion=conclusion)
+    try:
+        admission.prior_run()
+        raise AssertionError(f"advanced past a selected release whose qualification ended as {conclusion}")
+    except RuntimeError as error:
+        assert "predecessor run 19" in str(error)
+qualify_job.update(conclusion="skipped")
 # An interrupted publication can leave crates or tags behind; reconcile first.
 for conclusion in ["failure", "cancelled", "timed_out"]:
     predecessor.update(status="completed", conclusion=conclusion)
@@ -59,6 +102,29 @@ try:
 except RuntimeError:
     pass
 predecessor_jobs.append(publish_job)
+publish_job.update(conclusion="skipped")
+# An older unresolved publication is not hidden by newer events that skipped
+# publication: walk back until a publication succeeded or one is pending.
+failed_publication = {"id": 17, "run_number": 3, "status": "completed", "conclusion": "failure"}
+jobs_by_run[17] = [job("select", "success"), job("qualify", "success"), job("publish", "failure")]
+scenario(failed_publication)
+predecessor.update(status="completed", conclusion="failure")
+try:
+    admission.prior_run()
+    raise AssertionError("advanced past a publication that failed two events back")
+except RuntimeError as error:
+    assert "predecessor run 17" in str(error)
+# A completed publication further back ends the walk: nothing older can be
+# pending behind it.
+jobs_by_run[17][2].update(conclusion="success")
+admission.prior_run()
+# With neither a publication nor a selection anywhere in the history, every
+# event is passed over and the successor advances.
+jobs_by_run[17][2].update(conclusion="skipped")
+jobs_by_run[17][1].update(conclusion="skipped")
+qualify_job.update(conclusion="skipped")
+admission.prior_run()
+scenario()
 predecessor.update(status="completed", conclusion="success")
 for status in ["queued", "in_progress", "waiting"]:
     predecessor.update(status=status, conclusion=None)
