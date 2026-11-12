@@ -1,16 +1,31 @@
 [site]
 title = "simit"
-description = "A semver-aware commit helper for Rust projects that bumps versions, updates locks, commits changes, and creates release tags."
+description = "One command bumps the package version, updates Cargo.lock, commits only the files it touched and creates the release tag."
 base_url = "/"
-footer_note = "Generated from repository metadata by the plinth-project FOSS sweep."
 
 [[nav]]
 label = "Overview"
 href = "#overview"
 
 [[nav]]
+label = "Install"
+href = "#install"
+
+[[nav]]
+label = "Documentation"
+href = "/docs/"
+
+[[nav]]
 label = "Source"
 href = "https://github.com/caniko/simit"
+
+[[footer_links]]
+label = "Documentation"
+href = "/docs/"
+
+[[footer_links]]
+label = "Releases"
+href = "https://github.com/caniko/simit/releases"
 
 [[footer_links]]
 label = "Source"
@@ -19,27 +34,71 @@ href = "https://github.com/caniko/simit"
 [[pages]]
 slug = "index"
 title = "simit"
-description = "A semver-aware commit helper for Rust projects that bumps versions, updates locks, commits changes, and creates release tags."
+description = "One command bumps the package version, updates Cargo.lock, commits only the files it touched and creates the release tag."
 
 [[pages.sections]]
 type = "hero"
-title = "simit"
-tagline = "Semver-aware release commits for Rust projects"
-subtitle = "Bump versions, update locks, commit changes, and create release tags from one command."
+title = "Release commits without the ritual"
+tagline = "Version, lock, commit and tag in one step."
+subtitle = "One command bumps the package version, updates Cargo.lock, commits only the files it touched and creates the release tag."
 
 [[pages.sections.ctas]]
 label = "View source"
 href = "https://github.com/caniko/simit"
 primary = true
 
+[[pages.sections.ctas]]
+label = "Documentation"
+href = "/docs/"
+
 [[pages.sections]]
 type = "feature_grid"
 id = "overview"
 
 [[pages.sections.features]]
-title = "Rust"
-description = "Project technology detected from repository manifests."
+title = "One step from version to tag"
+description = "simit commit patch bumps the selected package, updates Cargo.lock when there is one, stages only the version files it changed and creates a signed tag whose name is the new version and whose message is Release followed by it."
 
 [[pages.sections.features]]
-title = "Nix"
-description = "Project technology detected from repository manifests."
+title = "Workspaces and pre-releases"
+description = "Pick one crate with --package or every crate with --workspace, cut a candidate with --pre rc.1, skip the tag with --no-tag, or rehearse the whole commit with --dry-run before the worktree is touched."
+
+[[pages.sections.features]]
+title = "A release gate that runs first"
+description = "simit release runs cargo test and clippy with warnings denied, promotes CHANGELOG.md out of Unreleased, then commits and tags locally. It does not push, so publication stays a separate decision."
+
+[[pages.sections.features]]
+title = "Test runs with isolated Git state"
+description = "simit test runs a project's test command with its arguments and exit status intact. Adding --git-fixtures supplies a disposable TMPDIR and a temporary Git config that disables inherited hooks and commit and tag signing only below that root."
+
+[[pages.sections]]
+type = "install"
+id = "install"
+heading = "Install"
+intro = "Install the CLI from crates.io, then run the commands from the project README. A source checkout installs the same binary with cargo install --path ."
+guide_href = "/docs/getting-started/installation.html"
+
+[[pages.sections.primary_routes]]
+label = "Cargo"
+audience = "crates.io, Rust 1.88 or newer"
+href = "/docs/getting-started/installation.html#installation"
+command = "cargo install simit"
+recommended = true
+
+[[pages.sections.secondary_routes]]
+label = "Preview a patch release"
+audience = "Show the commit without changing the worktree"
+href = "/docs/getting-started/quick-start.html#quick-start"
+command = 'simit commit --dry-run patch -m "preview patch release"'
+
+[[pages.sections.secondary_routes]]
+label = "Cut a patch release"
+audience = "Bump, commit and tag"
+href = "/docs/getting-started/quick-start.html#quick-start"
+command = 'simit commit patch -m "fix admission edge case"'
+
+[[pages.sections.secondary_routes]]
+label = "Full local release"
+audience = "Tests, clippy, changelog, commit and tag"
+href = "/docs/getting-started/quick-start.html#quick-start"
+command = 'simit release --no-sign patch -m "release patch"'
