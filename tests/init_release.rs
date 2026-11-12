@@ -357,6 +357,97 @@ fn release_attic_config_quotes_default_server() {
 }
 
 #[test]
+fn release_attic_push_retries_only_the_push_command() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let project = init_package("attic-retry-demo");
+    let config_path = project.path().join("simit.toml");
+    let config = read(&config_path).replace(
+        "[aur]",
+        "[release.attic]\ncache = \"demo\"\nurl = \"https://attic.example\"\ntoken_name = \"attic-retry-demo\"\nresult_links = [\"result\"]\n\n[aur]",
+    );
+    fs::write(config_path, config).unwrap();
+    let status = simit()
+        .current_dir(project.path())
+        .args(["init", "release"])
+        .status()
+        .unwrap();
+    assert!(status.success());
+    let workflow: serde_yaml::Value = serde_yaml::from_str(&read(
+        &project.path().join(".forgejo/workflows/release.yml"),
+    ))
+    .unwrap();
+    let script = workflow["jobs"]
+        .as_mapping()
+        .unwrap()
+        .values()
+        .find_map(|job| {
+            job["steps"].as_sequence()?.iter().find_map(|step| {
+                (step["name"].as_str() == Some("Push Nix closures to Attic"))
+                    .then(|| step["run"].as_str().unwrap().to_owned())
+            })
+        })
+        .expect("release renders the Attic push step");
+
+    // Stubs: `nix` logs every call, and the Attic client fails until the
+    // attempt count reaches `SUCCEED_ON`. `sleep` is stubbed out.
+    let root = project.path();
+    let bin = root.join("stub-bin");
+    let attic = root.join("stub-attic");
+    let tokens = root.join("tokens");
+    fs::create_dir_all(&bin).unwrap();
+    fs::create_dir_all(attic.join("bin")).unwrap();
+    fs::create_dir_all(&tokens).unwrap();
+    fs::write(tokens.join("attic-retry-demo"), "token\n").unwrap();
+    for (name, body) in [
+        (
+            "nix",
+            "#!/bin/sh\necho \"$@\" >> \"$NIX_CALLS\"\ncase \"$1\" in\n  build) echo \"$STUB_ATTIC\" ;;\n  path-info) : ;;\n  *) exit 2 ;;\nesac\n",
+        ),
+        ("sleep", "#!/bin/sh\n"),
+    ] {
+        let path = bin.join(name);
+        fs::write(&path, body).unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    let attic_bin = attic.join("bin/attic");
+    fs::write(
+        &attic_bin,
+        "#!/bin/sh\necho \"$@\" >> \"$ATTIC_CALLS\"\n[ \"$(wc -l < \"$ATTIC_CALLS\")\" -ge \"$SUCCEED_ON\" ]\n",
+    )
+    .unwrap();
+    fs::set_permissions(&attic_bin, fs::Permissions::from_mode(0o755)).unwrap();
+
+    let push = "push --stdin --no-closure --ignore-upstream-cache-filter demo\n";
+    for (succeed_on, success, attempts) in [(2, true, 2), (9, false, 3)] {
+        let attic_calls = root.join(format!("attic-calls-{succeed_on}"));
+        let nix_calls = root.join(format!("nix-calls-{succeed_on}"));
+        let status = Command::new("bash")
+            .args(["-e", "-c", &script])
+            .current_dir(root)
+            .env(
+                "PATH",
+                format!("{}:{}", bin.display(), std::env::var("PATH").unwrap()),
+            )
+            .env("ATTIC_TOKENS_DIR", &tokens)
+            .env("STUB_ATTIC", &attic)
+            .env("ATTIC_CALLS", &attic_calls)
+            .env("NIX_CALLS", &nix_calls)
+            .env("SUCCEED_ON", succeed_on.to_string())
+            .status()
+            .unwrap();
+        assert_eq!(status.success(), success, "{script}");
+        assert_eq!(read(&attic_calls), push.repeat(attempts));
+        // Only `attic push` is retried: the token, path listing and client
+        // build above the loop run once even when every attempt fails.
+        assert_eq!(
+            read(&nix_calls),
+            "path-info -r ./result\nbuild --inputs-from . --no-link --print-out-paths nixpkgs#attic-client\n"
+        );
+    }
+}
+
+#[test]
 fn sole_github_release_target_uses_actions_without_changing_crow_ci() {
     let project = init_package("github-crow-demo");
     let config_path = project.path().join("simit.toml");

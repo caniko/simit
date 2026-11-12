@@ -2097,9 +2097,12 @@ fn push_attic(w: &mut String, attic: &AtticConfig) {
         url = attic.url
     )
     .expect("write");
+    // `attic push` is idempotent and rewrites its manifest per attempt, so a
+    // transient Attic 5xx retries here instead of failing the release job after
+    // the hosted release and its artifacts are already published.
     writeln!(
         w,
-        "          if ! XDG_CONFIG_HOME=\"$attic_config_root\" \"$attic/bin/attic\" push --stdin --no-closure --ignore-upstream-cache-filter {cache} < attic-paths.txt; then\n            echo \"::error::Attic push failed for configured Nix closure cache publishing.\" >&2\n            exit 1\n          fi",
+        "          for attempt in 1 2 3; do\n            XDG_CONFIG_HOME=\"$attic_config_root\" \"$attic/bin/attic\" push --stdin --no-closure --ignore-upstream-cache-filter {cache} < attic-paths.txt && exit 0\n            test \"$attempt\" = 3 || sleep $((attempt * 30))\n          done\n          echo \"::error::Attic push failed for configured Nix closure cache publishing.\" >&2\n          exit 1",
         cache = attic.cache
     )
     .expect("write");

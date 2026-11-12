@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Fixed: the release workflow's `attic push` step retries only the idempotent
+  push command, up to three times 30 s and 60 s apart, instead of failing the
+  whole release job after its artefacts and hosted release already exist. The
+  token check, path listing and Attic client build above the loop still run
+  once. Regenerate `release.yml` where `[release.attic]` is used without a
+  prebuild that publishes Attic.
+
 - Fixed: GitHub crates.io releases run each `[ci].required_gates` entry once
   per plan, in the first trusted `verify-<crate>` job, instead of repeating the
   same candidate checks in every verify job and again in the credential-free
