@@ -118,9 +118,11 @@ def predecessor_state(repo, run):
         return "empty" if conclusions.get("qualify") == "skipped" else "unresolved"
     steps = {step["name"]: step["conclusion"] for job in jobs if job["name"] == "select"
              for step in job.get("steps") or []}
-    if steps.get(GATE_STEP) == "failure" and steps.get(SELECTION_STEP) != "success":
+    if steps.get(GATE_STEP) == "failure" and steps.get(SELECTION_STEP) == "skipped":
         # The run failed at the predecessor gate before selection started, so
-        # its push range is still unexamined and has to be selected here.
+        # its push range is still unexamined and has to be selected here. A
+        # missing, renamed, failed or cancelled selection step proves nothing:
+        # the range may already have been examined or left half-selected.
         return "unexamined"
     return "unresolved"
 

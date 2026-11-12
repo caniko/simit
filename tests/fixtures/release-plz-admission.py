@@ -205,6 +205,22 @@ except RuntimeError as error:
     assert "predecessor run 18" in str(error)
 gate_only_jobs[0]["steps"][0]["conclusion"] = "failure"
 gate_only_jobs[0]["steps"][1]["conclusion"] = "skipped"
+# Only an exactly skipped selection step proves the range was never examined.
+# A missing, renamed, failed or cancelled one could have examined it already.
+for selection in [None, "failure", "cancelled", "success"]:
+    steps = [("Require the preceding release-plz event to succeed", "failure")]
+    if selection is not None:
+        steps.append(("Resolve release-plz immutable revision", selection))
+    jobs_by_run[18] = [job("select", "failure", steps), job("qualify", "skipped"),
+                       job("publish", "skipped")]
+    scenario(gate_only, boundary)
+    try:
+        admission.prior_run()
+        raise AssertionError(f"accepted a {selection} selection step after a gate failure")
+    except RuntimeError as error:
+        assert "predecessor run 18" in str(error)
+    assert written_env() == {}
+jobs_by_run[18] = gate_only_jobs
 scenario()
 predecessor.update(status="completed", conclusion="success")
 # An older unresolved publication is not hidden by newer events that skipped

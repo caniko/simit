@@ -308,13 +308,15 @@ reads each predecessor's job outcomes; publication is the only irreversible step
   and the walk continues, so one event's delivery failure cannot hide an older
   unresolved publication.
 - A predecessor that failed at the predecessor gate (`Require the preceding
-release-plz event to succeed` failed, `Resolve release-plz immutable revision`
-  never ran) never examined its push range. The successor extends its own
-  selection back to the last event that did complete a selection, and the
-  publish recheck receives the same base, so a release merge in that gap is
-  qualified and published now. A run whose `skipped` conclusion means no job ran
-  is treated the same way. If no earlier event bounds that range, the gate fails
-  closed instead of advancing.
+release-plz event to succeed` failed and `Resolve release-plz immutable
+revision` is exactly `skipped`) never examined its push range. The successor
+  extends its own selection back to the last event that did complete a
+  selection, and the publish recheck receives the same base, so a release merge
+  in that gap is qualified and published now. A missing, renamed, failed,
+  cancelled or successful selection step is not proof of an unexamined range and
+  keeps blocking. A run whose `skipped` conclusion means no job ran is treated
+  like an unexamined range. If no earlier event bounds that range, the gate
+  fails closed instead of advancing.
 
 A half-delivered release PR is resumed or refused by the successor's signed-head
 guard. Incomplete provider history fails closed. Actionlint 1.7.12 does not yet support `queue`;
