@@ -1267,13 +1267,14 @@ fn push_install_nix(w: &mut String, platform: Platform, artifacts: &ArtifactsCon
         crate::render::ci::push_nix_netrc_step(w, secret);
     }
     w.push_str("      - uses: ");
+    let version = crate::render::ci::INSTALL_NIX_ACTION_VERSION;
     if platform == Platform::Forgejo {
         w.push_str(&immutable_action_ref(
             crate::render::ci::INSTALL_NIX_ACTION_URL,
-            "v31",
+            version,
         ));
     } else {
-        w.push_str(&github_action_ref("cachix/install-nix-action", "v31"));
+        w.push_str(&github_action_ref("cachix/install-nix-action", version));
     }
     w.push('\n');
     w.push_str("        with:\n          extra_nix_config: |\n");

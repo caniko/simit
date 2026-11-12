@@ -7,7 +7,7 @@ use serde_json::{Value, json};
 use crate::cli::{CiProvider, InitCiCommand, Platform, Runtime, RuntimeChoice};
 use crate::config::{NixCiCacheConfig, ProjectConfig};
 use crate::project::GeneratedFile;
-use crate::render::ci::{GENERATED_WORKFLOW_MARKER, github_action_ref, immutable_action_ref};
+use crate::render::ci::{GENERATED_WORKFLOW_MARKER, github_action_ref};
 
 // GitHub caps both steps and hosted jobs at 360 minutes. Diagnostics are bounded
 // to at most three 20-second subprocesses; reserve two minutes at both boundaries.
@@ -46,11 +46,14 @@ pub(super) fn checkout_submodules(config: &ProjectConfig, workflow: &mut Value) 
     }
 }
 
-pub(super) fn install_nix(node24: bool, cache: Option<&NixCiCacheConfig>) -> Value {
+pub(super) fn install_nix(cache: Option<&NixCiCacheConfig>) -> Value {
     // 2.35.2 contains the lost build-slot wakeup fix (NixOS/nix fba3f6e).
     // The action's default 2.35.1 can abort Worker::run during qualification.
-    let version = if node24 { "v31.11.1" } else { "v31" };
-    let mut step = json!({"uses": immutable_action_ref("https://github.com/cachix/install-nix-action", version).trim_start_matches("https://github.com/").split(" #").next().unwrap(), "with": {"install_url": "https://releases.nixos.org/nix/nix-2.35.2/install"}});
+    let action = github_action_ref(
+        "cachix/install-nix-action",
+        crate::render::ci::INSTALL_NIX_ACTION_VERSION,
+    );
+    let mut step = json!({"uses": action.split(" #").next().unwrap(), "with": {"install_url": "https://releases.nixos.org/nix/nix-2.35.2/install"}});
     // Same pull-only policy as single-project CI; publication never inherits it.
     if let Some(cache) =
         cache.filter(|c| !c.substituters.is_empty() || !c.trusted_public_keys.is_empty())
@@ -179,11 +182,7 @@ pub(crate) fn files(
         trusted_public_keys: artifacts.trusted_public_keys,
     };
     let cache = Some(&cache);
-    let mut plan_steps = vec![
-        checkout(node24),
-        install_nix(node24, cache),
-        input_transport(),
-    ];
+    let mut plan_steps = vec![checkout(node24), install_nix(cache), input_transport()];
     if !evaluated_policy {
         plan_steps.push(drift_check.clone());
     }
@@ -268,7 +267,7 @@ pub(crate) fn files(
         let mut steps = vec![
             gate_budget(),
             checkout(node24),
-            install_nix(node24, cache),
+            install_nix(cache),
             input_transport(),
         ];
         if !component.systems.is_empty() {

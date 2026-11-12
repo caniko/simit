@@ -3,7 +3,7 @@ description: Pinned Nix bootstrap for disposable, secretless hosted runners
 runs:
   using: composite
   steps:
-    - uses: cachix/install-nix-action@630ae543ea3a38a9a4166f03376c02c50f408342 # v31
+    - uses: cachix/install-nix-action@13d8dd58da0234aa297dedd986986ccb8e7f3e24 # v31.11.1
       with:
         install_url: https://releases.nixos.org/nix/nix-2.34.8/install
         extra_nix_config: |
