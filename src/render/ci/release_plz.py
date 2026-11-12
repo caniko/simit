@@ -84,6 +84,15 @@ def release_sha(event_sha, prs, commits):
     return sha if ancestor.returncode == 0 else event_sha
 
 
+def publication_started(repo, run):
+    jobs = api(f"repos/{repo}/actions/runs/{int(run['id'])}/jobs?filter=latest&per_page=100", "jobs")
+    if not any(job["name"] == "publish" for job in jobs):
+        # An unrecognizable predecessor cannot prove publication never started.
+        return True
+    return any(job["name"] == "publish" and job["conclusion"] not in ("success", "skipped")
+               for job in jobs)
+
+
 def prior_run():
     repo = os.environ["GITHUB_REPOSITORY"]
     run_id = int(os.environ["GITHUB_RUN_ID"])
@@ -108,8 +117,16 @@ def prior_run():
     deadline = time.monotonic() + 350 * 60
     while previous:
         if previous["status"] == "completed":
-            if previous["conclusion"] != "success":
+            if previous["conclusion"] == "success":
+                break
+            if publication_started(repo, previous):
                 raise RuntimeError(f"release-plz predecessor run {previous['id']} must succeed; retry/reconcile it before advancing")
+            # Nothing outside this run was published: selection and
+            # qualification are read-only, and a half-delivered release PR is
+            # resumed or refused by the successor's own signed-head guard.
+            # Advancing past their failure is what keeps one bad event from
+            # blocking every later default-branch push.
+            print(f"release-plz predecessor run {previous['id']} ended as {previous['conclusion']} before publication")
             break
         if time.monotonic() >= deadline:
             raise RuntimeError(f"release-plz predecessor run {previous['id']} did not complete within the wait budget")

@@ -279,7 +279,9 @@ Superseded events never create or update a PR, including on retry. A current-sou
 successor may replace an interrupted older signed update only when its exact
 prior-body binding still matches and its single source parent is ancestral to the
 current event; it delivers newly admitted current-source data, not the stale tree.
-Failed release qualification or publication also blocks the next PR update.
+Failed publication also blocks the next PR update until it is reconciled; a
+failed qualification or PR delivery is superseded by the next default-branch
+event.
 
 Each immutable push keeps a separate run with no in-progress cancellation. Its
 selection job uses GitHub's native `queue: max` admission group: waiting behind
@@ -289,10 +291,15 @@ through the read-only Actions API. A predecessor must have already completed its
 own selection, so the budget excludes that predecessor's admission wait.
 [GitHub queues up to 100 pending jobs](https://docs.github.com/en/actions/how-tos/write-workflows/choose-when-workflows-run/control-workflow-concurrency#example-queueing-multiple-pending-runs);
 overflow is canceled, and FIFO follows queue arrival, not event/run-number order.
-Out-of-order admission fails rather than deadlocking the occupied slot. Failed,
-canceled or timed-out predecessors block all later publication and PR preparation;
-retry/reconcile them in run-number order before retrying blocked runs. Incomplete
-provider history also fails closed. Actionlint 1.7.12 does not yet support `queue`;
+Out-of-order admission fails rather than deadlocking the occupied slot. A
+predecessor that never started publication — a failed, canceled or skipped
+`select`, `qualify` or PR delivery — does not block later events: selection and
+qualification are read-only, and a half-delivered release PR is resumed or
+refused by the successor's own signed-head guard. The successor prints the
+predecessor it skipped. A predecessor whose `publish` job failed, was canceled
+or timed out must be retried or reconciled in run-number order first, since
+crates or tags may be half-published. An unrecognizable predecessor job set and
+incomplete provider history both fail closed. Actionlint 1.7.12 does not yet support `queue`;
 Simit's Nix development/test environments use `nix/actionlint-queue.patch` to
 validate `single|max` and reject `max` with literal `cancel-in-progress: true`,
 without suppressing any other lint checks. Downstream lint environments need

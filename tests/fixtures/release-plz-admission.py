@@ -29,15 +29,37 @@ original_api, original_github = admission.api, admission.github
 original_sleep, original_monotonic = admission.time.sleep, admission.time.monotonic
 runs = [newer, current_run, predecessor]
 predecessor_jobs = [{"name": "select", "status": "completed", "conclusion": "success"}]
+publish_job = {"name": "publish", "status": "completed", "conclusion": "skipped"}
+predecessor_jobs.append(publish_job)
 admission.github = lambda method, path, payload: current_run if path.endswith("/20") else predecessor
 admission.api = lambda path, key=None: predecessor_jobs if key == "jobs" else runs
+# Selection, qualification and PR delivery publish nothing: their failure must
+# not block every later default-branch event forever.
 for conclusion in ["failure", "cancelled", "skipped", "timed_out"]:
     predecessor.update(status="completed", conclusion=conclusion)
+    admission.prior_run()
+# An interrupted publication can leave crates or tags behind; reconcile first.
+for conclusion in ["failure", "cancelled", "timed_out"]:
+    predecessor.update(status="completed", conclusion=conclusion)
+    publish_job.update(conclusion=conclusion)
     try:
         admission.prior_run()
-        raise AssertionError(f"advanced past a {conclusion} predecessor")
+        raise AssertionError(f"advanced past a {conclusion} publication")
     except RuntimeError:
         pass
+publish_job.update(conclusion="success")
+predecessor.update(status="completed", conclusion="failure")
+admission.prior_run()  # Delivery failed after publication had completed.
+# A predecessor whose jobs cannot be identified keeps failing closed.
+predecessor_jobs.remove(publish_job)
+predecessor.update(status="completed", conclusion="failure")
+try:
+    admission.prior_run()
+    raise AssertionError("advanced past an unrecognizable predecessor")
+except RuntimeError:
+    pass
+predecessor_jobs.append(publish_job)
+predecessor.update(status="completed", conclusion="success")
 for status in ["queued", "in_progress", "waiting"]:
     predecessor.update(status=status, conclusion=None)
     admission.time.sleep = lambda seconds: predecessor.update(status="completed", conclusion="success")
