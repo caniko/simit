@@ -3720,6 +3720,105 @@ prepublish_commands = ["nix flake check --no-build"]
     assert!(check.success());
 }
 
+#[test]
+fn github_nix_can_generate_vscode_publish_workflow_with_marketplace_environment() {
+    for (configured, expected) in [
+        (None, "simit-marketplace"),
+        (Some("release-marketplace"), "release-marketplace"),
+    ] {
+        let temp = init_package(true);
+        let environment = configured
+            .map(|name| format!("environment = \"{name}\"\n"))
+            .unwrap_or_default();
+        fs::write(
+            temp.path().join("simit.toml"),
+            format!(
+                r#"[ci]
+runtime = "nix"
+
+[vscode]
+extension_dir = "pkl-lsp-vscode"
+pat_source = "actions-secret"
+cargo_package = "pkl-lsp-server"
+prepublish_commands = ["nix flake check --no-build"]
+{environment}"#
+            ),
+        )
+        .unwrap();
+
+        let output = simit_with_user_config(temp.path())
+            .current_dir(temp.path())
+            .args([
+                "init",
+                "ci",
+                "--platform",
+                "github",
+                "--runtime",
+                "nix",
+                "--with-vscode",
+            ])
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "{output:?}");
+
+        let workflow = read(
+            &temp
+                .path()
+                .join(".github/workflows/publish-vscode-extension.yaml"),
+        );
+        assert_yaml_parses(&workflow);
+        let parsed: serde_yaml::Value = serde_yaml::from_str(&workflow).unwrap();
+        let publish = &parsed["jobs"]["publish"];
+        assert_eq!(publish["runs-on"].as_str(), Some("ubuntu-24.04"));
+        assert_eq!(publish["environment"]["name"].as_str(), Some(expected));
+        assert_eq!(publish["permissions"]["contents"].as_str(), Some("write"));
+        assert_eq!(
+            publish["steps"]
+                .as_sequence()
+                .unwrap()
+                .iter()
+                .filter(|step| step["name"] == "Upload release assets to the GitHub release")
+                .count(),
+            1
+        );
+        assert!(workflow.contains("tags: [\"[0-9]*.[0-9]*.[0-9]*\"]"));
+        assert!(workflow.contains("git verify-tag \"$GITHUB_REF_NAME\""));
+        assert!(workflow.contains("nix flake check --no-build"));
+        assert!(workflow.contains("VSCE_PAT_FROM_SECRET: ${{ secrets.VSCE_PAT }}"));
+        assert!(workflow.contains("OVSX_PAT_FROM_SECRET: ${{ secrets.OVSX_PAT }}"));
+        assert!(!workflow.contains("CODEBERG_TOKEN"));
+        assert!(!workflow.contains("codeberg_token"));
+        assert!(!workflow.contains("api/repos"));
+        assert!(!workflow.contains("Upload Codeberg release assets"));
+        assert!(workflow.contains(
+            "gh release upload \"$tag\" \"${assets[@]}\" --clobber --repo \"$GITHUB_REPOSITORY\""
+        ));
+        assert!(workflow.contains("gh release view \"$tag\" --repo \"$GITHUB_REPOSITORY\""));
+        assert!(workflow.contains("the release workflow creates it"));
+        assert!(workflow.contains(&format!(
+            "uses: {}",
+            simit::render::ci::github_action_ref("cachix/install-nix-action", "v31.11.1")
+        )));
+        assert!(workflow.contains(
+            "nix develop -c npx --yes @vscode/vsce publish --packagePath release/*.vsix --pat \"$PUBLISH_PAT\" --skip-duplicate"
+        ));
+        assert!(workflow.contains(
+            "nix develop -c npx --yes ovsx publish --packagePath release/*.vsix --pat \"$PUBLISH_PAT\" --skip-duplicate"
+        ));
+        #[cfg(unix)]
+        verify_editor_publish_package_arguments(temp.path(), &parsed);
+        #[cfg(unix)]
+        verify_github_release_upload(temp.path(), &parsed);
+
+        let check = simit_with_user_config(temp.path())
+            .current_dir(temp.path())
+            .args(["init", "ci", "--platform", "github", "--check"])
+            .output()
+            .unwrap();
+        assert!(check.status.success(), "{check:?}");
+    }
+}
+
 #[cfg(unix)]
 #[test]
 fn vscode_publishers_use_configured_release_tag_prefix() {
@@ -3995,6 +4094,107 @@ prepublish_commands = ["nix flake check --no-build"]
 
 #[cfg(unix)]
 #[test]
+fn github_nix_can_generate_jetbrains_publish_workflow_with_marketplace_environment() {
+    let temp = init_package(true);
+    let plugin_xml = temp
+        .path()
+        .join("example-jetbrains/src/main/resources/META-INF");
+    fs::create_dir_all(&plugin_xml).unwrap();
+    fs::write(
+        plugin_xml.join("plugin.xml"),
+        "<idea-plugin><id>com.example.demo</id></idea-plugin>\n",
+    )
+    .unwrap();
+    fs::write(
+        temp.path().join("example-jetbrains/gradle.properties"),
+        "pluginVersion=0.1.0\n",
+    )
+    .unwrap();
+    fs::write(
+        temp.path().join("simit.toml"),
+        r#"[ci]
+runtime = "nix"
+
+[jetbrains]
+plugin_dir = "example-jetbrains"
+plugin_xml_id = "com.example.demo"
+package_installable = ".#jetbrains-plugin"
+cargo_package = "demo"
+credential_source = "actions-secret"
+prepublish_commands = ["nix flake check --no-build"]
+"#,
+    )
+    .unwrap();
+
+    let output = simit_with_user_config(temp.path())
+        .current_dir(temp.path())
+        .args([
+            "init",
+            "ci",
+            "--platform",
+            "github",
+            "--runtime",
+            "nix",
+            "--with-jetbrains",
+        ])
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{output:?}");
+
+    let workflow = read(
+        &temp
+            .path()
+            .join(".github/workflows/publish-jetbrains-plugin.yaml"),
+    );
+    assert_yaml_parses(&workflow);
+    let parsed: serde_yaml::Value = serde_yaml::from_str(&workflow).unwrap();
+    let publish = &parsed["jobs"]["publish"];
+    assert_eq!(publish["runs-on"].as_str(), Some("ubuntu-24.04"));
+    assert_eq!(
+        publish["environment"]["name"].as_str(),
+        Some("simit-marketplace")
+    );
+    assert_eq!(publish["permissions"]["contents"].as_str(), Some("read"));
+    assert!(workflow.contains("tags: [\"[0-9]*.[0-9]*.[0-9]*\"]"));
+    assert!(workflow.contains("nix flake check --no-build"));
+    assert!(
+        workflow
+            .contains("MARKETPLACE_TOKEN_FROM_SECRET: ${{ secrets.JETBRAINS_MARKETPLACE_TOKEN }}")
+    );
+    assert!(
+        workflow
+            .contains("CERTIFICATE_CHAIN_FROM_SECRET: ${{ secrets.JETBRAINS_CERTIFICATE_CHAIN }}")
+    );
+    assert!(workflow.contains("PRIVATE_KEY_FROM_SECRET: ${{ secrets.JETBRAINS_PRIVATE_KEY }}"));
+    assert!(workflow.contains(
+        "PRIVATE_KEY_PASSWORD_FROM_SECRET: ${{ secrets.JETBRAINS_PRIVATE_KEY_PASSWORD }}"
+    ));
+    assert!(workflow.contains("test \"$cargo_version\" = \"$VERSION\""));
+    assert!(workflow.contains("INSTALLABLE: .#jetbrains-plugin"));
+    assert!(workflow.contains(
+        "nix shell nixpkgs#gradle_9 nixpkgs#jdk21 -c gradle --no-daemon -x buildPlugin signPlugin verifyPluginSignature"
+    ));
+    assert!(workflow.contains("-F \"xmlId=$PLUGIN_XML_ID\""));
+    assert!(!workflow.contains("JETBRAINS_MARKETPLACE_TOKEN_FILE"));
+    assert!(!workflow.contains("Upload Codeberg release assets"));
+    assert!(!workflow.contains("gh release upload"));
+    assert!(workflow.contains(&format!(
+        "uses: {}",
+        simit::render::ci::github_action_ref("cachix/install-nix-action", "v31.11.1")
+    )));
+    #[cfg(unix)]
+    verify_jetbrains_signed_archive_selection(temp.path(), &parsed);
+
+    let check = simit_with_user_config(temp.path())
+        .current_dir(temp.path())
+        .args(["init", "ci", "--platform", "github", "--check"])
+        .output()
+        .unwrap();
+    assert!(check.status.success(), "{check:?}");
+}
+
+#[cfg(unix)]
+#[test]
 fn jetbrains_publishers_enforce_configured_release_prefix() {
     for platform in ["github", "forgejo"] {
         for prefix in ["", "v"] {
@@ -4073,6 +4273,78 @@ fn jetbrains_publishers_enforce_configured_release_prefix() {
             }
         }
     }
+}
+
+#[cfg(unix)]
+fn verify_github_release_upload(root: &Path, yaml: &serde_yaml::Value) {
+    use std::os::unix::fs::PermissionsExt;
+
+    let bin = root.join("gh-bin");
+    fs::create_dir_all(&bin).unwrap();
+    let gh = bin.join("gh");
+    fs::write(
+        &gh,
+        "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"$GH_CALLS\"\nif [ \"$1\" = release ] && [ \"$2\" = view ]; then\n  exit \"${GH_VIEW_EXIT:-0}\"\nfi\nexit 0\n",
+    )
+    .unwrap();
+    fs::set_permissions(&gh, fs::Permissions::from_mode(0o755)).unwrap();
+    let sleep = bin.join("sleep");
+    fs::write(&sleep, "#!/bin/sh\nexit 0\n").unwrap();
+    fs::set_permissions(&sleep, fs::Permissions::from_mode(0o755)).unwrap();
+    let path = std::env::join_paths(
+        std::iter::once(bin).chain(std::env::split_paths(&std::env::var_os("PATH").unwrap())),
+    )
+    .unwrap();
+    let release = root.join("release");
+    fs::create_dir_all(&release).unwrap();
+    fs::write(release.join("plugin.vsix"), "fixture").unwrap();
+
+    let script = yaml["jobs"]["publish"]["steps"]
+        .as_sequence()
+        .unwrap()
+        .iter()
+        .find(|step| step["name"] == "Upload release assets to the GitHub release")
+        .unwrap()["run"]
+        .as_str()
+        .unwrap();
+    let calls = root.join("gh-calls");
+    let run = |view_exit: &str| {
+        fs::write(&calls, "").unwrap();
+        Command::new("bash")
+            .args(["-c", script])
+            .current_dir(root)
+            .env("PATH", &path)
+            .env("GITHUB_REF_NAME", "0.1.0")
+            .env("GITHUB_REPOSITORY", "example/demo")
+            .env("GH_CALLS", &calls)
+            .env("GH_VIEW_EXIT", view_exit)
+            .output()
+            .unwrap()
+    };
+
+    let created = run("0");
+    assert!(created.status.success(), "{created:?}");
+    let recorded = fs::read_to_string(&calls).unwrap();
+    let upload = recorded
+        .lines()
+        .find(|line| line.starts_with("release upload "))
+        .unwrap_or_else(|| panic!("no gh release upload call in {recorded}"));
+    assert!(upload.starts_with("release upload 0.1.0 "), "{upload}");
+    assert!(upload.contains("release/plugin.vsix"), "{upload}");
+    assert!(
+        upload.ends_with("--clobber --repo example/demo"),
+        "{upload}"
+    );
+
+    let missing = run("1");
+    assert!(!missing.status.success(), "{missing:?}");
+    let recorded = fs::read_to_string(&calls).unwrap();
+    assert_eq!(recorded.lines().count(), 12, "{recorded}");
+    assert!(
+        String::from_utf8_lossy(&missing.stderr)
+            .contains("the GitHub release of 0.1.0 does not exist"),
+        "{missing:?}"
+    );
 }
 
 #[cfg(unix)]

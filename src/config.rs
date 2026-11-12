@@ -69,18 +69,21 @@ pub struct ProjectConfig {
     pub jetbrains: Option<JetbrainsConfig>,
 }
 
-/// `[vscode]` — publish a VS Code/Open VSX extension from Forgejo CI.
+/// `[vscode]` — publish a VS Code/Open VSX extension from Forgejo or GitHub CI.
 #[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct VscodeConfig {
     /// Extension package directory, relative to the repository root.
     #[serde(default = "default_vscode_extension_dir")]
     pub extension_dir: String,
-    /// Optional runner override. Defaults to the normal release/CI runner.
+    /// Optional runner override. Defaults to the release runner on Forgejo and
+    /// to a GitHub-hosted runner on GitHub.
     #[serde(default)]
     pub runner: Option<String>,
-    /// Codeberg `<owner>/<repo>` receiving release assets.
-    pub codeberg_repo: String,
+    /// Codeberg `<owner>/<repo>` receiving release assets. Forgejo only: on
+    /// GitHub the channel uploads to the tag's GitHub release instead.
+    #[serde(default)]
+    pub codeberg_repo: Option<String>,
     /// REST API base URL.
     #[serde(default = "default_codeberg_api_base")]
     pub codeberg_api_base: String,
@@ -102,6 +105,10 @@ pub struct VscodeConfig {
     /// Actions secret containing the Open VSX PAT.
     #[serde(default = "default_vscode_ovsx_pat_secret")]
     pub ovsx_pat_secret: String,
+    /// GitHub Actions environment that gates the publish job and holds the
+    /// secrets it reads.
+    #[serde(default = "default_marketplace_environment")]
+    pub environment: String,
     /// Command that packages release assets. `$VERSION` contains the tag version.
     #[serde(default = "default_vscode_package_command")]
     pub package_command: String,
@@ -142,11 +149,15 @@ fn default_vscode_ovsx_pat_secret() -> String {
     "OVSX_PAT".to_owned()
 }
 
+fn default_marketplace_environment() -> String {
+    "simit-marketplace".to_owned()
+}
+
 fn default_vscode_package_command() -> String {
     "nix run .#package-release-assets -- \"$VERSION\"".to_owned()
 }
 
-/// `[jetbrains]` — publish an IntelliJ Platform plugin from Forgejo CI.
+/// `[jetbrains]` — publish an IntelliJ Platform plugin from Forgejo or GitHub CI.
 #[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct JetbrainsConfig {
@@ -163,6 +174,10 @@ pub struct JetbrainsConfig {
     pub channel: Option<String>,
     #[serde(default)]
     pub credential_source: JetbrainsCredentialSource,
+    /// GitHub Actions environment that gates the publish job and holds the
+    /// secrets it reads.
+    #[serde(default = "default_marketplace_environment")]
+    pub environment: String,
     #[serde(default = "default_jetbrains_marketplace_token_file_env")]
     pub marketplace_token_file_env: String,
     #[serde(default = "default_jetbrains_certificate_chain_file_env")]
@@ -2195,8 +2210,8 @@ pub struct ResolvedCodebergPages {
 pub struct ResolvedVscode {
     pub extension_dir: String,
     pub runner: Option<String>,
-    pub codeberg_repo: String,
-    pub codeberg_owner: String,
+    pub codeberg_repo: Option<String>,
+    pub codeberg_owner: Option<String>,
     pub codeberg_api_base: String,
     pub codeberg_token_secret: String,
     pub pat_source: VscodePatSource,
@@ -2204,6 +2219,7 @@ pub struct ResolvedVscode {
     pub ovsx_pat_file_env: String,
     pub vsce_pat_secret: String,
     pub ovsx_pat_secret: String,
+    pub environment: String,
     pub package_command: String,
     pub cargo_package: Option<String>,
     pub prepublish_commands: Vec<String>,
@@ -2218,6 +2234,7 @@ pub struct ResolvedJetbrains {
     pub cargo_package: Option<String>,
     pub channel: Option<String>,
     pub credential_source: JetbrainsCredentialSource,
+    pub environment: String,
     pub marketplace_token_file_env: String,
     pub certificate_chain_file_env: String,
     pub private_key_file_env: String,
@@ -3553,10 +3570,12 @@ impl ProjectConfig {
                 &vscode.extension_dir,
             )?;
             validate_runner_label_opt("[vscode].runner", vscode.runner.as_deref())?;
-            validate_owner_repo(
-                "simit project config: [vscode].codeberg_repo",
-                &vscode.codeberg_repo,
-            )?;
+            if let Some(codeberg_repo) = &vscode.codeberg_repo {
+                validate_owner_repo(
+                    "simit project config: [vscode].codeberg_repo",
+                    codeberg_repo,
+                )?;
+            }
             validate_nonempty_string(
                 "simit project config: [vscode].codeberg_api_base",
                 &vscode.codeberg_api_base,
@@ -3580,6 +3599,10 @@ impl ProjectConfig {
             validate_nonempty_string(
                 "simit project config: [vscode].ovsx_pat_secret",
                 &vscode.ovsx_pat_secret,
+            )?;
+            validate_github_environment_name(
+                "simit project config: [vscode].environment",
+                &vscode.environment,
             )?;
             validate_nonempty_string(
                 "simit project config: [vscode].package_command",
@@ -3619,6 +3642,10 @@ impl ProjectConfig {
             if let Some(channel) = &jetbrains.channel {
                 validate_nonempty_string("simit project config: [jetbrains].channel", channel)?;
             }
+            validate_github_environment_name(
+                "simit project config: [jetbrains].environment",
+                &jetbrains.environment,
+            )?;
             validate_nonempty_string(
                 "simit project config: [jetbrains].marketplace_token_file_env",
                 &jetbrains.marketplace_token_file_env,
@@ -4787,16 +4814,17 @@ impl ProjectConfig {
         let Some(vscode) = &self.vscode else {
             return Ok(None);
         };
-        validate_owner_repo(
-            "simit project config: [vscode].codeberg_repo",
-            &vscode.codeberg_repo,
-        )?;
+        if let Some(codeberg_repo) = &vscode.codeberg_repo {
+            validate_owner_repo(
+                "simit project config: [vscode].codeberg_repo",
+                codeberg_repo,
+            )?;
+        }
         let codeberg_owner = vscode
             .codeberg_repo
-            .split_once('/')
-            .expect("validated owner/repo")
-            .0
-            .to_owned();
+            .as_deref()
+            .and_then(|repo| repo.split_once('/'))
+            .map(|(owner, _)| owner.to_owned());
         Ok(Some(ResolvedVscode {
             extension_dir: vscode.extension_dir.clone(),
             runner: vscode.runner.clone(),
@@ -4809,6 +4837,7 @@ impl ProjectConfig {
             ovsx_pat_file_env: vscode.ovsx_pat_file_env.clone(),
             vsce_pat_secret: vscode.vsce_pat_secret.clone(),
             ovsx_pat_secret: vscode.ovsx_pat_secret.clone(),
+            environment: vscode.environment.clone(),
             package_command: vscode.package_command.clone(),
             cargo_package: vscode.cargo_package.clone(),
             prepublish_commands: vscode.prepublish_commands.clone(),
@@ -4828,6 +4857,7 @@ impl ProjectConfig {
             cargo_package: jetbrains.cargo_package.clone(),
             channel: jetbrains.channel.clone(),
             credential_source: jetbrains.credential_source,
+            environment: jetbrains.environment.clone(),
             marketplace_token_file_env: jetbrains.marketplace_token_file_env.clone(),
             certificate_chain_file_env: jetbrains.certificate_chain_file_env.clone(),
             private_key_file_env: jetbrains.private_key_file_env.clone(),
@@ -5018,6 +5048,17 @@ pub(crate) fn validate_environment_name(name: &str, value: &str) -> Result<()> {
         || !bytes.all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
     {
         bail!("{name} must be an environment variable identifier matching [A-Za-z_][A-Za-z0-9_]*");
+    }
+    Ok(())
+}
+
+fn validate_github_environment_name(name: &str, value: &str) -> Result<()> {
+    validate_nonempty_string(name, value)?;
+    if !value
+        .chars()
+        .all(|character| character.is_ascii_alphanumeric() || matches!(character, '-' | '_' | '.'))
+    {
+        bail!("{name} must contain only ASCII letters, digits, '-', '_', and '.'");
     }
     Ok(())
 }

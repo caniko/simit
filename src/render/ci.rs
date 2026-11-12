@@ -946,7 +946,7 @@ pub fn vscode_extension_file_with_prefix(
 
     Ok(GeneratedFile {
         relative_path: PathBuf::from(platform.workflow_dir()).join("publish-vscode-extension.yaml"),
-        content: vscode_extension_workflow(platform, runner, vscode, prefix),
+        content: vscode_extension_workflow(platform, runner, vscode, prefix)?,
     })
 }
 
@@ -1711,12 +1711,42 @@ fn github_pages_workflow(runner: &ResolvedRunner, pages: &CodebergPagesOptions) 
     workflow
 }
 
+fn uses_actions_secret(source: VscodePatSource) -> bool {
+    matches!(
+        source,
+        VscodePatSource::ActionsSecret | VscodePatSource::Both
+    )
+}
+
+/// GitHub gates marketplace credentials behind an environment so its secrets
+/// stay out of pull-request runs, and scopes the job token it needs. Forgejo
+/// resolves the same credentials without environments, so it renders nothing.
+fn push_marketplace_job_guard(
+    workflow: &mut String,
+    platform: Platform,
+    environment: &str,
+    uses_actions_secret: bool,
+    contents_write: bool,
+) {
+    if platform != Platform::Github {
+        return;
+    }
+    if uses_actions_secret {
+        workflow.push_str("    environment:\n      name: ");
+        workflow.push_str(environment);
+        workflow.push('\n');
+    }
+    workflow.push_str("    permissions:\n      contents: ");
+    workflow.push_str(if contents_write { "write" } else { "read" });
+    workflow.push('\n');
+}
+
 fn vscode_extension_workflow(
     platform: Platform,
     runner: &ResolvedRunner,
     vscode: &ResolvedVscode,
     prefix: crate::release_identity::TagPrefix,
-) -> String {
+) -> Result<String> {
     let mut workflow = String::new();
     push_generated_workflow_header(&mut workflow);
     workflow.push_str("name: Publish VS Code Extension\n\n");
@@ -1733,13 +1763,20 @@ fn vscode_extension_workflow(
     workflow.push_str("    runs-on: ");
     workflow.push_str(&runs_on(runner));
     workflow.push('\n');
+    push_marketplace_job_guard(
+        &mut workflow,
+        platform,
+        &vscode.environment,
+        uses_actions_secret(vscode.pat_source),
+        true,
+    );
     workflow.push_str("    env:\n");
     workflow.push_str("      NIX_CONFIG: \"experimental-features = nix-command flakes\"\n");
     workflow.push_str("    steps:\n");
     push_event_checkout_step(&mut workflow, platform, Some(runner));
     push_install_nix_step(&mut workflow, platform);
     push_vscode_version_validation(&mut workflow, vscode, prefix);
-    push_vscode_credential_preflight(&mut workflow, vscode);
+    push_vscode_credential_preflight(&mut workflow, platform, vscode);
     for (index, command) in vscode.prepublish_commands.iter().enumerate() {
         workflow.push_str("      - name: Prepublish command ");
         workflow.push_str(&(index + 1).to_string());
@@ -1755,11 +1792,11 @@ fn vscode_extension_workflow(
     workflow.push_str("          export VERSION\n");
     push_indented_lines(&mut workflow, &vscode.package_command, 10);
     workflow.push('\n');
-    push_vscode_codeberg_upload(&mut workflow, vscode);
+    push_vscode_release_upload(&mut workflow, platform, vscode)?;
     push_vscode_publish_step(&mut workflow, vscode, VscodePublisher::Vsce);
     push_vscode_publish_step(&mut workflow, vscode, VscodePublisher::Ovsx);
     trim_trailing_blank_lines(&mut workflow);
-    workflow
+    Ok(workflow)
 }
 
 fn jetbrains_plugin_workflow(
@@ -1794,6 +1831,16 @@ fn jetbrains_plugin_workflow(
     workflow.push_str("    runs-on: ");
     workflow.push_str(&runs_on(runner));
     workflow.push('\n');
+    push_marketplace_job_guard(
+        &mut workflow,
+        platform,
+        &jetbrains.environment,
+        matches!(
+            jetbrains.credential_source,
+            JetbrainsCredentialSource::ActionsSecret | JetbrainsCredentialSource::Both
+        ),
+        false,
+    );
     workflow.push_str("    env:\n");
     workflow.push_str("      NIX_CONFIG: \"experimental-features = nix-command flakes\"\n");
     workflow.push_str("    steps:\n");
@@ -2082,23 +2129,27 @@ const JETBRAINS_SIGNED_ARCHIVE_INIT_SCRIPT: &str = r#"gradle.projectsEvaluated {
     }
 }"#;
 
-fn push_vscode_credential_preflight(workflow: &mut String, vscode: &ResolvedVscode) {
+fn push_vscode_credential_preflight(
+    workflow: &mut String,
+    platform: Platform,
+    vscode: &ResolvedVscode,
+) {
+    let codeberg = platform != Platform::Github;
     workflow.push_str("      - name: Validate publish credentials\n");
-    if matches!(
-        vscode.pat_source,
-        VscodePatSource::ActionsSecret | VscodePatSource::Both
-    ) {
+    if uses_actions_secret(vscode.pat_source) {
         workflow.push_str("        env:\n");
-        workflow.push_str("          CODEBERG_TOKEN: ${{ secrets.");
-        workflow.push_str(&vscode.codeberg_token_secret);
-        workflow.push_str(" }}\n");
+        if codeberg {
+            workflow.push_str("          CODEBERG_TOKEN: ${{ secrets.");
+            workflow.push_str(&vscode.codeberg_token_secret);
+            workflow.push_str(" }}\n");
+        }
         workflow.push_str("          VSCE_PAT_FROM_SECRET: ${{ secrets.");
         workflow.push_str(&vscode.vsce_pat_secret);
         workflow.push_str(" }}\n");
         workflow.push_str("          OVSX_PAT_FROM_SECRET: ${{ secrets.");
         workflow.push_str(&vscode.ovsx_pat_secret);
         workflow.push_str(" }}\n");
-    } else {
+    } else if codeberg {
         workflow.push_str("        env:\n");
         workflow.push_str("          CODEBERG_TOKEN: ${{ secrets.");
         workflow.push_str(&vscode.codeberg_token_secret);
@@ -2106,10 +2157,13 @@ fn push_vscode_credential_preflight(workflow: &mut String, vscode: &ResolvedVsco
     }
     workflow.push_str("        run: |\n");
     workflow.push_str("          set -euo pipefail\n");
-    workflow
-        .push_str("          test -n \"${CODEBERG_TOKEN:-}\" || { echo \"missing Actions secret ");
-    workflow.push_str(&vscode.codeberg_token_secret);
-    workflow.push_str("\"; exit 1; }\n");
+    if codeberg {
+        workflow.push_str(
+            "          test -n \"${CODEBERG_TOKEN:-}\" || { echo \"missing Actions secret ",
+        );
+        workflow.push_str(&vscode.codeberg_token_secret);
+        workflow.push_str("\"; exit 1; }\n");
+    }
     push_vscode_pat_resolution_function(workflow, vscode);
     workflow.push_str("          VSCE_PUBLISH_PAT=$(resolve_pat vsce)\n");
     workflow.push_str("          VSCE_PUBLISHER=$(nix shell nixpkgs#jq -c jq -r '.publisher' ");
@@ -2167,7 +2221,50 @@ fn push_vscode_version_validation(
     workflow.push_str("          test \"$extension_version\" = \"$VERSION\" || { echo \"extension version $extension_version does not match tag $VERSION\"; exit 1; }\n\n");
 }
 
-fn push_vscode_codeberg_upload(workflow: &mut String, vscode: &ResolvedVscode) {
+fn push_vscode_release_upload(
+    workflow: &mut String,
+    platform: Platform,
+    vscode: &ResolvedVscode,
+) -> Result<()> {
+    if platform == Platform::Github {
+        push_vscode_github_release_upload(workflow);
+        return Ok(());
+    }
+    push_vscode_codeberg_upload(workflow, vscode)?;
+    Ok(())
+}
+
+/// Attach the packaged assets to the release of the pushed tag. The release
+/// itself belongs to the release workflow; this waits briefly for it to appear
+/// and otherwise fails with the reason rather than creating a second release.
+fn push_vscode_github_release_upload(workflow: &mut String) {
+    workflow.push_str("      - name: Upload release assets to the GitHub release\n");
+    workflow.push_str("        env:\n          GITHUB_TOKEN: ${{ github.token }}\n");
+    workflow.push_str("        run: |\n");
+    workflow.push_str("          set -euo pipefail\n");
+    workflow.push_str("          tag=\"${GITHUB_REF_NAME}\"\n");
+    workflow.push_str("          assets=()\n");
+    workflow.push_str("          for asset in release/*; do\n");
+    workflow.push_str("            test -f \"$asset\" || continue\n");
+    workflow.push_str("            assets+=(\"$asset\")\n");
+    workflow.push_str("          done\n");
+    workflow.push_str("          test \"${#assets[@]}\" -gt 0 || { echo \"no release assets were packaged in release/\"; exit 1; }\n");
+    workflow.push_str("          for attempt in $(seq 1 12); do\n");
+    workflow.push_str("            if gh release view \"$tag\" --repo \"$GITHUB_REPOSITORY\" >/dev/null 2>&1; then\n");
+    workflow.push_str("              gh release upload \"$tag\" \"${assets[@]}\" --clobber --repo \"$GITHUB_REPOSITORY\"\n");
+    workflow.push_str("              exit 0\n");
+    workflow.push_str("            fi\n");
+    workflow.push_str("            echo \"waiting for the GitHub release of $tag to exist (attempt $attempt/12)\"\n");
+    workflow.push_str("            sleep 10\n");
+    workflow.push_str("          done\n");
+    workflow.push_str("          echo \"the GitHub release of $tag does not exist; the release workflow creates it, so rerun this workflow once it has finished\" >&2\n");
+    workflow.push_str("          exit 1\n\n");
+}
+
+fn push_vscode_codeberg_upload(workflow: &mut String, vscode: &ResolvedVscode) -> Result<()> {
+    let Some(repo) = vscode.codeberg_repo.as_deref() else {
+        bail!("VS Code publishing on Forgejo requires [vscode].codeberg_repo");
+    };
     workflow.push_str("      - name: Upload Codeberg release assets\n");
     workflow.push_str("        env:\n");
     workflow.push_str("          CODEBERG_TOKEN: ${{ secrets.");
@@ -2184,7 +2281,7 @@ fn push_vscode_codeberg_upload(workflow: &mut String, vscode: &ResolvedVscode) {
     workflow.push_str(&shell_word(&vscode.codeberg_api_base));
     workflow.push('\n');
     workflow.push_str("          repo=");
-    workflow.push_str(&shell_word(&vscode.codeberg_repo));
+    workflow.push_str(&shell_word(repo));
     workflow.push('\n');
     workflow.push_str("          auth_header=\"Authorization: token ${CODEBERG_TOKEN}\"\n");
     workflow.push_str("          release_json=$(curl --fail --silent --show-error --header \"$auth_header\" \"$api/repos/$repo/releases/tags/$tag\" || true)\n");
@@ -2203,6 +2300,7 @@ fn push_vscode_codeberg_upload(workflow: &mut String, vscode: &ResolvedVscode) {
     workflow.push_str("            done\n");
     workflow.push_str("            curl --fail --silent --show-error --request POST --header \"$auth_header\" --form \"attachment=@${asset}\" \"$api/repos/$repo/releases/$release_id/assets?name=$name\" >/dev/null\n");
     workflow.push_str("          done\n\n");
+    Ok(())
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -2231,10 +2329,7 @@ fn push_vscode_publish_step(
     workflow.push_str("      - name: ");
     workflow.push_str(name);
     workflow.push('\n');
-    if matches!(
-        vscode.pat_source,
-        VscodePatSource::ActionsSecret | VscodePatSource::Both
-    ) {
+    if uses_actions_secret(vscode.pat_source) {
         workflow.push_str("        env:\n");
         workflow.push_str("          VSCE_PAT_FROM_SECRET: ${{ secrets.");
         workflow.push_str(&vscode.vsce_pat_secret);
@@ -2271,10 +2366,7 @@ fn push_vscode_publish_step(
 
 fn push_vscode_marketplace_visibility_gate(workflow: &mut String, vscode: &ResolvedVscode) {
     workflow.push_str("      - name: Verify VS Code Marketplace visibility\n");
-    if matches!(
-        vscode.pat_source,
-        VscodePatSource::ActionsSecret | VscodePatSource::Both
-    ) {
+    if uses_actions_secret(vscode.pat_source) {
         workflow.push_str("        env:\n");
         workflow.push_str("          VSCE_PAT_FROM_SECRET: ${{ secrets.");
         workflow.push_str(&vscode.vsce_pat_secret);
