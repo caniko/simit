@@ -555,7 +555,7 @@ pub fn run(command: InitCiCommand) -> Result<()> {
     }
     if !command.primary_only && wants_vscode {
         let vscode = vscode_options(&cfg)?;
-        let vscode_runner = vscode_runner(&vscode, &runners.release)?;
+        let vscode_runner = vscode_runner(platform, &vscode, &runners.release)?;
         files.push(ci::vscode_extension_file_with_prefix(
             platform,
             resolved.runtime,
@@ -566,7 +566,7 @@ pub fn run(command: InitCiCommand) -> Result<()> {
     }
     if !command.primary_only && wants_jetbrains {
         let jetbrains = jetbrains_options(&cfg)?;
-        let jetbrains_runner = jetbrains_runner(&jetbrains, &runners.release)?;
+        let jetbrains_runner = jetbrains_runner(platform, &jetbrains, &runners.release)?;
         files.push(ci::jetbrains_plugin_file_with_prefix(
             platform,
             resolved.runtime,
@@ -3041,15 +3041,19 @@ fn codeberg_pages_config(pages: &Option<CodebergPagesOptions>) -> Result<Codeber
 
 fn vscode_options(cfg: &ProjectConfig) -> Result<ResolvedVscode> {
     cfg.resolve_vscode()?
-        .context("--with-vscode requires a [vscode] section with codeberg_repo")
+        .context("--with-vscode requires a [vscode] section")
 }
 
-fn vscode_runner(vscode: &ResolvedVscode, fallback: &ResolvedRunner) -> Result<ResolvedRunner> {
+fn vscode_runner(
+    platform: Platform,
+    vscode: &ResolvedVscode,
+    fallback: &ResolvedRunner,
+) -> Result<ResolvedRunner> {
     if let Some(runner) = &vscode.runner {
         return ResolvedRunner::literal(runner)
             .map_err(|err| anyhow::anyhow!("invalid [vscode].runner: {err}"));
     }
-    Ok(fallback.clone())
+    Ok(editor_runner_fallback(platform, fallback))
 }
 
 fn jetbrains_options(cfg: &ProjectConfig) -> Result<ResolvedJetbrains> {
@@ -3058,6 +3062,7 @@ fn jetbrains_options(cfg: &ProjectConfig) -> Result<ResolvedJetbrains> {
 }
 
 fn jetbrains_runner(
+    platform: Platform,
     jetbrains: &ResolvedJetbrains,
     fallback: &ResolvedRunner,
 ) -> Result<ResolvedRunner> {
@@ -3065,7 +3070,19 @@ fn jetbrains_runner(
         return ResolvedRunner::literal(runner)
             .map_err(|err| anyhow::anyhow!("invalid [jetbrains].runner: {err}"));
     }
-    Ok(fallback.clone())
+    Ok(editor_runner_fallback(platform, fallback))
+}
+
+/// Editor publishers default to a GitHub-hosted runner on GitHub; on Forgejo
+/// they keep the release runner, which is the project's self-hosted pool.
+fn editor_runner_fallback(platform: Platform, fallback: &ResolvedRunner) -> ResolvedRunner {
+    if platform == Platform::Github {
+        return ResolvedRunner {
+            name: None,
+            labels: vec!["ubuntu-24.04".to_owned()],
+        };
+    }
+    fallback.clone()
 }
 
 fn chocolatey_options(

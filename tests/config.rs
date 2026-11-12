@@ -369,8 +369,9 @@ prepublish_commands = ["nix flake check --no-build"]
     let vscode = cfg.resolve_vscode().unwrap().unwrap();
     assert_eq!(vscode.extension_dir, "pkl-lsp-vscode");
     assert_eq!(vscode.runner.as_deref(), Some("atlas-nix-trusted"));
-    assert_eq!(vscode.codeberg_repo, "caniko/pkl-lsp");
-    assert_eq!(vscode.codeberg_owner, "caniko");
+    assert_eq!(vscode.codeberg_repo.as_deref(), Some("caniko/pkl-lsp"));
+    assert_eq!(vscode.codeberg_owner.as_deref(), Some("caniko"));
+    assert_eq!(vscode.environment, "simit-marketplace");
     assert_eq!(vscode.codeberg_token_secret, "codeberg_token");
     assert_eq!(vscode.pat_source, VscodePatSource::FileEnv);
     assert_eq!(vscode.vsce_pat_file_env, "VSCE_PAT_FILE");

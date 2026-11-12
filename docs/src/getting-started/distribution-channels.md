@@ -11,6 +11,9 @@ workflow in sync with project config. The Linux channels are:
   `.forgejo/workflows/release.yml` by default, or
   `.github/workflows/release.yml` for GitHub, for artifact build, hosted release
   upload, and configured channel publish steps.
+- Editor marketplaces: `simit init ci --with-vscode` and
+  `simit init ci --with-jetbrains` write the VS Code Marketplace/Open VSX and
+  JetBrains publisher workflows (see [Editor Marketplaces](#editor-marketplaces)).
 - Crow: `simit init ci --ci-provider crow` and
   `simit init release --ci-provider crow` write project-side Crow v6.1
   workflows under `.crow` without invoking a Crow CLI or server. YAML is the
@@ -285,6 +288,78 @@ header. These names are configurable:
   and `WINDOWS_SIGNING_SUBJECT`.
 - PyPI: `[release.pypi].token_secret` defaults to `PYPI_TOKEN`; it is unused
   with `trusted_publishing = true`.
+
+## Editor Marketplaces
+
+`[vscode]` publishes a VS Code Marketplace and Open VSX extension;
+`[jetbrains]` signs and publishes an IntelliJ Platform plugin. `simit init ci`
+writes `publish-vscode-extension.yaml` and `publish-jetbrains-plugin.yaml` into
+the workflow directory of the configured platform whenever those sections
+exist (or when `--with-vscode` / `--with-jetbrains` is passed). Both workflows
+run only for a `push` of a `[release].tag_prefix` tag holding an exact semver
+version, and the JetBrains one also accepts a `workflow_dispatch` `version`.
+Before publishing they re-check the GPG signature against the default branch's
+`keys/maintainers.gpg`, the tag object name, that the tag is the checked-out
+commit, the version in `Cargo.toml` (`cargo_package`), the extension
+`package.json` version or the plugin's `gradle.properties` `pluginVersion`,
+and then run `prepublish_commands`. Nix comes from the single pinned
+`cachix/install-nix-action` version, on every platform.
+
+On GitHub the publish job defaults to a hosted `ubuntu-24.04` runner when
+`runner` is unset; on Forgejo it keeps the project's release runner.
+
+```toml
+[ci]
+platform = "github"
+
+[vscode]
+extension_dir = "pkl-lsp-vscode"
+pat_source = "actions-secret"
+# environment = "simit-marketplace" # the default
+vsce_pat_secret = "VSCE_PAT" # default
+ovsx_pat_secret = "OVSX_PAT" # default
+cargo_package = "pkl-lsp-server"
+package_command = "nix run .#package-release-assets -- \"$VERSION\""
+prepublish_commands = ["nix flake check --no-build"]
+
+[jetbrains]
+plugin_dir = "pkl-lsp-jetbrains"
+plugin_xml_id = "com.tartanoglu.pkl-lsp"
+package_installable = ".#jetbrains-plugin"
+credential_source = "actions-secret"
+# environment = "simit-marketplace" # the default
+cargo_package = "pkl-lsp-server"
+prepublish_commands = ["nix flake check --no-build"]
+```
+
+With `pat_source`/`credential_source` of `actions-secret` (or `both`), the job
+declares `environment: <name>` and reads its credentials as environment
+secrets. Create that environment (default `simit-marketplace`) and allow the
+release tags in its deployment policy: a job whose tag the policy rejects fails
+before its steps run and never receives the secrets. The workflow only runs for
+tag pushes and dispatches, so pull-request runs never see these secrets.
+The secret names a GitHub consumer must provide in that environment are:
+
+- VS Code/Open VSX: `VSCE_PAT` and `OVSX_PAT` (`vsce_pat_secret`,
+  `ovsx_pat_secret`).
+- JetBrains: `JETBRAINS_MARKETPLACE_TOKEN`, `JETBRAINS_CERTIFICATE_CHAIN`,
+  `JETBRAINS_PRIVATE_KEY`, and `JETBRAINS_PRIVATE_KEY_PASSWORD`
+  (`marketplace_token_secret`, `certificate_chain_secret`,
+  `private_key_secret`, `private_key_password_secret`).
+
+The VS Code workflow packages `release/*` with `package_command` and attaches
+the assets to the release of the pushed tag with
+`gh release upload <tag> ... --clobber` and the job's `GITHUB_TOKEN`
+(`permissions: contents: write`). It never creates a release: it waits up to
+two minutes for the release workflow to create it and then fails with that
+instruction, so rerun the publish after the release run finishes. A pinned
+self-hosted `runner` therefore needs `gh` on `PATH`. The JetBrains workflow
+uploads the signed archive only as a workflow artifact and keeps
+`contents: read`.
+
+On Forgejo nothing changes: `codeberg_repo` (required there) receives the
+release assets through the Codeberg API with the `codeberg_token` secret
+(`codeberg_token_secret`), and `file-env` PATs keep working from the runner.
 
 ## Release Workflow
 

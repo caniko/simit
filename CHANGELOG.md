@@ -13,6 +13,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   token check, path listing and Attic client build above the loop still run
   once. Regenerate `release.yml` where `[release.attic]` is used without a
   prebuild that publishes Attic.
+- Added: `[vscode]` and `[jetbrains]` publishers work on GitHub. Neither
+  channel needs `codeberg_repo` or `CODEBERG_TOKEN` off Forgejo: the VS Code
+  workflow attaches the packaged `release/*` assets to the tag's GitHub release
+  with `gh release upload --clobber` and the job token (`contents: write`), and
+  waits briefly for the release workflow to create that release instead of
+  creating one itself. Both channels default to the hosted `ubuntu-24.04`
+  runner when `[vscode].runner`/`[jetbrains].runner` is unset. With
+  `pat_source`/`credential_source = "actions-secret"` the publish job declares
+  `environment: <name>` (`[vscode].environment`/`[jetbrains].environment`,
+  default `simit-marketplace`) so its secrets follow that environment's
+  deployment policy. Forgejo rendering is unchanged; GitHub consumers must
+  regenerate the two publisher workflows and create the environment with the
+  marketplace secrets.
 
 - Fixed: a release-plz predecessor that ended before publication no longer
   wedges every later default-branch event. The gate now walks the history
