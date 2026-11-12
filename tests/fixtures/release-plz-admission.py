@@ -25,19 +25,274 @@ os.environ.update({"GITHUB_REPOSITORY": "owner/repo", "GITHUB_REF_NAME": "trunk"
 current_run = {"id": 20, "workflow_id": 9, "run_number": 5}
 predecessor = {"id": 19, "run_number": 4, "status": "completed", "conclusion": "success"}
 newer = {"id": 21, "run_number": 6, "status": "queued", "conclusion": None}
+
+
+def job(name, conclusion, steps=None):
+    entry = {"name": name, "status": "completed", "conclusion": conclusion}
+    if steps is not None:
+        entry["steps"] = [{"name": name, "status": "completed", "conclusion": conclusion}
+                          for name, conclusion in steps]
+    return entry
+
+
+predecessor_jobs = [job("select", "success"), job("qualify", "skipped"), job("publish", "skipped")]
+jobs_by_run = {19: predecessor_jobs}
+runs = [newer, current_run, predecessor]
 original_api, original_github = admission.api, admission.github
 original_sleep, original_monotonic = admission.time.sleep, admission.time.monotonic
-runs = [newer, current_run, predecessor]
-predecessor_jobs = [{"name": "select", "status": "completed", "conclusion": "success"}]
 admission.github = lambda method, path, payload: current_run if path.endswith("/20") else predecessor
-admission.api = lambda path, key=None: predecessor_jobs if key == "jobs" else runs
-for conclusion in ["failure", "cancelled", "skipped", "timed_out"]:
+env_file = Path(tempfile.mkdtemp()) / "env"
+os.environ["GITHUB_ENV"] = str(env_file)
+
+
+def written_env():
+    text = env_file.read_text() if env_file.exists() else ""
+    env_file.write_text("")
+    return dict(line.split("=", 1) for line in text.splitlines() if "=" in line)
+
+
+def api(path, key=None):
+    # Every run carries its own job list; walking predecessors needs both.
+    return runs if key != "jobs" else jobs_by_run[int(path.split("/runs/")[1].split("/")[0])]
+
+
+admission.api = api
+env_file = Path(tempfile.mkdtemp()) / "env"
+os.environ["GITHUB_ENV"] = str(env_file)
+
+
+def take_base():
+    """Return and clear the extended selection base prior-run exported."""
+    text = env_file.read_text() if env_file.exists() else ""
+    env_file.unlink(missing_ok=True)
+    return dict(line.split("=", 1) for line in text.splitlines() if "=" in line).get(
+        "SIMIT_RELEASE_BASE", ""
+    )
+
+
+publish_job = predecessor_jobs[2]
+qualify_job = predecessor_jobs[1]
+select_job = predecessor_jobs[0]
+
+
+def scenario(*older):
+    global runs
+    runs = [newer, current_run, predecessor, *older]
+
+
+# An event that selected no release and published nothing must not block every
+# later default-branch event forever.
+for conclusion in ["failure", "cancelled", "timed_out"]:
     predecessor.update(status="completed", conclusion=conclusion)
+    admission.prior_run()
+# An event whose workflow never ran examined no range either: it is only
+# passed over once an older event bounds that range.
+predecessor.update(status="completed", conclusion="skipped")
+boundary = {"id": 18, "run_number": 3, "status": "completed", "conclusion": "success",
+            "head_sha": "b" * 40}
+jobs_by_run[18] = [job("select", "success"), job("qualify", "skipped"), job("publish", "skipped")]
+scenario(boundary)
+admission.prior_run()
+assert written_env() == {"SIMIT_RELEASE_BASE": boundary["head_sha"]}
+scenario()
+try:
+    admission.prior_run()
+    raise AssertionError("passed over an unexamined range without a boundary")
+except RuntimeError as error:
+    assert "never examined its push range" in str(error)
+predecessor.update(status="completed", conclusion="success")
+# A selection that failed cannot prove its push range held no release merge, so
+# the missed release could no longer be reselected: keep failing closed.
+select_job.update(conclusion="failure")
+predecessor.update(status="completed", conclusion="failure")
+try:
+    admission.prior_run()
+    raise AssertionError("advanced past a predecessor whose selection failed")
+except RuntimeError as error:
+    assert "predecessor run 19" in str(error)
+select_job.update(conclusion="success")
+# A release was selected and its qualification failed: advancing would drop the
+# version, because the successor only selects its own push range.
+for conclusion in ["failure", "cancelled", "timed_out"]:
+    predecessor.update(status="completed", conclusion=conclusion)
+    qualify_job.update(conclusion=conclusion)
     try:
         admission.prior_run()
-        raise AssertionError(f"advanced past a {conclusion} predecessor")
+        raise AssertionError(f"advanced past a selected release whose qualification ended as {conclusion}")
+    except RuntimeError as error:
+        assert "predecessor run 19" in str(error)
+qualify_job.update(conclusion="skipped")
+# An interrupted publication can leave crates or tags behind; reconcile first.
+for conclusion in ["failure", "cancelled", "timed_out"]:
+    predecessor.update(status="completed", conclusion=conclusion)
+    publish_job.update(conclusion=conclusion)
+    try:
+        admission.prior_run()
+        raise AssertionError(f"advanced past a {conclusion} publication")
     except RuntimeError:
         pass
+publish_job.update(conclusion="success")
+predecessor.update(status="completed", conclusion="failure")
+admission.prior_run()  # Delivery failed after publication had completed.
+# A predecessor whose jobs cannot be identified keeps failing closed.
+predecessor_jobs.remove(publish_job)
+predecessor.update(status="completed", conclusion="failure")
+try:
+    admission.prior_run()
+    raise AssertionError("advanced past an unrecognizable predecessor")
+except RuntimeError:
+    pass
+predecessor_jobs.append(publish_job)
+publish_job.update(conclusion="skipped")
+# A middle event that SUCCEEDED after selecting nothing must not stop the walk
+# before an older failed publication (S1).
+middle = {"id": 18, "run_number": 3, "status": "completed", "conclusion": "success",
+          "head_sha": "c" * 40}
+jobs_by_run[18] = [job("select", "success"), job("qualify", "skipped"), job("publish", "skipped")]
+older_failure = {"id": 17, "run_number": 2, "status": "completed", "conclusion": "failure",
+                 "head_sha": "d" * 40}
+jobs_by_run[17] = [job("select", "success"), job("qualify", "success"), job("publish", "failure")]
+scenario(middle, older_failure)
+predecessor.update(status="completed", conclusion="success")
+try:
+    admission.prior_run()
+    raise AssertionError("a successful event that selected nothing hid an older failed publication")
+except RuntimeError as error:
+    assert "predecessor run 17" in str(error)
+# A predecessor that failed at the gate never examined its push range. The
+# current event selects it, starting from the event before the oldest one (S3).
+gate_only = {"id": 18, "run_number": 3, "status": "completed", "conclusion": "failure",
+             "head_sha": "e" * 40}
+gate_only_jobs = [
+    job("select", "failure", [
+        ("Require the preceding release-plz event to succeed", "failure"),
+        ("Resolve release-plz immutable revision", "skipped"),
+    ]),
+    job("qualify", "skipped"),
+    job("publish", "skipped"),
+]
+jobs_by_run[18] = gate_only_jobs
+boundary = {"id": 16, "run_number": 1, "status": "completed", "conclusion": "success",
+            "head_sha": "f" * 40}
+jobs_by_run[16] = [job("select", "success"), job("qualify", "skipped"), job("publish", "skipped")]
+scenario(gate_only, boundary)
+admission.prior_run()
+assert written_env() == {"SIMIT_RELEASE_BASE": boundary["head_sha"]}
+# Consecutive unexamined events extend the range back to the oldest one's
+# boundary.
+older_gate = {"id": 17, "run_number": 2, "status": "completed", "conclusion": "failure",
+              "head_sha": "a" * 40}
+jobs_by_run[17] = [
+    job("select", "failure", [
+        ("Require the preceding release-plz event to succeed", "failure"),
+        ("Resolve release-plz immutable revision", "skipped"),
+    ]),
+    job("qualify", "skipped"),
+    job("publish", "skipped"),
+]
+scenario(gate_only, older_gate, boundary)
+admission.prior_run()
+assert written_env() == {"SIMIT_RELEASE_BASE": boundary["head_sha"]}
+# A selection that ran and failed is not a gate-only failure: its range may
+# still hold a release merge, so it stays unresolved.
+gate_only_jobs[0]["steps"][0]["conclusion"] = "success"
+gate_only_jobs[0]["steps"][1]["conclusion"] = "failure"
+scenario(gate_only, boundary)
+try:
+    admission.prior_run()
+    raise AssertionError("treated a failed selection as an unexamined range")
+except RuntimeError as error:
+    assert "predecessor run 18" in str(error)
+gate_only_jobs[0]["steps"][0]["conclusion"] = "failure"
+gate_only_jobs[0]["steps"][1]["conclusion"] = "skipped"
+# Only an exactly skipped selection step proves the range was never examined.
+# A missing, renamed, failed or cancelled one could have examined it already.
+for selection in [None, "failure", "cancelled", "success"]:
+    steps = [("Require the preceding release-plz event to succeed", "failure")]
+    if selection is not None:
+        steps.append(("Resolve release-plz immutable revision", selection))
+    jobs_by_run[18] = [job("select", "failure", steps), job("qualify", "skipped"),
+                       job("publish", "skipped")]
+    scenario(gate_only, boundary)
+    try:
+        admission.prior_run()
+        raise AssertionError(f"accepted a {selection} selection step after a gate failure")
+    except RuntimeError as error:
+        assert "predecessor run 18" in str(error)
+    assert written_env() == {}
+jobs_by_run[18] = gate_only_jobs
+scenario()
+predecessor.update(status="completed", conclusion="success")
+# An older unresolved publication is not hidden by newer events that skipped
+# publication: walk back until a publication succeeded or one is pending.
+failed_publication = {"id": 17, "run_number": 3, "status": "completed", "conclusion": "failure"}
+jobs_by_run[17] = [job("select", "success"), job("qualify", "success"), job("publish", "failure")]
+scenario(failed_publication)
+predecessor.update(status="completed", conclusion="failure")
+try:
+    admission.prior_run()
+    raise AssertionError("advanced past a publication that failed two events back")
+except RuntimeError as error:
+    assert "predecessor run 17" in str(error)
+# A successful middle event that selected nothing must not stop the walk before
+# an older failed publication.
+successful_empty = {"id": 18, "run_number": 4, "status": "completed", "conclusion": "success"}
+jobs_by_run[18] = [job("select", "success"), job("qualify", "skipped"), job("publish", "skipped")]
+runs = [newer, current_run, successful_empty, failed_publication]
+try:
+    admission.prior_run()
+    raise AssertionError("a successful empty predecessor hid an older failed publication")
+except RuntimeError as error:
+    assert "predecessor run 17" in str(error)
+scenario()
+# A predecessor that failed at the gate never examined its push range. The
+# current event selects from the last event that did, and only then advances.
+gate_only = {"id": 16, "run_number": 2, "status": "completed", "conclusion": "failure"}
+jobs_by_run[16] = [
+    job("select", "failure", [(admission.GATE_STEP, "failure"), (admission.SELECTION_STEP, "skipped")]),
+    job("qualify", "skipped"),
+    job("publish", "skipped"),
+]
+older_gate_only = {"id": 15, "run_number": 1, "status": "completed", "conclusion": "failure"}
+jobs_by_run[15] = [
+    job("select", "failure", [(admission.GATE_STEP, "failure"), (admission.SELECTION_STEP, "skipped")]),
+    job("qualify", "skipped"),
+    job("publish", "skipped"),
+]
+examined = {"id": 14, "run_number": 0, "status": "completed", "conclusion": "success",
+            "head_sha": "e" * 40}
+jobs_by_run[14] = [job("select", "success"), job("qualify", "skipped"), job("publish", "skipped")]
+predecessor.update(status="completed", conclusion="failure")
+scenario(gate_only)
+try:
+    admission.prior_run()
+    raise AssertionError("advanced past a gate-only failure with no selection boundary")
+except RuntimeError as error:
+    assert "never examined its push range" in str(error)
+assert written_env() == {}
+scenario(older_gate_only, examined)
+admission.prior_run()
+assert written_env() == {"SIMIT_RELEASE_BASE": examined["head_sha"]}, "did not reselect the unexamined range"
+# A real selection failure is not a gate-only failure: keep failing closed.
+jobs_by_run[16] = [job("select", "failure", [(admission.SELECTION_STEP, "failure")]),
+                   job("qualify", "skipped"), job("publish", "skipped")]
+scenario(gate_only, examined)
+try:
+    admission.prior_run()
+    raise AssertionError("treated a failed selection as an unexamined range")
+except RuntimeError as error:
+    assert "predecessor run 16" in str(error)
+assert written_env() == {}
+scenario()
+predecessor.update(status="completed", conclusion="success")
+# With neither a publication nor a selection anywhere in the history, every
+# event is passed over and the successor advances.
+jobs_by_run[17][2].update(conclusion="skipped")
+jobs_by_run[17][1].update(conclusion="skipped")
+qualify_job.update(conclusion="skipped")
+admission.prior_run()
+scenario()
+predecessor.update(status="completed", conclusion="success")
 for status in ["queued", "in_progress", "waiting"]:
     predecessor.update(status=status, conclusion=None)
     admission.time.sleep = lambda seconds: predecessor.update(status="completed", conclusion="success")
@@ -171,7 +426,7 @@ with tempfile.TemporaryDirectory() as directory:
     event = Path(directory) / "event.json"
     output = Path(directory) / "selection-output"
 
-    def select_push(before, after, prs, expected=None):
+    def select_push(before, after, prs, expected=None, base=None):
         event.write_text(json.dumps({"before": before, "after": after}))
         output.write_text("")
         os.environ.update(GITHUB_EVENT_PATH=str(event), GITHUB_EVENT_NAME="push",
@@ -179,6 +434,9 @@ with tempfile.TemporaryDirectory() as directory:
         os.environ.pop("SIMIT_EXPECTED_RELEASE_SHA", None)
         if expected is not None:
             os.environ["SIMIT_EXPECTED_RELEASE_SHA"] = expected
+        os.environ.pop("SIMIT_RELEASE_BASE", None)
+        if base is not None:
+            os.environ["SIMIT_RELEASE_BASE"] = base
         git("checkout", "--detach", after)
         # Even if every commit is associated with the PR, its exact merge must
         # be in this push range; neither its branch commits nor old merges count.
@@ -186,12 +444,26 @@ with tempfile.TemporaryDirectory() as directory:
             {"sha": next(pr["head"]["sha"] for pr in prs if f"/pulls/{pr['number']}/" in path)}
         ]
         admission.select()
-        return output.read_text()
+        return dict(line.split("=", 1) for line in output.read_text().splitlines() if "=" in line)
 
-    assert select_push(base, merged, [pr]) == f"release_sha={prepared}\n"
-    assert select_push(base, followup, [pr]) == f"release_sha={prepared}\n", "skipped a release merge before the push tip"
-    assert select_push(merged, followup, [pr]) == "release_sha=\n", "reselected a release outside the push"
-    assert select_push("0" * 40, merged, [pr]) == f"release_sha={prepared}\n"
+    assert select_push(base, merged, [pr])["release_sha"] == prepared
+    assert select_push(base, followup, [pr])["release_sha"] == prepared, "skipped a release merge before the push tip"
+    assert select_push(merged, followup, [pr])["release_sha"] == "", "reselected a release outside the push"
+    assert select_push(merged, followup, [pr])["release_base"] == ""
+    assert select_push("0" * 40, merged, [pr])["release_sha"] == prepared
+    # A gate-only predecessor leaves its push range unexamined, so the successor
+    # selects from the last event that ran a selection: the merge is found and
+    # requalified instead of being dropped.
+    extended = select_push(merged, followup, [pr], base=base)
+    assert extended["release_sha"] == prepared, "ignored the extended selection base"
+    assert extended["release_base"] == base
+    for bad_base in ["a" * 40, "invalid", "0" * 40]:
+        try:
+            select_push(merged, followup, [pr], base=bad_base)
+            raise AssertionError("accepted a base outside the push history")
+        except RuntimeError:
+            assert output.read_text() == ""
+    os.environ.pop("SIMIT_RELEASE_BASE", None)
     prepared2 = subprocess.check_output(["git", "commit-tree", "-S", tree, "-p", followup], input="chore: second release\n", text=True).strip()
     merged2 = commit("second release merge", followup, prepared2)
     pr2 = {**pr, "number": 18, "head": {**pr["head"], "sha": prepared2},
@@ -284,8 +556,8 @@ with tempfile.TemporaryDirectory() as directory:
     assert admission.release_sha(squashed, [pr], commits) == squashed
     squash_pr = {**pr, "merge_commit_sha": squashed}
     after_squash = commit("after squash", squashed)
-    assert select_push(base, after_squash, [squash_pr]) == f"release_sha={squashed}\n"
-    assert select_push(squashed, after_squash, [squash_pr]) == "release_sha=\n"
+    assert select_push(base, after_squash, [squash_pr])["release_sha"] == squashed
+    assert select_push(squashed, after_squash, [squash_pr])["release_sha"] == ""
     admission.api = original_api
     git("checkout", "--detach", squashed)
     # The original signed head of a squash may be missing from the event clone.

@@ -76,6 +76,16 @@ fn new_publishing_defaults_to_release_plz_and_round_trips() {
         recheck["working-directory"],
         "${{ runner.temp }}/release-plz-event-source"
     );
+    // A predecessor that failed at the gate leaves an unexamined push range;
+    // select extends into it and the publish recheck must replay the same base.
+    assert_eq!(
+        yaml["jobs"]["select"]["outputs"]["release_base"],
+        "${{ steps.select.outputs.release_base }}"
+    );
+    assert_eq!(
+        recheck["env"]["SIMIT_RELEASE_BASE"],
+        "${{ needs.select.outputs.release_base }}"
+    );
     let prepare_if = yaml["jobs"]["prepare-pr"]["if"].as_str().unwrap();
     assert!(
         prepare_if.contains(
