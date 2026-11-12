@@ -700,7 +700,12 @@ pub fn render(inputs: &ReleaseWorkflowInputs<'_>) -> String {
         .is_some_and(|prebuild| prebuild.release_archives)
         && inputs.platform == Platform::Github;
     if prebuilt_release_archives || bundle_matrix {
-        push_download_prebuilt_archives(&mut w, inputs.platform, inputs.runner);
+        push_download_prebuilt_archives(
+            &mut w,
+            inputs.platform,
+            inputs.runner,
+            prebuilt_release_archives,
+        );
     }
     push_build_artifacts(
         &mut w,
@@ -1265,10 +1270,10 @@ fn push_install_nix(w: &mut String, platform: Platform, artifacts: &ArtifactsCon
     if platform == Platform::Forgejo {
         w.push_str(&immutable_action_ref(
             crate::render::ci::INSTALL_NIX_ACTION_URL,
-            "v27",
+            "v31",
         ));
     } else {
-        w.push_str(&github_action_ref("cachix/install-nix-action", "v27"));
+        w.push_str(&github_action_ref("cachix/install-nix-action", "v31"));
     }
     w.push('\n');
     w.push_str("        with:\n          extra_nix_config: |\n");
@@ -1689,7 +1694,19 @@ fn push_build_srpm(w: &mut String, copr: &ResolvedCopr) {
     w.push_str("          SCRIPT\n");
 }
 
-fn push_download_prebuilt_archives(w: &mut String, platform: Platform, runner: &str) {
+/// Download the `release-*` archives an earlier job produced.
+///
+/// `actions/download-artifact` writes one directory per artifact when several
+/// match the pattern, but extracts a single match directly into `path`, so the
+/// collector walks every depth. `require_archives` is set only when a reusable
+/// prebuild promised them: with the bundle matrix the bundles are the release
+/// assets and a missing prebuild download is not an error.
+fn push_download_prebuilt_archives(
+    w: &mut String,
+    platform: Platform,
+    runner: &str,
+    require_archives: bool,
+) {
     w.push_str("      - name: Download native release archives\n        uses: ");
     if platform == Platform::Forgejo {
         w.push_str(&forgejo_action_ref("download-artifact", "v4.3.0"));
@@ -1702,7 +1719,10 @@ fn push_download_prebuilt_archives(w: &mut String, platform: Platform, runner: &
         w.push_str(&github_action_ref("actions/download-artifact", version));
     }
     w.push_str("\n        with:\n          pattern: release-*\n          path: .simit-prebuilt\n");
-    w.push_str("      - name: Collect native release archives\n        run: |\n          set -euo pipefail\n          mkdir -p release\n          count=0\n          while IFS= read -r file; do\n            name=\"$(basename \"$file\")\"\n            test ! -e \"release/$name\" || { echo \"release artifact collision: $name\" >&2; exit 1; }\n            cp \"$file\" \"release/$name\"\n            count=$((count + 1))\n          done < <(find .simit-prebuilt -mindepth 2 -type f -print | LC_ALL=C sort)\n          test \"$count\" -gt 0\n");
+    w.push_str("      - name: Collect native release archives\n        run: |\n          set -euo pipefail\n          mkdir -p release\n          count=0\n          if [ -d .simit-prebuilt ]; then\n            while IFS= read -r file; do\n              name=\"$(basename \"$file\")\"\n              test ! -e \"release/$name\" || { echo \"release artifact collision: $name\" >&2; exit 1; }\n              cp \"$file\" \"release/$name\"\n              count=$((count + 1))\n            done < <(find .simit-prebuilt -mindepth 1 -type f -print | LC_ALL=C sort)\n          fi\n");
+    if require_archives {
+        w.push_str("          test \"$count\" -gt 0 || { echo \"no native release archives were downloaded\" >&2; exit 1; }\n");
+    }
 }
 
 /// One build job per configured Nix system, so `packages.<system>.<bundle>`
@@ -4668,6 +4688,37 @@ esac"#,
         assert!(!workflow.contains("Download native release archives"));
         assert!(workflow.contains("nix build '.#release-bundle'"));
         assert!(workflow.contains("      - name: Validate tag\n"));
+    }
+
+    /// `actions/download-artifact` extracts a single matching artifact directly
+    /// into `path` and several into one directory each, so the collector must
+    /// walk every depth. Only a reusable prebuild is held to a non-empty set;
+    /// the bundle matrix already owns its release assets.
+    #[test]
+    fn prebuilt_archive_collection_matches_the_download_layout() {
+        let step = |workflow: &str| {
+            workflow
+                .split("      - name: ")
+                .find(|step| step.starts_with("Collect native release archives"))
+                .expect("collect step")
+                .to_owned()
+        };
+
+        let prebuild = PrebuildConfig {
+            release_archives: true,
+            ..PrebuildConfig::default()
+        };
+        let prebuilt = extract_workflow(Platform::Github, ReleaseProvider::Github, Some(&prebuild));
+        let prebuilt_collect = step(&prebuilt);
+        assert!(prebuilt_collect.contains("find .simit-prebuilt -mindepth 1 -type f"));
+        assert!(!prebuilt_collect.contains("-mindepth 2"));
+        assert!(prebuilt_collect.contains("no native release archives were downloaded"));
+
+        let bundles = bundle_matrix_workflow(Platform::Github);
+        assert!(bundles.contains("Download native release archives"));
+        let bundle_collect = step(&bundles);
+        assert!(bundle_collect.contains("find .simit-prebuilt -mindepth 1 -type f"));
+        assert!(!bundle_collect.contains("test \"$count\" -gt 0"));
     }
 
     fn sorrel_extract() -> ExtractAssetConfig {
