@@ -202,44 +202,55 @@ pub(super) fn verify_lock(before: &Value, after: &Value, input: &str, target: &s
         if name == input {
             continue;
         }
-        ensure!(
-            after_inputs.get(name) == Some(value),
-            "nix flake lock changed root input {name}"
-        );
-        // A root follows alias (an array path) is unchanged above; what it
+        let current = after_inputs
+            .get(name)
+            .with_context(|| format!("nix flake lock removed root input {name}"))?;
+        // Nix renumbers node keys (`treefmt-nix_3` -> `treefmt-nix_5`) when a
+        // lock changes, so graphs are compared by content, not by key. A root
+        // follows alias (an array path) must stay the same path; what it
         // reaches is covered by the input it follows, including the pin.
-        let Some(node) = value.as_str() else {
-            continue;
+        let unchanged = match (value.as_str(), current.as_str()) {
+            (Some(previous), Some(next)) => {
+                resolved(before, previous, &mut BTreeMap::new(), 0)?
+                    == resolved(after, next, &mut BTreeMap::new(), 0)?
+            }
+            _ => value == current,
         };
-        let mut previous = BTreeMap::new();
-        let mut current = BTreeMap::new();
-        locked_nodes(before, node, &mut previous)?;
-        locked_nodes(after, node, &mut current)?;
-        ensure!(
-            previous == current,
-            "nix flake lock changed locked nodes reachable from {name}"
-        );
+        ensure!(unchanged, "nix flake lock changed root input {name}");
     }
     Ok(())
 }
 
-fn locked_nodes(lock: &Value, node: &str, nodes: &mut BTreeMap<String, Value>) -> Result<()> {
-    if nodes.contains_key(node) {
-        return Ok(());
+/// A lock node with every child key replaced by the child's resolved content,
+/// so two locks compare equal exactly when their graphs do, whatever Nix
+/// named the nodes. Follows paths stay as written.
+fn resolved(
+    lock: &Value,
+    node: &str,
+    memo: &mut BTreeMap<String, Value>,
+    depth: usize,
+) -> Result<Value> {
+    if let Some(value) = memo.get(node) {
+        return Ok(value.clone());
     }
+    ensure!(depth < 256, "flake.lock nests too deep at node {node}");
     let entry = lock["nodes"]
         .get(node)
         .with_context(|| format!("flake.lock lacks node {node}"))?;
-    // The whole entry: locked metadata and labelled input edges alike.
-    nodes.insert(node.to_owned(), entry.clone());
+    let mut value = entry.clone();
     if let Some(inputs) = entry.get("inputs").and_then(Value::as_object) {
-        for value in inputs.values() {
-            if let Some(target) = value.as_str() {
-                locked_nodes(lock, target, nodes)?;
-            }
+        let mut children = serde_json::Map::new();
+        for (label, child) in inputs {
+            let child = match child.as_str() {
+                Some(key) => resolved(lock, key, memo, depth + 1)?,
+                None => child.clone(),
+            };
+            children.insert(label.clone(), child);
         }
+        value["inputs"] = Value::Object(children);
     }
-    Ok(())
+    memo.insert(node.to_owned(), value.clone());
+    Ok(value)
 }
 
 /// Rewrite the one URL literal that declares `input`. The three accepted
@@ -633,5 +644,19 @@ mod tests {
         let mut moved = lock(TARGET, &old);
         moved["nodes"]["root"]["inputs"]["nixpkgs"] = json!("elsewhere");
         verify_lock(&before, &moved, "harbor", TARGET).unwrap_err();
+        // Nix renumbers node keys when a lock changes; identical content under
+        // new keys, including a renamed root input node, is unchanged.
+        let mut renumbered = lock(TARGET, &old);
+        let nodes = renumbered["nodes"].as_object_mut().unwrap();
+        let nested = nodes.remove("nested").unwrap();
+        nodes.insert("nested_2".into(), nested);
+        let nixpkgs = nodes.remove("nixpkgs").unwrap();
+        nodes.insert("nixpkgs_3".into(), nixpkgs);
+        renumbered["nodes"]["harbor"]["inputs"]["nixpkgs"] = json!("nested_2");
+        renumbered["nodes"]["nixpkgs_3"]["inputs"]["nested"] = json!("nested_2");
+        renumbered["nodes"]["root"]["inputs"]["nixpkgs"] = json!("nixpkgs_3");
+        verify_lock(&before, &renumbered, "harbor", TARGET).unwrap();
+        renumbered["nodes"]["nested_2"]["locked"]["rev"] = json!("b".repeat(40));
+        verify_lock(&before, &renumbered, "harbor", TARGET).unwrap_err();
     }
 }
