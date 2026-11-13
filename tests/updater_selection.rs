@@ -196,3 +196,148 @@ fn selection_plans_cannot_accidentally_execute_or_limit_the_report() {
         assert!(String::from_utf8_lossy(&output.stderr).contains("cannot be used with"));
     }
 }
+
+#[test]
+fn pin_files_validate_their_contract_and_report_unselectable_items() {
+    let temporary = tempfile::tempdir().unwrap();
+    let root = temporary.path();
+    let target = "1".repeat(40);
+    let observation = |name: &str| {
+        json!({
+            "coordinate": format!("git.example/team/{name}"), "forge": "example",
+            "relativePath": format!("custom/layout/{name}"),
+            "kind": "owned-repo", "lifecycle": "active", "access": "normal",
+            "checkoutRole": "canonical", "simitCi": "auto"
+        })
+    };
+    let inventory = root.join("inventory.json");
+    fs::write(
+        &inventory,
+        serde_json::to_vec(&json!({
+            "schemaVersion": 1, "root": root.join("projects"),
+            "observedAt": chrono::Utc::now(), "producer": "pin-test",
+            "policyDigest": "b".repeat(64),
+            "projects": [observation("demo"), observation("other")]
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    let config = root.join("updates.json");
+    fs::write(
+        &config,
+        serde_json::to_vec(&json!({
+            "schemaVersion": 1,
+            "workspaces": {"projects": {
+                "root": root.join("projects"), "stateDirectory": root.join("state"),
+                "inventory": {"file": inventory}
+            }},
+            "forges": {"example": {
+                "host": "git.example", "apiUrl": "https://git.example/api",
+                "checkAuthority": "777",
+                "adapter": {"program": "/nix/store/absent-adapter/bin/adapter"}
+            }},
+            "profiles": {"fleet": {
+                "workspace": "projects", "scopes": ["ci"],
+                "select": {"coordinates": ["git.example/team/demo"]},
+                "generator": {
+                    "executable": "/nix/store/absent-generator/bin/simit",
+                    "sourceRevision": "a".repeat(40),
+                    "sourceCoordinate": "git.example/team/generator", "forge": "example",
+                    "requiredChecks": [{"name": "test", "authority": "777"}]
+                }
+            }}
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    let pin = root.join("pin.json");
+    let item = |coordinate: &str, input: &str, revision: &str| {
+        json!({
+            "coordinate": coordinate, "relativePath": "custom/layout/demo",
+            "input": input, "target": revision
+        })
+    };
+    let document = |contract: &str, items: serde_json::Value| {
+        json!({
+            "contract": contract, "producer": "pin-test",
+            "target": target, "items": items
+        })
+    };
+    let invoke = |document: &serde_json::Value, extra: &[&str]| {
+        fs::write(&pin, serde_json::to_vec(document).unwrap()).unwrap();
+        Command::new(env!("CARGO_BIN_EXE_simit"))
+            .args(["projects", "update", "--config"])
+            .arg(&config)
+            .args(["--profile", "fleet", "--dry-run", "--json"])
+            .args(extra)
+            .arg("--pin-file")
+            .arg(&pin)
+            .output()
+            .unwrap()
+    };
+    let valid = document(
+        "fleetix.supply-work-items.v1",
+        json!([item("git.example/team/demo", "harbor-rs", &target)]),
+    );
+    let rejected = |document: &serde_json::Value, message: &str| {
+        let output = invoke(document, &[]);
+        assert!(!output.status.success(), "{output:?}");
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(stderr.contains(message), "{stderr}");
+    };
+    rejected(
+        &document("fleetix.supply-work-items.v2", valid["items"].clone()),
+        "unknown pin work-item contract",
+    );
+    let mut unknown = valid.clone();
+    unknown["extra"] = json!(true);
+    rejected(&unknown, "unknown field");
+    let mut malformed = valid.clone();
+    malformed["target"] = json!("1".repeat(39));
+    rejected(&malformed, "40 hexadecimal");
+    rejected(
+        &document(
+            "fleetix.supply-work-items.v1",
+            json!([item("git.example/team/demo", "harbor-rs/v1", &target)]),
+        ),
+        "plain flake input identifier",
+    );
+    rejected(
+        &document(
+            "fleetix.supply-work-items.v1",
+            json!([item("Git.example/team/demo", "harbor-rs", &target)]),
+        ),
+        "canonical lowercase",
+    );
+    rejected(
+        &document(
+            "fleetix.supply-work-items.v1",
+            json!([
+                item("git.example/team/demo", "harbor-rs", &target),
+                item("git.example/team/demo", "other", &target)
+            ]),
+        ),
+        "duplicate pin work-item coordinate",
+    );
+    let output = invoke(&valid, &["--repo", "git.example/team/demo"]);
+    assert_eq!(output.status.code(), Some(2), "{output:?}");
+    assert!(String::from_utf8_lossy(&output.stderr).contains("cannot be used with"));
+    let skipped = invoke(
+        &document(
+            "fleetix.supply-work-items.v1",
+            json!([item("git.example/team/other", "harbor-rs", &target)]),
+        ),
+        &[],
+    );
+    assert!(!skipped.status.success(), "{skipped:?}");
+    assert!(
+        String::from_utf8_lossy(&skipped.stderr).contains("no pin work item matches"),
+        "{skipped:?}"
+    );
+    let report: serde_json::Value = serde_json::from_slice(&skipped.stdout).unwrap();
+    assert_eq!(report[0]["coordinate"], "git.example/team/other");
+    assert_eq!(report[0]["input"], "harbor-rs");
+    assert_eq!(report[0]["target"], target);
+    assert_eq!(report[0]["phase"], "skipped");
+    assert_eq!(report[0]["reason"], "coordinate-enrollment");
+}

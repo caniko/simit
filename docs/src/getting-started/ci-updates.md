@@ -629,6 +629,59 @@ close those by hand, or re-enable the repository so a run resumes or retires the
 
 Other forges add these operations in their own adapters.
 
+## Pin work items
+
+`simit projects update --pin-file PATH` applies an explicit work list written
+by fleetix's `fleetix_supply_land` tool. The file uses the
+`fleetix.supply-work-items.v1` contract:
+
+```json
+{
+  "contract": "fleetix.supply-work-items.v1",
+  "producer": "github.com/caniko/harbor-rs",
+  "target": "1111111111111111111111111111111111111111",
+  "items": [
+    {
+      "coordinate": "github.com/caniko/foo",
+      "relativePath": "owned/foo",
+      "input": "harbor-rs",
+      "target": "1111111111111111111111111111111111111111"
+    }
+  ]
+}
+```
+
+Unknown fields, an unknown contract, a non-40-hex target, a non-identifier
+input name, an invalid coordinate and duplicate coordinates are rejected before
+any state or inventory work. The list narrows selection like `--repo`, but
+`--pin-file` cannot be combined with it. Items outside the profile's eligible
+selection are reported as `skipped` with a reason (`missing`, `unknown-forge`,
+`disabled`, or a selection exclusion such as `coordinate-enrollment`); the run
+fails only when no item is selectable. Configured canaries need not be in the
+item list; canaries that are present still run first.
+
+For each repository the updater finds the single `<input>.url`,
+`inputs.<input>.url` or `<input> = { url = "…"; … };` declaration and rewrites
+its revision: the `rev=` parameter for `git+…` URLs, or the path segment for
+`github:owner/repo`. It then runs `nix flake lock` under a private home and
+cache inside the repository state directory, and compares the lock before and
+after. Both `flake.nix` and `flake.lock` join the candidate as patches, so the
+commit, admission, landing and adopted baseline work like any other candidate.
+Any other changed path fails the item. A README badge patch is deferred to the
+next run because badges derive from the pre-pin checkout, and a profile whose
+`flake` scope plan also touches `flake.nix` fails instead of double-owning it.
+
+The commit subject is `chore(deps): pin <input> to <target[..12]>`; when the CI
+plan also changed files, a second body line records the adopted generator
+revision. Items that cannot be rewritten commit nothing and are reported as
+`skipped`: `unrecognised-input-declaration` for a missing, ambiguous or
+unsupported declaration or URL form, and `branch-ref-github-url` for a
+`github:owner/repo/<branch>` URL. The frozen rollout stores the items, so
+repeating `--push` with the same file resumes it; a different file neither
+resumes that rollout nor reuses its pending candidate, which fails against the
+pin-scoped policy digest. `runtimePackages` therefore needs `nix` when a
+profile accepts pin work items.
+
 ## Scopes
 
 `scopes` lists the generated-file consumptions a profile maintains. It must

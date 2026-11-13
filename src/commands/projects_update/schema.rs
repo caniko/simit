@@ -755,6 +755,80 @@ fn requirements(values: &[Requirement]) -> Result<()> {
     Ok(())
 }
 
+/// Contract version fleetix writes for `projects update --pin-file`.
+pub const SUPPLY_WORK_ITEMS_CONTRACT: &str = "fleetix.supply-work-items.v1";
+
+/// Explicit flake-input pins from the supply landing tool. Unlike operator
+/// policy, this is a one-shot work list bound to a frozen rollout.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct PinFile {
+    pub contract: String,
+    pub producer: String,
+    pub target: String,
+    pub items: Vec<PinItem>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct PinItem {
+    pub coordinate: String,
+    pub relative_path: String,
+    pub input: String,
+    pub target: String,
+}
+
+impl PinFile {
+    pub fn validate(&self) -> Result<()> {
+        ensure!(
+            self.contract == SUPPLY_WORK_ITEMS_CONTRACT,
+            "unknown pin work-item contract"
+        );
+        ensure!(
+            !self.producer.trim().is_empty(),
+            "pin work-item producer is required"
+        );
+        revision(&self.target)?;
+        ensure!(!self.items.is_empty(), "pin work-item list is empty");
+        let mut seen = BTreeSet::new();
+        for item in &self.items {
+            coordinate(&item.coordinate)?;
+            relative(Path::new(&item.relative_path))?;
+            input(&item.input)?;
+            revision(&item.target)?;
+            ensure!(
+                seen.insert(&item.coordinate),
+                "duplicate pin work-item coordinate: {}",
+                item.coordinate
+            );
+        }
+        Ok(())
+    }
+}
+
+/// Plain flake input identifiers, which the declaration rewrite can recognise
+/// without parsing quoted attribute names.
+fn input(value: &str) -> Result<()> {
+    let mut characters = value.chars();
+    ensure!(
+        characters
+            .next()
+            .is_some_and(|character| character.is_ascii_alphabetic() || character == '_')
+            && characters.all(|character| character.is_ascii_alphanumeric()
+                || matches!(character, '_' | '-' | '\'')),
+        "pin work-item input must be a plain flake input identifier"
+    );
+    Ok(())
+}
+
+pub(super) fn revision(value: &str) -> Result<()> {
+    ensure!(
+        value.len() == 40 && value.bytes().all(|byte| byte.is_ascii_hexdigit()),
+        "explicit revision must be 40 hexadecimal characters"
+    );
+    Ok(())
+}
+
 #[derive(Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct AdapterRequest {
@@ -1782,5 +1856,77 @@ mod tests {
         // A CI-only credential is valid for public forge repositories.
         cfg.forges.get_mut("example").unwrap().credential_file = None;
         cfg.validate().unwrap();
+    }
+
+    #[test]
+    fn pin_work_items_reject_unknown_or_malformed_contracts() {
+        let target = "a".repeat(40);
+        let item = |coordinate: &str, input: &str| {
+            serde_json::json!({
+                "coordinate": coordinate, "relativePath": "owned/demo",
+                "input": input, "target": target
+            })
+        };
+        let document = |contract: &str, items: serde_json::Value| {
+            serde_json::json!({
+                "contract": contract, "producer": "fixture",
+                "target": target, "items": items
+            })
+        };
+        let parse = |value: serde_json::Value| -> Result<PinFile> {
+            let file: PinFile = serde_json::from_value(value)?;
+            file.validate()?;
+            Ok(file)
+        };
+        let valid = document(
+            SUPPLY_WORK_ITEMS_CONTRACT,
+            serde_json::json!([item("forge.example/team/demo", "harbor-rs")]),
+        );
+        parse(valid.clone()).unwrap();
+        let rejected = |document: serde_json::Value, message: &str| {
+            let error = parse(document).unwrap_err().to_string();
+            assert!(error.contains(message), "{error}");
+        };
+        rejected(
+            document("fleetix.supply-work-items.v2", valid["items"].clone()),
+            "unknown pin work-item contract",
+        );
+        let mut unknown = valid.clone();
+        unknown["unexpected"] = serde_json::json!(true);
+        rejected(unknown, "unknown field");
+        let mut malformed = valid.clone();
+        malformed["target"] = serde_json::json!("a".repeat(39));
+        rejected(malformed, "40 hexadecimal");
+        let mut malformed = valid.clone();
+        malformed["items"][0]["target"] = serde_json::json!("A".repeat(41));
+        rejected(malformed, "40 hexadecimal");
+        rejected(
+            document(
+                SUPPLY_WORK_ITEMS_CONTRACT,
+                serde_json::json!([item("forge.example/team/demo", "harbor-rs/v1")]),
+            ),
+            "plain flake input identifier",
+        );
+        rejected(
+            document(
+                SUPPLY_WORK_ITEMS_CONTRACT,
+                serde_json::json!([item("Forge.example/team/demo", "harbor-rs")]),
+            ),
+            "canonical lowercase",
+        );
+        rejected(
+            document(
+                SUPPLY_WORK_ITEMS_CONTRACT,
+                serde_json::json!([
+                    item("forge.example/team/demo", "harbor-rs"),
+                    item("forge.example/team/demo", "other"),
+                ]),
+            ),
+            "duplicate pin work-item coordinate",
+        );
+        rejected(
+            document(SUPPLY_WORK_ITEMS_CONTRACT, serde_json::json!([])),
+            "pin work-item list is empty",
+        );
     }
 }
