@@ -1202,6 +1202,27 @@ mod tests {
     }
 
     #[test]
+    fn platform_check_probes_the_bundle_check_beside_unreleased_binaries() {
+        // An app released next to an unreleased `xtask` exposes only the
+        // unsuffixed check, so it must be probed whatever the binary count.
+        let metadata: crate::cargo::Metadata = serde_json::from_value(serde_json::json!({
+            "packages": [
+                {"id": "path+file:///w/app#app@0.1.0", "name": "app", "version": "0.1.0",
+                 "publish": [], "targets": [{"kind": ["bin"]}], "manifest_path": "/w/app/Cargo.toml"},
+                {"id": "path+file:///w/xtask#xtask@0.1.0", "name": "xtask", "version": "0.1.0",
+                 "publish": [], "targets": [{"kind": ["bin"]}], "manifest_path": "/w/xtask/Cargo.toml"}
+            ],
+            "workspace_members": ["path+file:///w/app#app@0.1.0", "path+file:///w/xtask#xtask@0.1.0"],
+            "workspace_root": "/w"
+        }))
+        .unwrap();
+        assert!(
+            crate::binstall::archive_check_names(&metadata)
+                .contains(&"binstall-metadata".to_owned())
+        );
+    }
+
+    #[test]
     fn platform_check_reads_publish_false_binary_metadata() {
         use crate::config::ReleasePlatform;
 

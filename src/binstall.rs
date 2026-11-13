@@ -295,10 +295,10 @@ pub fn archive_check_names(metadata: &Metadata) -> Vec<String> {
         .iter()
         .map(|name| format!("binstall-metadata-{name}"))
         .collect::<Vec<_>>();
-    // The unsuffixed check is the single-binary-crate convention.
-    if binaries.len() == 1 {
-        names.push("binstall-metadata".to_owned());
-    }
+    // The unsuffixed check is the single-released-crate convention. The
+    // producer counts released crates, not workspace binaries (an unreleased
+    // `xtask` does not count), so always probe it as a bundle-level fallback.
+    names.push("binstall-metadata".to_owned());
     names
 }
 

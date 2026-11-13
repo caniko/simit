@@ -1282,9 +1282,9 @@ pub fn release_file(
             "Crow release workflows do not support [[release.artifacts.extract]]; use an Actions release provider to promote archive members"
         );
     }
-    if !inputs.artifacts.effective_system_runners().is_empty() {
+    if !inputs.artifacts.platforms.is_empty() {
         bail!(
-            "Crow release workflows build one system's release bundle, so they cannot serve [release.artifacts].platforms or system_runners; drop them or use an Actions release provider for the per-system bundle matrix"
+            "Crow release workflows build one system's release bundle, so they cannot serve [release.artifacts].platforms; drop it or use an Actions release provider for the per-system bundle matrix"
         );
     }
     if inputs.tag_prefix != crate::release_identity::TagPrefix::None {
@@ -1609,7 +1609,7 @@ mod tests {
             "{err}"
         );
 
-        // An explicit system runner is the same gap.
+        // Explicit system_runners predate platforms and keep rendering.
         let artifacts = ArtifactsConfig {
             prebuild_binaries: true,
             system_runners: BTreeMap::from([(
@@ -1619,6 +1619,6 @@ mod tests {
             ..ArtifactsConfig::default()
         };
         let inputs = crow_release_inputs(&artifacts, &publish);
-        assert!(release_file(CrowWorkflowFormat::Yaml, &CrowCiConfig::default(), &inputs).is_err());
+        assert!(release_file(CrowWorkflowFormat::Yaml, &CrowCiConfig::default(), &inputs).is_ok());
     }
 }
