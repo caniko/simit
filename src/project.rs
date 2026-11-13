@@ -50,6 +50,12 @@ impl CiUpdatePlan {
         format!("simit.ci-update-plan.v{version}")
     }
 
+    /// Add a project-owned patch and keep the schema bound to its features.
+    pub fn push_patch(&mut self, patch: GeneratedFile) {
+        self.patches.push(patch);
+        self.schema = Self::schema_for(&self.patches);
+    }
+
     /// Readers accept exactly the version implied by the plan's features.
     pub fn schema_matches(&self) -> bool {
         self.schema == Self::schema_for(&self.patches)

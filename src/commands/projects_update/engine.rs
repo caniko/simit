@@ -86,7 +86,7 @@ pub(super) fn run_tool(command: std::process::Command, timeout_seconds: u64) -> 
     }
 }
 
-fn git(root: &Path, argv: &[&str]) -> Result<String> {
+pub(super) fn git(root: &Path, argv: &[&str]) -> Result<String> {
     git_raw(root, argv).map(|v| v.trim_end().to_owned())
 }
 
@@ -194,6 +194,10 @@ pub fn save<T: Serialize>(path: &Path, value: &T) -> Result<()> {
 #[derive(Serialize, Deserialize)]
 pub struct FrozenSelection {
     pub projects: Vec<Project>,
+    /// Explicit flake-input pins bound to this rollout; absent for ordinary
+    /// runs, and part of the rollout key so a different file never resumes it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pins: Option<Vec<PinItem>>,
     pub inventory_digest: String,
     pub completed: bool,
 }
@@ -214,6 +218,7 @@ pub fn policy_digest(
     workspace: &Workspace,
     consumer_forge: Option<&str>,
     coordinate: Option<&str>,
+    pins: Option<&[PinItem]>,
 ) -> Result<String> {
     let generator = config
         .forges
@@ -228,7 +233,12 @@ pub fn policy_digest(
         })
         .transpose()?;
     let Some(coordinate) = coordinate else {
-        return canonical_digest(&(profile, workspace, generator, consumer));
+        // A pin run's v1 fallback digest still binds the work list, so an
+        // unfinished legacy candidate cannot be resumed for another target.
+        return match pins {
+            Some(pins) => canonical_digest(&(profile, workspace, generator, consumer, pins)),
+            None => canonical_digest(&(profile, workspace, generator, consumer)),
+        };
     };
     // Other repositories' enrollment and overrides are not this transaction's
     // policy, so editing them keeps its pending candidate or pull request.
@@ -244,6 +254,15 @@ pub fn policy_digest(
     }
     if let Some(overrides) = scoped["projectOverrides"].as_object_mut() {
         overrides.retain(|key, _| key == coordinate);
+    }
+    // A pending candidate belongs to the pin that produced it; a different
+    // target must fail reconciliation rather than resume those bytes.
+    if let Some(pin) = pins.and_then(|items| {
+        items
+            .iter()
+            .find(|item| item.coordinate.as_str() == coordinate)
+    }) {
+        return canonical_digest(&(&scoped, workspace, generator, consumer, pin));
     }
     canonical_digest(&(scoped, workspace, generator, consumer))
 }
@@ -1009,6 +1028,7 @@ fn hashes(
         .collect()
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn update(
     config: &Config,
     profile_name: &str,
@@ -1017,6 +1037,7 @@ pub fn update(
     project: &Project,
     push: bool,
     wait_seconds: u64,
+    pin_item: Option<&PinItem>,
 ) -> Result<Receipt> {
     config.validate()?;
     coordinate(&project.coordinate)?;
@@ -1049,13 +1070,21 @@ pub fn update(
     );
     private_directory(&root)?;
     let receipt_path = root.join("receipt.json");
-    let config_digest = policy_digest(config, profile, workspace, Some(&project.forge), None)?;
+    let config_digest = policy_digest(
+        config,
+        profile,
+        workspace,
+        Some(&project.forge),
+        None,
+        pin_item.map(std::slice::from_ref),
+    )?;
     let project_digest = policy_digest(
         config,
         profile,
         workspace,
         Some(&project.forge),
         Some(&project.coordinate),
+        pin_item.map(std::slice::from_ref),
     )?;
     let over = profile.project_overrides.get(&project.coordinate);
     let target = over.and_then(|o| o.target_branch.as_deref());
@@ -1293,8 +1322,11 @@ pub fn update(
             ..previous
         }
     } else {
-        let (plan, workflow_paths) =
+        let (mut plan, workflow_paths) =
             generate_scopes(&generator, &checkout, &state_directory, profile)?;
+        if let Some(item) = pin_item {
+            super::pin::apply(&checkout, &root, &mut plan, item)?;
+        }
         let patch_paths = plan
             .patches
             .iter()
@@ -1473,17 +1505,28 @@ pub fn update(
         }
         let author = git(&checkout, &["var", "GIT_AUTHOR_IDENT"])?;
         let committer = git(&checkout, &["var", "GIT_COMMITTER_IDENT"])?;
-        git(
-            &checkout,
-            &[
-                "commit",
-                "-m",
-                &format!(
-                    "ci: adopt qualified simit {}",
-                    profile.generator.source_revision
-                ),
-            ],
-        )?;
+        let message = match pin_item {
+            Some(item) => {
+                let mut message =
+                    format!("chore(deps): pin {} to {}", item.input, &item.target[..12]);
+                let changed = git(&checkout, &["diff", "--cached", "--name-only", "-z"])?;
+                if changed
+                    .split('\0')
+                    .any(|path| !path.is_empty() && !receipt.patches.contains_key(path))
+                {
+                    message.push_str(&format!(
+                        "\n\nci: adopt qualified simit {}",
+                        profile.generator.source_revision
+                    ));
+                }
+                message
+            }
+            None => format!(
+                "ci: adopt qualified simit {}",
+                profile.generator.source_revision
+            ),
+        };
+        git(&checkout, &["commit", "-m", &message])?;
         let verification = git(
             &checkout,
             &["show", "--format=fuller", "--no-patch", "HEAD"],
@@ -3244,6 +3287,7 @@ else:
                         config: config.clone(),
                         profile: "fleet".into(),
                         repo: vec![],
+                        pin_file: None,
                         dry_run: false,
                         plan: false,
                         push: true,
@@ -3432,6 +3476,7 @@ else:
             config: alias,
             profile: "fleet".into(),
             repo: vec![],
+            pin_file: None,
             dry_run: false,
             plan: false,
             push: false,
@@ -3579,6 +3624,204 @@ else:
         let repatched = f.update(true).unwrap();
         assert_eq!(repatched.phase, "qualified");
         assert_eq!(f.remote_head(), repatched.candidate);
+    }
+
+    #[test]
+    fn namespace_pin_work_items_rewrite_lock_and_resume_the_frozen_rollout() {
+        const TARGET: &str = "1111111111111111111111111111111111111111";
+        const OTHER: &str = "2222222222222222222222222222222222222222";
+        let f = Fixture::new();
+        let old = "a".repeat(40);
+        fs::write(
+            f.source.join("flake.nix"),
+            format!(
+                "{{\n  description = \"pin fixture\";\n  inputs.harbor-rs.url = \"git+https://github.com/caniko/harbor-rs.git?ref=trunk&rev={old}\";\n  inputs.nixpkgs.url = \"github:NixOS/nixpkgs/{old}\";\n  outputs = {{ self, ... }}: {{}};\n}}\n"
+            ),
+        )
+        .unwrap();
+        fs::write(
+            f.source.join("flake.lock"),
+            serde_json::to_vec_pretty(&json!({
+                "nodes": {
+                    "root": {"inputs": {"harbor-rs": "harbor-rs", "nixpkgs": "nixpkgs"}},
+                    "harbor-rs": {
+                        "locked": {"lastModified": 1, "narHash": "sha256-one", "ref": "trunk",
+                                   "rev": old, "type": "git",
+                                   "url": "https://github.com/caniko/harbor-rs.git"},
+                        "original": {"ref": "trunk", "type": "git",
+                                     "url": "https://github.com/caniko/harbor-rs.git"}
+                    },
+                    "nixpkgs": {
+                        "locked": {"lastModified": 2, "narHash": "sha256-two", "owner": "NixOS",
+                                   "repo": "nixpkgs", "rev": old, "type": "github"},
+                        "original": {"owner": "NixOS", "repo": "nixpkgs", "type": "github"}
+                    }
+                },
+                "root": "root",
+                "version": 7
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        let source = f.publish(&f.source, "enroll the pin fixture flake");
+        f.write_inventory();
+        // A deterministic stand-in for `nix flake lock`: only the pinned root
+        // input moves, so the real tool's network and store are not needed.
+        let python = std::process::Command::new("python3")
+            .args(["-c", "import sys; print(sys.executable)"])
+            .output()
+            .unwrap();
+        assert!(python.status.success());
+        let python = fs::canonicalize(String::from_utf8(python.stdout).unwrap().trim()).unwrap();
+        let temporary = tempfile::tempdir().unwrap();
+        let nix = temporary.path().join("nix");
+        fs::write(
+            &nix,
+            format!(
+                "#!{} -I\nimport json\npath = 'flake.lock'\ndata = json.load(open(path))\nnode = data['nodes']['root']['inputs']['harbor-rs']\ndata['nodes'][node]['locked']['rev'] = '{TARGET}'\nopen(path, 'w').write(json.dumps(data, indent=2) + '\\n')\n",
+                python.display()
+            ),
+        )
+        .unwrap();
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&nix, fs::Permissions::from_mode(0o700)).unwrap();
+        }
+        let pin = temporary.path().join("pin.json");
+        let item = json!({
+            "coordinate": f.project.coordinate.clone(),
+            "relativePath": f.project.relative_path.clone(),
+            "input": "harbor-rs", "target": TARGET
+        });
+        save(
+            &pin,
+            &json!({
+                "contract": "fleetix.supply-work-items.v1", "producer": "fixture",
+                "target": TARGET, "items": [item.clone()]
+            }),
+        )
+        .unwrap();
+        *super::super::pin::NIX.lock().unwrap() = Some(nix);
+        // An unrecognised declaration drops the item without a candidate.
+        let absent = PinItem {
+            coordinate: f.project.coordinate.clone(),
+            relative_path: f.project.relative_path.clone(),
+            input: "absent".into(),
+            target: TARGET.into(),
+        };
+        let skipped = f.update_pin(true, Some(&absent)).unwrap_err();
+        assert_eq!(
+            skipped
+                .downcast_ref::<super::super::pin::PinSkip>()
+                .map(super::super::pin::PinSkip::reason),
+            Some("unrecognised-input-declaration")
+        );
+        f.control(json!({"candidate":"pending"}));
+        // A parked candidate is an incomplete rollout, exactly like `--repo`.
+        assert!(f.cli_pin(&pin).is_err());
+        let pending: Receipt = crate::review::read_json(&f.root().join("receipt.json")).unwrap();
+        assert_eq!(pending.phase, "candidate");
+        let mut changed = git(
+            &f.remote,
+            &[
+                "diff",
+                "--name-only",
+                &format!("{source}..{}", pending.candidate),
+            ],
+        )
+        .unwrap()
+        .lines()
+        .map(str::to_owned)
+        .collect::<Vec<_>>();
+        changed.sort();
+        assert_eq!(
+            changed,
+            [
+                ".github/workflows/ci.yaml",
+                "flake.lock",
+                "flake.nix",
+                "new-managed.txt"
+            ]
+        );
+        let locked: serde_json::Value = serde_json::from_str(
+            &git(
+                &f.remote,
+                &["show", &format!("{}:flake.lock", pending.candidate)],
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(locked["nodes"]["harbor-rs"]["locked"]["rev"], TARGET);
+        assert_eq!(locked["nodes"]["nixpkgs"]["locked"]["rev"], old);
+        let flake = git(
+            &f.remote,
+            &["show", &format!("{}:flake.nix", pending.candidate)],
+        )
+        .unwrap();
+        assert!(
+            flake.contains(&format!("ref=trunk&rev={TARGET}")),
+            "{flake}"
+        );
+        let message = git(
+            &f.remote,
+            &["show", "-s", "--format=%B", &pending.candidate],
+        )
+        .unwrap();
+        assert!(
+            message.starts_with(&format!("chore(deps): pin harbor-rs to {}", &TARGET[..12])),
+            "{message}"
+        );
+        assert!(
+            message.contains(&format!(
+                "ci: adopt qualified simit {}",
+                f.config.profiles["fleet"].generator.source_revision
+            )),
+            "{message}"
+        );
+        let state = &f.config.workspaces["projects"].state_directory;
+        let rollouts = || {
+            fs::read_dir(state)
+                .unwrap()
+                .map(|entry| entry.unwrap().path())
+                .filter(|path| {
+                    path.file_name()
+                        .is_some_and(|name| name.to_string_lossy().starts_with("rollout-"))
+                })
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(rollouts().len(), 1);
+        let frozen: serde_json::Value = crate::review::read_json(&rollouts()[0]).unwrap();
+        assert_eq!(frozen["pins"][0]["target"], TARGET);
+        assert_eq!(
+            frozen["projects"][0]["coordinate"],
+            f.project.coordinate.as_str()
+        );
+        // Another target must not resume these pending bytes under a new
+        // frozen rollout; it fails reconciliation against the pin digest.
+        let other = PinItem {
+            coordinate: f.project.coordinate.clone(),
+            relative_path: f.project.relative_path.clone(),
+            input: "harbor-rs".into(),
+            target: OTHER.into(),
+        };
+        assert!(
+            f.update_pin(true, Some(&other))
+                .unwrap_err()
+                .to_string()
+                .contains("an unfinished rollout uses another policy")
+        );
+        // The same file resumes the retained candidate without a new commit.
+        f.control(json!({}));
+        f.cli_pin(&pin).unwrap();
+        let adopted: Receipt = crate::review::read_json(&f.root().join("receipt.json")).unwrap();
+        assert_eq!(adopted.phase, "qualified");
+        assert_eq!(adopted.candidate, pending.candidate);
+        assert_eq!(rollouts().len(), 1);
+        assert_eq!(
+            crate::review::read_json::<serde_json::Value>(&rollouts()[0]).unwrap()["completed"],
+            true
+        );
+        *super::super::pin::NIX.lock().unwrap() = None;
     }
 
     #[test]
@@ -3948,6 +4191,7 @@ else:
                 config,
                 profile: profile.into(),
                 repo: vec![],
+                pin_file: None,
                 dry_run: false,
                 plan: false,
                 push,
@@ -3957,7 +4201,27 @@ else:
                 json: true,
             })
         }
+        fn cli_pin(&self, pin_file: &Path) -> Result<()> {
+            let config = self.control.with_file_name("updates.json");
+            save(&config, &self.config)?;
+            super::super::run(super::super::Args {
+                config,
+                profile: "fleet".into(),
+                repo: vec![],
+                pin_file: Some(pin_file.into()),
+                dry_run: false,
+                plan: false,
+                push: true,
+                status: false,
+                wait_seconds: 0,
+                limit: None,
+                json: true,
+            })
+        }
         fn update(&self, push: bool) -> Result<Receipt> {
+            self.update_pin(push, None)
+        }
+        fn update_pin(&self, push: bool, pin_item: Option<&PinItem>) -> Result<Receipt> {
             update(
                 &self.config,
                 "fleet",
@@ -3966,6 +4230,7 @@ else:
                 &self.project,
                 push,
                 0,
+                pin_item,
             )
         }
         fn remote_head(&self) -> String {
