@@ -67,6 +67,7 @@ pub(super) fn apply(
             path.display()
         );
     }
+    regular_files(checkout)?;
     let flake = checkout.join("flake.nix");
     let source = match fs::read_to_string(&flake) {
         Ok(source) => source,
@@ -100,6 +101,22 @@ pub(super) fn apply(
             relative_path: name.into(),
             content: fs::read_to_string(checkout.join(name))?,
         });
+    }
+    Ok(())
+}
+
+/// A repository-controlled symlink would redirect the pin's writes outside the
+/// disposable checkout, so both flake files must be regular files (or absent).
+fn regular_files(checkout: &Path) -> Result<()> {
+    for name in PIN_FILES {
+        match fs::symlink_metadata(checkout.join(name)) {
+            Ok(metadata) => ensure!(
+                metadata.file_type().is_file(),
+                "{name} is not a regular file"
+            ),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error.into()),
+        }
     }
     Ok(())
 }
@@ -189,9 +206,11 @@ pub(super) fn verify_lock(before: &Value, after: &Value, input: &str, target: &s
             after_inputs.get(name) == Some(value),
             "nix flake lock changed root input {name}"
         );
-        let node = value
-            .as_str()
-            .with_context(|| format!("flake.lock root input {name} is not a node"))?;
+        // A root follows alias (an array path) is unchanged above; what it
+        // reaches is covered by the input it follows, including the pin.
+        let Some(node) = value.as_str() else {
+            continue;
+        };
         let mut previous = BTreeMap::new();
         let mut current = BTreeMap::new();
         locked_nodes(before, node, &mut previous)?;
@@ -284,6 +303,7 @@ fn rewrite(source: &str, input: &str, target: &str) -> Result<String, &'static s
         }
         // `<input> = { url = "…"; … };`
         if ident(tokens.get(index)) == Some("url")
+            && !punct(previous, '.')
             && punct(tokens.get(index + 1), '=')
             && let Some((url, start, end)) = string(tokens.get(index + 2))
             && let Some(name) = enclosing
@@ -505,6 +525,13 @@ mod tests {
                 ),
             ),
         ];
+        let cases = cases.into_iter().chain([(
+            "{ inputs.foo = { url = \"github:o/r\"; inputs.bar.url = \"github:o/b\"; }; }"
+                .to_owned(),
+            format!(
+                "{{ inputs.foo = {{ url = \"github:o/r/{TARGET}\"; inputs.bar.url = \"github:o/b\"; }}; }}"
+            ),
+        )]);
         for (source, expected) in cases {
             assert_eq!(rewrites(&source, "foo").unwrap(), expected, "{source}");
         }
@@ -549,6 +576,16 @@ mod tests {
     }
 
     #[test]
+    fn symlinked_flake_files_are_refused() {
+        let checkout = tempfile::tempdir().unwrap();
+        regular_files(checkout.path()).unwrap();
+        let outside = tempfile::NamedTempFile::new().unwrap();
+        std::os::unix::fs::symlink(outside.path(), checkout.path().join("flake.nix")).unwrap();
+        let error = regular_files(checkout.path()).unwrap_err().to_string();
+        assert!(error.contains("flake.nix is not a regular file"), "{error}");
+    }
+
+    #[test]
     fn lock_verification_binds_the_target_and_preserves_other_graphs() {
         let old = "a".repeat(40);
         let lock = |harbor: &str, nested: &str| {
@@ -577,6 +614,15 @@ mod tests {
         let mut changed = lock(TARGET, &old);
         changed["nodes"]["nixpkgs"]["locked"]["rev"] = json!("b".repeat(40));
         verify_lock(&before, &changed, "harbor", TARGET).unwrap_err();
+        // A root follows alias is compared by value; what it reaches moves
+        // with the input it follows.
+        let mut aliased = (before.clone(), lock(TARGET, &old));
+        for lock in [&mut aliased.0, &mut aliased.1] {
+            lock["nodes"]["root"]["inputs"]["crane"] = json!(["harbor", "nixpkgs"]);
+        }
+        verify_lock(&aliased.0, &aliased.1, "harbor", TARGET).unwrap();
+        aliased.1["nodes"]["root"]["inputs"]["crane"] = json!(["nixpkgs"]);
+        verify_lock(&aliased.0, &aliased.1, "harbor", TARGET).unwrap_err();
         let mut moved = lock(TARGET, &old);
         moved["nodes"]["root"]["inputs"]["nixpkgs"] = json!("elsewhere");
         verify_lock(&before, &moved, "harbor", TARGET).unwrap_err();

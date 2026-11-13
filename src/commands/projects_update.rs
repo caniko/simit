@@ -332,14 +332,16 @@ pub fn run(args: Args) -> Result<()> {
         frozen.projects.retain(|p| {
             !reports.iter().any(|r| {
                 r["coordinate"] == p.coordinate
-                    && matches!(r["phase"].as_str(), Some("qualified" | "unchanged"))
+                    && matches!(
+                        r["phase"].as_str(),
+                        Some("qualified" | "unchanged" | "skipped")
+                    )
             })
         });
         let retried = reports
             .iter()
             .filter(|r| {
-                !profile.rollout.stop_on_failure
-                    || matches!(r["phase"].as_str(), Some("proposed" | "skipped"))
+                !profile.rollout.stop_on_failure || matches!(r["phase"].as_str(), Some("proposed"))
             })
             .filter_map(|r| r["coordinate"].as_str())
             .collect::<std::collections::BTreeSet<_>>();
