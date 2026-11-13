@@ -200,10 +200,13 @@ for the same system.
 
 ```toml
 [release.artifacts]
-prebuild_binaries = true
 binstall = true
 platforms = ["linux", "macos", "windows"]
 ```
+
+A nonempty `platforms` selects the conventional `packages.<system>.release-bundle`
+output, so `prebuild_binaries = true` is not required; an explicit
+`nix_bundle_attrs` list still wins.
 
 `simit release verify` fails when a requested platform has no archive in the
 evaluated release bundle metadata and reports `blocked` when the flake exposes
@@ -220,7 +223,6 @@ build, next to the Windows cross archive and the macOS native archive, all in
 
 ```toml
 [release.artifacts]
-prebuild_binaries = true
 platforms = ["linux", "macos", "windows"]
 ```
 

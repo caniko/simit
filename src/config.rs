@@ -1893,8 +1893,9 @@ impl WindowsSigningConfig {
 pub struct ArtifactsConfig {
     /// Opt into the conventional rs-harbor `release-bundle` output.
     ///
-    /// This is deliberately a small project-facing switch. Projects may keep
-    /// an explicit `nix_bundle_attrs` list when they publish more than one
+    /// This is deliberately a small project-facing switch. A nonempty
+    /// `platforms` list selects the same default, and projects may keep an
+    /// explicit `nix_bundle_attrs` list when they publish more than one
     /// bundle; the explicit list wins in that case.
     #[serde(default)]
     pub prebuild_binaries: bool,
@@ -2105,7 +2106,10 @@ impl ArtifactsConfig {
     pub fn effective_nix_bundle_attrs(&self) -> Vec<String> {
         if !self.nix_bundle_attrs.is_empty() {
             self.nix_bundle_attrs.clone()
-        } else if self.prebuild_binaries {
+        } else if self.prebuild_binaries || !self.platforms.is_empty() {
+            // A platform list names archives, so it also names the bundle that
+            // produces them; requiring `prebuild_binaries` as well only made
+            // every desktop config restate the same opt-in twice.
             vec!["release-bundle".to_owned()]
         } else {
             Vec::new()
@@ -2154,11 +2158,11 @@ impl ArtifactsConfig {
                 "simit project config: [release.artifacts].platforms lists `windows` without `linux`; the x86_64-linux job cross-builds the Windows archives"
             );
         }
-        if (self.binstall || !self.platforms.is_empty() || !self.system_runners.is_empty())
+        if (self.binstall || !self.system_runners.is_empty())
             && self.effective_nix_bundle_attrs().is_empty()
         {
             bail!(
-                "simit project config: [release.artifacts].binstall, platforms and system_runners require prebuild_binaries or nix_bundle_attrs"
+                "simit project config: [release.artifacts].binstall and system_runners require prebuild_binaries or nix_bundle_attrs"
             );
         }
         Ok(())
@@ -3473,6 +3477,11 @@ impl ProjectConfig {
             {
                 bail!(
                     "simit project config: [prebuild].release_archives requires release.artifacts Nix bundle outputs"
+                );
+            }
+            if prebuild.release_archives && !self.release.artifacts.platforms.is_empty() {
+                bail!(
+                    "simit project config: [prebuild].release_archives builds one archive set for the workflow's own system, so it cannot serve [release.artifacts].platforms; set release_archives = false to build the per-system bundle matrix, or drop platforms"
                 );
             }
             if prebuild.publish_attic {
@@ -6632,10 +6641,7 @@ mod release_bundle_tests {
                 "[system_runners]\nx86_64-linux = \"ubuntu-24.04\"\n",
                 "require prebuild_binaries or nix_bundle_attrs",
             ),
-            (
-                "binstall = true\n",
-                "require prebuild_binaries or nix_bundle_attrs",
-            ),
+            ("binstall = true\n", "require prebuild_binaries"),
         ] {
             let err = parse(toml).unwrap_err().to_string();
             assert!(err.contains(expected), "{toml}: {err}");
@@ -6666,6 +6672,19 @@ mod release_bundle_tests {
             artifacts.effective_system_runners()["x86_64-linux"],
             "ubuntu-latest"
         );
+        // `platforms` alone selects the conventional bundle output.
+        let artifacts = parse("platforms = [\"linux\", \"macos\"]\n").unwrap();
+        assert_eq!(
+            artifacts.effective_nix_bundle_attrs(),
+            ["release-bundle".to_owned()]
+        );
+        // An explicit bundle list still wins.
+        let artifacts =
+            parse("platforms = [\"linux\"]\nnix_bundle_attrs = [\"desktop-bundle\"]\n").unwrap();
+        assert_eq!(
+            artifacts.effective_nix_bundle_attrs(),
+            ["desktop-bundle".to_owned()]
+        );
     }
 
     #[test]
@@ -6690,10 +6709,6 @@ mod release_bundle_tests {
             (
                 "prebuild_binaries = true\nplatforms = [\"windows\"]\n",
                 "without `linux`",
-            ),
-            (
-                "platforms = [\"linux\"]\n",
-                "require prebuild_binaries or nix_bundle_attrs",
             ),
         ] {
             let err = parse(toml).unwrap_err().to_string();

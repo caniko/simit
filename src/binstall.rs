@@ -254,12 +254,68 @@ fn table_name(line: &str) -> Option<&str> {
 
 /// Rust target triples an evaluated `[package.metadata.binstall]` block
 /// serves, one per `[package.metadata.binstall.overrides.<triple>]` table.
+///
+/// Parsed as TOML so a quoted header such as
+/// `[package.metadata.binstall.overrides."aarch64-apple-darwin"]` yields the
+/// bare triple.
 pub fn archive_targets(text: &str) -> std::collections::BTreeSet<String> {
-    text.lines()
-        .filter_map(table_name)
-        .filter_map(|name| name.strip_prefix("package.metadata.binstall.overrides."))
-        .map(str::to_owned)
-        .collect()
+    text.parse::<toml_edit::DocumentMut>()
+        .ok()
+        .and_then(|document| {
+            let binstall = document
+                .get("package")?
+                .as_table_like()?
+                .get("metadata")?
+                .as_table_like()?
+                .get("binstall")?;
+            binstall
+                .as_table_like()?
+                .get("overrides")?
+                .as_table_like()
+                .map(|table| table.iter().map(|(key, _)| key.to_owned()).collect())
+        })
+        .unwrap_or_default()
+}
+
+/// Attr names of the `binstall-metadata` checks that describe the release
+/// bundle's archives.
+///
+/// Every workspace crate with a binary is included. Unlike [`candidates`],
+/// this ignores crates.io eligibility: a desktop application is typically
+/// `publish = false` and still ships release archives.
+pub fn archive_check_names(metadata: &Metadata) -> Vec<String> {
+    let binaries = metadata
+        .packages
+        .iter()
+        .filter(|package| metadata.workspace_members.contains(&package.id))
+        .filter(|package| package.has_binary_target())
+        .map(|package| package.name.as_str())
+        .collect::<Vec<_>>();
+    let mut names = binaries
+        .iter()
+        .map(|name| format!("binstall-metadata-{name}"))
+        .collect::<Vec<_>>();
+    // The unsuffixed check is the single-binary-crate convention.
+    if binaries.len() == 1 {
+        names.push("binstall-metadata".to_owned());
+    }
+    names
+}
+
+/// Rust target triples the evaluated release-bundle binstall metadata serves
+/// on `system`, read independently of crates.io/binstall eligibility.
+pub fn archive_targets_for(
+    root: &Path,
+    metadata: &Metadata,
+    system: &str,
+) -> Result<std::collections::BTreeSet<String>> {
+    let mut targets = std::collections::BTreeSet::new();
+    for attr in archive_check_names(metadata) {
+        if let Some(text) = eval_metadata(root, system, &attr)? {
+            targets.extend(archive_targets(&text));
+        }
+    }
+    Ok(targets)
 }
 
 /// Trailing whitespace and blank edges carry no meaning here; compare the
@@ -336,6 +392,16 @@ mod tests {
             ]
         );
         assert!(archive_targets("").is_empty());
+    }
+
+    #[test]
+    fn archive_targets_unquote_override_table_keys() {
+        let text =
+            "[package.metadata.binstall.overrides.\"aarch64-apple-darwin\"]\npkg-fmt = \"tgz\"\n";
+        assert_eq!(
+            archive_targets(text).into_iter().collect::<Vec<_>>(),
+            ["aarch64-apple-darwin".to_owned()]
+        );
     }
 
     #[test]
