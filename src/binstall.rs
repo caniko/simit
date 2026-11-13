@@ -252,6 +252,16 @@ fn table_name(line: &str) -> Option<&str> {
     Some(rest[..rest.find(']')?].trim())
 }
 
+/// Rust target triples an evaluated `[package.metadata.binstall]` block
+/// serves, one per `[package.metadata.binstall.overrides.<triple>]` table.
+pub fn archive_targets(text: &str) -> std::collections::BTreeSet<String> {
+    text.lines()
+        .filter_map(table_name)
+        .filter_map(|name| name.strip_prefix("package.metadata.binstall.overrides."))
+        .map(str::to_owned)
+        .collect()
+}
+
 /// Trailing whitespace and blank edges carry no meaning here; compare the
 /// block, not the file's spacing around it.
 fn canonical(text: &str) -> String {
@@ -313,6 +323,19 @@ mod tests {
                 "{BLOCK}[package.metadata.binstall.overrides.aarch64-apple-darwin]\npkg-fmt = \"zip\"\n"
             ))
         );
+    }
+
+    #[test]
+    fn archive_targets_reads_override_tables() {
+        let text = "[package.metadata.binstall.overrides.x86_64-unknown-linux-musl]\npkg-fmt = \"tgz\"\n\n[package.metadata.binstall.overrides.x86_64-pc-windows-gnu]\npkg-fmt = \"zip\"\n\n[package.metadata.simit.ci]\nrunner = \"x\"\n";
+        assert_eq!(
+            archive_targets(text).into_iter().collect::<Vec<_>>(),
+            vec![
+                "x86_64-pc-windows-gnu".to_owned(),
+                "x86_64-unknown-linux-musl".to_owned()
+            ]
+        );
+        assert!(archive_targets("").is_empty());
     }
 
     #[test]

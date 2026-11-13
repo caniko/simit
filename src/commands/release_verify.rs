@@ -12,7 +12,7 @@ use serde::{Deserialize, Serialize};
 use crate::cargo::{self, Package};
 use crate::changelog;
 use crate::cli::ReleaseCommand;
-use crate::config::ProjectConfig;
+use crate::config::{ProjectConfig, ReleasePlatform};
 use crate::git;
 use crate::registry::{self, FeatureStatus};
 use crate::release_identity::ReleaseTag;
@@ -259,6 +259,13 @@ pub fn run(command: ReleaseCommand) -> Result<()> {
     }
     if config.release.artifacts.binstall {
         results.push(check_binstall(workspace_root, &metadata));
+    }
+    if !config.release.artifacts.platforms.is_empty() {
+        results.push(check_release_platforms(
+            workspace_root,
+            &metadata,
+            &config.release.artifacts.platforms,
+        ));
     }
     // Preserve registry verification for legacy crate projects without a hosted target.
     if (config.ci.publish_crates || (!hosted && command.component.is_none()))
@@ -633,6 +640,76 @@ fn check_binstall(workspace_root: &Path, metadata: &cargo::Metadata) -> CheckRes
                 drifted.join(", ")
             ),
             updated(),
+        )
+    }
+}
+
+/// `[release.artifacts].platforms`: every requested platform must be served
+/// by an archive in the evaluated release-bundle binstall metadata, which
+/// harbor-rs derives from the bundle's archive descriptors for every declared
+/// target system.
+fn check_release_platforms(
+    workspace_root: &Path,
+    metadata: &cargo::Metadata,
+    platforms: &[ReleasePlatform],
+) -> CheckResult {
+    const CHECK: &str = "release platforms";
+    let requested = platforms
+        .iter()
+        .map(|platform| platform.key())
+        .collect::<Vec<_>>()
+        .join(", ");
+    let system = match crate::binstall::resolve_system(None) {
+        Ok(system) => system,
+        Err(error) => {
+            return CheckResult::blocked(
+                CHECK,
+                error.to_string(),
+                "run release verification on a supported Linux or macOS host",
+            );
+        }
+    };
+    let updates = match crate::binstall::plan(workspace_root, metadata, &[], &system) {
+        Ok(updates) => updates,
+        Err(error) => {
+            return CheckResult::fail(CHECK, error.to_string(), crate::binstall::MISSING_HINT);
+        }
+    };
+    let targets: std::collections::BTreeSet<String> = updates
+        .iter()
+        .filter_map(|update| update.expected.as_deref())
+        .flat_map(crate::binstall::archive_targets)
+        .collect();
+    if targets.is_empty() {
+        return CheckResult::blocked(
+            CHECK,
+            format!(
+                "no evaluated release bundle metadata for {system}; cannot prove {requested} archives"
+            ),
+            crate::binstall::MISSING_HINT,
+        );
+    }
+    let missing = platforms
+        .iter()
+        .filter(|platform| !targets.iter().any(|target| platform.serves_target(target)))
+        .map(|platform| platform.key())
+        .collect::<Vec<_>>();
+    if missing.is_empty() {
+        CheckResult::pass(
+            CHECK,
+            format!("{system} release bundle metadata serves {requested}"),
+        )
+    } else {
+        CheckResult::fail(
+            CHECK,
+            format!(
+                "{system} release bundle metadata has no archive for {}",
+                missing.join(", ")
+            ),
+            format!(
+                "add a {} target to the release bundle's archive list or drop it from [release.artifacts].platforms",
+                missing.join(", ")
+            ),
         )
     }
 }
