@@ -230,10 +230,8 @@ fn locked_nodes(lock: &Value, node: &str, nodes: &mut BTreeMap<String, Value>) -
     let entry = lock["nodes"]
         .get(node)
         .with_context(|| format!("flake.lock lacks node {node}"))?;
-    nodes.insert(
-        node.to_owned(),
-        entry.get("locked").cloned().unwrap_or(Value::Null),
-    );
+    // The whole entry: locked metadata and labelled input edges alike.
+    nodes.insert(node.to_owned(), entry.clone());
     if let Some(inputs) = entry.get("inputs").and_then(Value::as_object) {
         for value in inputs.values() {
             if let Some(target) = value.as_str() {
@@ -623,6 +621,15 @@ mod tests {
         verify_lock(&aliased.0, &aliased.1, "harbor", TARGET).unwrap();
         aliased.1["nodes"]["root"]["inputs"]["crane"] = json!(["nixpkgs"]);
         verify_lock(&aliased.0, &aliased.1, "harbor", TARGET).unwrap_err();
+        // Swapping labelled edges keeps the node set and every locked payload.
+        let mut swapped = (before.clone(), lock(TARGET, &old));
+        for lock in [&mut swapped.0, &mut swapped.1] {
+            lock["nodes"]["nixpkgs"]["inputs"] = json!({"x": "nested", "y": "other"});
+            lock["nodes"]["other"] = json!({"locked": {"rev": "c".repeat(40)}});
+        }
+        verify_lock(&swapped.0, &swapped.1, "harbor", TARGET).unwrap();
+        swapped.1["nodes"]["nixpkgs"]["inputs"] = json!({"x": "other", "y": "nested"});
+        verify_lock(&swapped.0, &swapped.1, "harbor", TARGET).unwrap_err();
         let mut moved = lock(TARGET, &old);
         moved["nodes"]["root"]["inputs"]["nixpkgs"] = json!("elsewhere");
         verify_lock(&before, &moved, "harbor", TARGET).unwrap_err();
