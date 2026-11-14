@@ -319,6 +319,18 @@ pub fn run(command: ReleaseCommand) -> Result<()> {
         &bound.source_head_label,
         &bound.source_sha,
     )?;
+    // The tag proves authorship, not integration. The enrolled build workflow
+    // and its tags live on arbitrary commits, while the environment's branch
+    // restriction only constrains the downstream workflow_run ref. Fetch the
+    // repository's default branch from the provider and require the signed
+    // source commit to be reachable from it before admitting any source data.
+    verify_source_reachable_from_default_branch(
+        state.path(),
+        &source,
+        &policy.default_branch,
+        &bound.source_sha,
+        &fetch,
+    )?;
     let signed_workflow = output(
         data_command("git", state.path())?
             .arg("-C")
@@ -641,6 +653,52 @@ fn write_verified_member(output: &Path, member: &CrateMember) -> Result<()> {
         use std::os::unix::fs::PermissionsExt;
         fs::set_permissions(output, fs::Permissions::from_mode(member.mode))?;
     }
+    Ok(())
+}
+
+/// A maintainer signature authenticates a commit but does not integrate it.
+/// The publisher therefore fetches the provider's default branch separately
+/// (never the candidate checkout) and requires the signed commit to be an
+/// ancestor. A failed fetch, a missing branch or an unmerged signed commit
+/// aborts admission.
+fn verify_source_reachable_from_default_branch(
+    state: &Path,
+    source: &Path,
+    default_branch: &str,
+    source_sha: &str,
+    fetch: &dyn Fn() -> Result<Command>,
+) -> Result<()> {
+    ensure!(
+        !default_branch.is_empty()
+            && !default_branch.starts_with('-')
+            && !default_branch
+                .chars()
+                .any(|character| character.is_control() || character.is_whitespace()),
+        "invalid provider default branch"
+    );
+    ensure!(
+        matches!(source_sha.len(), 40 | 64)
+            && source_sha.bytes().all(|byte| byte.is_ascii_hexdigit()),
+        "invalid signed source revision"
+    );
+    let admitted = "refs/simit/default-branch";
+    output(
+        fetch()?
+            .arg("-C")
+            .arg(source)
+            .args(["fetch", "--no-tags", "--force", "origin"])
+            .arg(format!("refs/heads/{default_branch}:{admitted}")),
+    )?;
+    let status = data_command("git", state)?
+        .arg("-C")
+        .arg(source)
+        .args(["merge-base", "--is-ancestor", source_sha, admitted])
+        .status()
+        .context("execute trusted source ancestry check")?;
+    ensure!(
+        status.success(),
+        "signed source commit is not reachable from the default branch"
+    );
     Ok(())
 }
 
@@ -2862,5 +2920,142 @@ fn signed_tag_identity_rejects_namespaced_aliases() {
     assert!(
         verify_signed_tag_identity(state.path(), &source, "component-a/v1.2.3", &"f".repeat(40))
             .is_err()
+    );
+}
+
+#[test]
+fn signed_source_must_be_reachable_from_the_default_branch() {
+    let state = tempfile::tempdir().unwrap();
+    for directory in ["home", "cargo-home", "gpg"] {
+        fs::create_dir(state.path().join(directory)).unwrap();
+    }
+    output(data_command("gpg", state.path()).unwrap().args([
+        "--batch",
+        "--pinentry-mode",
+        "loopback",
+        "--passphrase",
+        "",
+        "--quick-generate-key",
+        "Publisher fixture <publisher@example.invalid>",
+        "ed25519",
+        "sign",
+        "0",
+    ]))
+    .unwrap();
+    let work = state.path().join("work");
+    output(
+        data_command("git", state.path())
+            .unwrap()
+            .arg("init")
+            .arg(&work),
+    )
+    .unwrap();
+    let git = |args: &[&str]| {
+        output(
+            data_command("git", state.path())
+                .unwrap()
+                .arg("-C")
+                .arg(&work)
+                .args([
+                    "-c",
+                    "user.name=Publisher fixture",
+                    "-c",
+                    "user.email=publisher@example.invalid",
+                    "-c",
+                    "user.signingkey=publisher@example.invalid",
+                ])
+                .args(args),
+        )
+        .unwrap()
+    };
+    fs::write(work.join("file"), "on trunk").unwrap();
+    git(&["add", "file"]);
+    git(&["commit", "-m", "on trunk"]);
+    git(&["branch", "-M", "trunk"]);
+    git(&["tag", "-s", "v1.0.0", "-m", "signed on trunk"]);
+    let trunk_sha = String::from_utf8(git(&["rev-parse", "HEAD"]).stdout).unwrap();
+    git(&["checkout", "-b", "side"]);
+    fs::write(work.join("file"), "off trunk").unwrap();
+    git(&["commit", "-am", "off trunk"]);
+    git(&["tag", "-s", "v2.0.0", "-m", "signed off trunk"]);
+    let off_trunk_sha = String::from_utf8(git(&["rev-parse", "HEAD"]).stdout).unwrap();
+
+    let origin = state.path().join("origin.git");
+    output(
+        data_command("git", state.path())
+            .unwrap()
+            .args(["init", "--bare"])
+            .arg(&origin),
+    )
+    .unwrap();
+    let origin_url = format!("file://{}", origin.display());
+    git(&[
+        "push",
+        &origin_url,
+        "refs/heads/trunk:refs/heads/trunk",
+        "refs/heads/side:refs/heads/side",
+        "refs/tags/v1.0.0:refs/tags/v1.0.0",
+        "refs/tags/v2.0.0:refs/tags/v2.0.0",
+    ]);
+
+    let source = state.path().join("source");
+    output(
+        data_command("git", state.path())
+            .unwrap()
+            .arg("init")
+            .arg(&source),
+    )
+    .unwrap();
+    output(
+        data_command("git", state.path())
+            .unwrap()
+            .arg("-C")
+            .arg(&source)
+            .args(["remote", "add", "origin", &origin_url]),
+    )
+    .unwrap();
+    output(
+        data_command("git", state.path())
+            .unwrap()
+            .arg("-C")
+            .arg(&source)
+            .args([
+                "fetch",
+                "--no-tags",
+                "origin",
+                "refs/tags/v1.0.0:refs/tags/v1.0.0",
+                "refs/tags/v2.0.0:refs/tags/v2.0.0",
+            ]),
+    )
+    .unwrap();
+    let fetch = || data_command("git", state.path());
+    verify_source_reachable_from_default_branch(
+        state.path(),
+        &source,
+        "trunk",
+        trunk_sha.trim(),
+        &fetch,
+    )
+    .unwrap();
+    assert!(
+        verify_source_reachable_from_default_branch(
+            state.path(),
+            &source,
+            "trunk",
+            off_trunk_sha.trim(),
+            &fetch,
+        )
+        .is_err()
+    );
+    // A missing provider branch must fail closed rather than skip admission.
+    assert!(
+        verify_source_reachable_from_default_branch(
+            state.path(),
+            &source,
+            "absent",
+            trunk_sha.trim(),
+            &fetch,
+        )
+        .is_err()
     );
 }
