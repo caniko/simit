@@ -566,7 +566,7 @@ pub fn render(inputs: &ReleaseWorkflowInputs<'_>) -> String {
     // The reusable prebuild already realizes `release-bundle` per system; the
     // in-workflow matrix only serves projects without one.
     let bundle_matrix = !prebuilt_release_archives
-        && !inputs.artifacts.system_runners.is_empty()
+        && !inputs.artifacts.effective_system_runners().is_empty()
         && !inputs.artifacts.effective_nix_bundle_attrs().is_empty();
     let separate_validation = github_prebuild || !inputs.required_gates.is_empty() || bundle_matrix;
     if separate_validation {
@@ -1737,13 +1737,14 @@ fn push_release_bundle_matrix(
     not_republish: &str,
 ) {
     let bundle_attrs = artifacts.effective_nix_bundle_attrs();
+    let runners = artifacts.effective_system_runners();
     w.push_str("  bundles:\n    needs: validate\n");
     w.push_str(not_republish);
     if platform != Platform::Forgejo {
         w.push_str("    permissions:\n      contents: read\n");
     }
     w.push_str("    timeout-minutes: 180\n    strategy:\n      fail-fast: false\n      matrix:\n        include:\n");
-    for (system, runner) in &artifacts.system_runners {
+    for (system, runner) in &runners {
         writeln!(
             w,
             "          - system: {system}\n            runner: {runner}"
@@ -1760,7 +1761,7 @@ fn push_release_bundle_matrix(
     } else {
         w.push_str(&github_action_ref(
             "actions/checkout",
-            super::ci::github_matrix_action_version(&artifacts.system_runners, "v7.0.1", "v4.3.1"),
+            super::ci::github_matrix_action_version(&runners, "v7.0.1", "v4.3.1"),
         ));
     }
     w.push_str("\n        with:\n          fetch-depth: 0\n          ref: ${{ github.sha }}\n          persist-credentials: false\n");
@@ -1795,7 +1796,7 @@ fn push_release_bundle_matrix(
     } else {
         w.push_str(&github_action_ref(
             "actions/upload-artifact",
-            super::ci::github_matrix_action_version(&artifacts.system_runners, "v7.0.2", "v4.6.2"),
+            super::ci::github_matrix_action_version(&runners, "v7.0.2", "v4.6.2"),
         ));
     }
     w.push_str("\n        with:\n          name: release-${{ matrix.system }}\n          path: release\n          if-no-files-found: error\n          retention-days: 1\n");
@@ -3755,6 +3756,7 @@ mod tests {
         ArtifactsConfig {
             prebuild_binaries: false,
             binstall: false,
+            platforms: vec![],
             system_runners: Default::default(),
             runner: Some("atlas".to_owned()),
             substituters: vec!["https://cache.example/c".to_owned()],
@@ -4586,13 +4588,31 @@ esac"#,
             build_commands: vec![],
             ..artifacts()
         };
+        render_workflow(platform, &artifacts)
+    }
+
+    fn platforms_matrix_workflow() -> String {
+        let artifacts = ArtifactsConfig {
+            prebuild_binaries: true,
+            platforms: vec![
+                crate::config::ReleasePlatform::Linux,
+                crate::config::ReleasePlatform::Macos,
+                crate::config::ReleasePlatform::Windows,
+            ],
+            build_commands: vec![],
+            ..artifacts()
+        };
+        render_workflow(Platform::Github, &artifacts)
+    }
+
+    fn render_workflow(platform: Platform, artifacts: &ArtifactsConfig) -> String {
         render(&ReleaseWorkflowInputs {
             platform,
             runner: "ubuntu-24.04",
             preinstalled_nix: false,
             publish_enforcement: ReleasePublisherEnforcement::Declared,
             publish: &ReleasePublishConfig::default(),
-            artifacts: &artifacts,
+            artifacts,
             prebuild: None,
             smoke_command: None,
             release: None,
@@ -4645,6 +4665,22 @@ esac"#,
         // Tag validation runs before any builder, and on the immutable event SHA.
         assert!(workflow.find("  validate:\n").unwrap() < workflow.find("  bundles:\n").unwrap());
         assert!(workflow.contains("ref: ${{ github.sha }}"));
+    }
+
+    #[test]
+    fn release_bundle_matrix_expands_platforms_to_native_runners() {
+        let workflow = platforms_matrix_workflow();
+        serde_yaml::from_str::<serde_yaml::Value>(&workflow).unwrap();
+        assert!(
+            workflow
+                .contains("          - system: x86_64-linux\n            runner: ubuntu-24.04\n")
+        );
+        assert!(
+            workflow.contains("          - system: aarch64-darwin\n            runner: macos-15\n")
+        );
+        // `windows` archives ride the Linux job's cross target.
+        assert!(!workflow.contains("runner: windows"));
+        assert!(workflow.contains("nix build '.#packages.'\"$SYSTEM\".'release-bundle'"));
     }
 
     #[test]

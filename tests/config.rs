@@ -281,6 +281,23 @@ command = "nix run .#release-smoke --"
 }
 
 #[test]
+fn prebuild_release_archives_cannot_be_combined_with_platforms() {
+    let err = load_toml(
+        r#"[prebuild]
+release_archives = true
+system_runners = { x86_64-linux = "ubuntu-24.04" }
+
+[release.artifacts]
+platforms = ["linux", "macos"]
+"#,
+    )
+    .unwrap_err();
+    let err = format!("{err:#}");
+    assert!(err.contains("release_archives"), "{err}");
+    assert!(err.contains("platforms"), "{err}");
+}
+
+#[test]
 fn flake_and_ci_config_load() {
     let cfg = load_toml(
         r#"[flake]

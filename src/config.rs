@@ -1893,8 +1893,9 @@ impl WindowsSigningConfig {
 pub struct ArtifactsConfig {
     /// Opt into the conventional rs-harbor `release-bundle` output.
     ///
-    /// This is deliberately a small project-facing switch. Projects may keep
-    /// an explicit `nix_bundle_attrs` list when they publish more than one
+    /// This is deliberately a small project-facing switch. A nonempty
+    /// `platforms` list selects the same default, and projects may keep an
+    /// explicit `nix_bundle_attrs` list when they publish more than one
     /// bundle; the explicit list wins in that case.
     #[serde(default)]
     pub prebuild_binaries: bool,
@@ -1903,6 +1904,12 @@ pub struct ArtifactsConfig {
     /// `simit release verify` and synced by `simit binstall sync`.
     #[serde(default)]
     pub binstall: bool,
+    /// Operating systems the release must ship binaries for. Each entry
+    /// expands to the native Nix system and runner that builds its archives,
+    /// so a project does not repeat the system-to-runner table. Entries in
+    /// `system_runners` win over the expanded default for the same system.
+    #[serde(default)]
+    pub platforms: Vec<ReleasePlatform>,
     /// Native Nix system to GitHub-hosted runner label. When set, the release
     /// workflow builds `packages.<system>.<bundle>` in one matrix job per
     /// system and merges the archives into the single signed release.
@@ -1952,6 +1959,48 @@ pub struct ArtifactsConfig {
     /// uploaded like every other asset.
     #[serde(default)]
     pub extract: Vec<ExtractAssetConfig>,
+}
+
+/// `[release.artifacts].platforms` — an operating system whose archives the
+/// release must ship. Each platform names the native Nix system and runner
+/// that produce it, so projects do not repeat that table.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum ReleasePlatform {
+    Linux,
+    Macos,
+    Windows,
+}
+
+impl ReleasePlatform {
+    pub const fn key(self) -> &'static str {
+        match self {
+            Self::Linux => "linux",
+            Self::Macos => "macos",
+            Self::Windows => "windows",
+        }
+    }
+
+    /// The Nix system and GitHub-hosted runner that build this platform's
+    /// archives. Windows archives are cross-built by the Linux job's
+    /// `x86_64-pc-windows-gnu` target, so they need no runner of their own.
+    pub const fn native_runner(self) -> Option<(&'static str, &'static str)> {
+        match self {
+            Self::Linux => Some(("x86_64-linux", "ubuntu-24.04")),
+            Self::Macos => Some(("aarch64-darwin", "macos-15")),
+            Self::Windows => None,
+        }
+    }
+
+    /// Whether an evaluated binstall archive target triple serves this
+    /// platform.
+    pub fn serves_target(self, target: &str) -> bool {
+        match self {
+            Self::Linux => target.contains("-unknown-linux-"),
+            Self::Macos => target.ends_with("-apple-darwin"),
+            Self::Windows => target.contains("-pc-windows-"),
+        }
+    }
 }
 
 /// `[[release.artifacts.extract]]` — copy one archive member into `release/`
@@ -2057,11 +2106,27 @@ impl ArtifactsConfig {
     pub fn effective_nix_bundle_attrs(&self) -> Vec<String> {
         if !self.nix_bundle_attrs.is_empty() {
             self.nix_bundle_attrs.clone()
-        } else if self.prebuild_binaries {
+        } else if self.prebuild_binaries || !self.platforms.is_empty() {
+            // A platform list names archives, so it also names the bundle that
+            // produces them; requiring `prebuild_binaries` as well only made
+            // every desktop config restate the same opt-in twice.
             vec!["release-bundle".to_owned()]
         } else {
             Vec::new()
         }
+    }
+
+    /// The runner matrix the release workflow builds: `platforms` defaults
+    /// with explicit `system_runners` entries winning for the same system.
+    pub fn effective_system_runners(&self) -> BTreeMap<String, String> {
+        let mut runners: BTreeMap<String, String> = self
+            .platforms
+            .iter()
+            .filter_map(|platform| platform.native_runner())
+            .map(|(system, runner)| (system.to_owned(), runner.to_owned()))
+            .collect();
+        runners.extend(self.system_runners.clone());
+        runners
     }
 
     /// Validate the per-system bundle matrix and the binstall opt-in.
@@ -2085,6 +2150,13 @@ impl ArtifactsConfig {
                     SYSTEMS.join(", ")
                 );
             }
+        }
+        if self.platforms.contains(&ReleasePlatform::Windows)
+            && !self.platforms.contains(&ReleasePlatform::Linux)
+        {
+            bail!(
+                "simit project config: [release.artifacts].platforms lists `windows` without `linux`; the x86_64-linux job cross-builds the Windows archives"
+            );
         }
         if (self.binstall || !self.system_runners.is_empty())
             && self.effective_nix_bundle_attrs().is_empty()
@@ -3405,6 +3477,11 @@ impl ProjectConfig {
             {
                 bail!(
                     "simit project config: [prebuild].release_archives requires release.artifacts Nix bundle outputs"
+                );
+            }
+            if prebuild.release_archives && !self.release.artifacts.platforms.is_empty() {
+                bail!(
+                    "simit project config: [prebuild].release_archives builds one archive set for the workflow's own system, so it cannot serve [release.artifacts].platforms; set release_archives = false to build the per-system bundle matrix, or drop platforms"
                 );
             }
             if prebuild.publish_attic {
@@ -6564,14 +6641,78 @@ mod release_bundle_tests {
                 "[system_runners]\nx86_64-linux = \"ubuntu-24.04\"\n",
                 "require prebuild_binaries or nix_bundle_attrs",
             ),
-            (
-                "binstall = true\n",
-                "require prebuild_binaries or nix_bundle_attrs",
-            ),
+            ("binstall = true\n", "require prebuild_binaries"),
         ] {
             let err = parse(toml).unwrap_err().to_string();
             assert!(err.contains(expected), "{toml}: {err}");
         }
         assert!(parse("prebuild_binaries = true\n\n[system_runners]\nx86_64-linux = \"ubuntu-24.04\"\nextra = \"x\"\n").is_err());
+    }
+
+    #[test]
+    fn expands_platforms_to_native_runners() {
+        let artifacts =
+            parse("prebuild_binaries = true\nplatforms = [\"linux\", \"macos\", \"windows\"]\n")
+                .unwrap();
+        assert_eq!(
+            artifacts.effective_system_runners(),
+            BTreeMap::from([
+                ("aarch64-darwin".to_owned(), "macos-15".to_owned()),
+                ("x86_64-linux".to_owned(), "ubuntu-24.04".to_owned()),
+            ])
+        );
+        // `macos` is complete on its own; `windows` adds no runner.
+        assert!(parse("prebuild_binaries = true\nplatforms = [\"macos\"]\n").is_ok());
+        // An explicit runner wins for the same system.
+        let artifacts = parse(
+            "prebuild_binaries = true\nplatforms = [\"linux\"]\n\n[system_runners]\nx86_64-linux = \"ubuntu-latest\"\n",
+        )
+        .unwrap();
+        assert_eq!(
+            artifacts.effective_system_runners()["x86_64-linux"],
+            "ubuntu-latest"
+        );
+        // `platforms` alone selects the conventional bundle output.
+        let artifacts = parse("platforms = [\"linux\", \"macos\"]\n").unwrap();
+        assert_eq!(
+            artifacts.effective_nix_bundle_attrs(),
+            ["release-bundle".to_owned()]
+        );
+        // An explicit bundle list still wins.
+        let artifacts =
+            parse("platforms = [\"linux\"]\nnix_bundle_attrs = [\"desktop-bundle\"]\n").unwrap();
+        assert_eq!(
+            artifacts.effective_nix_bundle_attrs(),
+            ["desktop-bundle".to_owned()]
+        );
+    }
+
+    #[test]
+    fn platform_archives_match_their_rust_targets() {
+        assert!(ReleasePlatform::Linux.serves_target("x86_64-unknown-linux-musl"));
+        assert!(ReleasePlatform::Linux.serves_target("aarch64-unknown-linux-gnu"));
+        assert!(!ReleasePlatform::Linux.serves_target("x86_64-pc-windows-gnu"));
+        assert!(ReleasePlatform::Macos.serves_target("aarch64-apple-darwin"));
+        assert!(!ReleasePlatform::Macos.serves_target("x86_64-unknown-linux-gnu"));
+        assert!(ReleasePlatform::Windows.serves_target("x86_64-pc-windows-gnu"));
+        assert!(ReleasePlatform::Windows.serves_target("aarch64-pc-windows-msvc"));
+        assert!(!ReleasePlatform::Windows.serves_target("aarch64-apple-darwin"));
+    }
+
+    #[test]
+    fn rejects_unknown_platforms_and_windows_without_linux() {
+        for (toml, expected) in [
+            (
+                "prebuild_binaries = true\nplatforms = [\"haiku\"]\n",
+                "unknown variant",
+            ),
+            (
+                "prebuild_binaries = true\nplatforms = [\"windows\"]\n",
+                "without `linux`",
+            ),
+        ] {
+            let err = parse(toml).unwrap_err().to_string();
+            assert!(err.contains(expected), "{toml}: {err}");
+        }
     }
 }

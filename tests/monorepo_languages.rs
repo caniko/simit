@@ -199,7 +199,13 @@ fn generated_component_gates_match_local_bash_and_pipeline_failure_semantics() {
             workflow["jobs"]["qualified"]["steps"][0]["run"]
                 .as_str()
                 .unwrap()
-                .contains("result == \"success\"")
+                .contains("if [ \"$plan_result\" != success ]")
+        );
+        assert!(
+            workflow["jobs"]["qualified"]["steps"][0]["run"]
+                .as_str()
+                .unwrap()
+                .contains("result != \"success\"")
         );
     }
 }
