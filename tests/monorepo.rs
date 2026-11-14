@@ -3009,11 +3009,11 @@ fn grouped_components_share_one_job_with_member_guards_and_ci_cache() {
     assert!(output.status.success(), "{output:?}");
     let value: Value = serde_json::from_slice(&output.stdout).unwrap();
     assert!(value["full"].as_bool().unwrap());
-    // A cancelled plan leaves the selection empty; qualification must then fail
-    // on the plan result instead of crashing jq's --argjson.
+    // The aggregate consumes the raw output so it can fail closed on a plan
+    // that was cancelled or reported nothing, and pass on an explicit `[]`.
     assert_eq!(
         qualified["env"]["SELECTED"].as_str(),
-        Some("${{ needs.plan.outputs.selected || '[]' }}")
+        Some("${{ needs.plan.outputs.selected }}")
     );
     write(
         temp.path(),
@@ -3023,6 +3023,97 @@ fn grouped_components_share_one_job_with_member_guards_and_ci_cache() {
     let output = plan(temp.path(), &["docs/guide.md"]);
     assert!(!output.status.success());
     assert!(String::from_utf8_lossy(&output.stderr).contains("overlaps owned or shared path"));
+}
+
+/// The aggregate is the only check a consumer can require, so a plan output
+/// that cannot name the selected components must fail it, while a plan that
+/// explicitly selected nothing must pass with a message.
+#[test]
+#[cfg(unix)]
+fn qualified_aggregate_fails_closed_on_unusable_plan_output() {
+    let temp = fixture();
+    enroll_release_checks(temp.path());
+    write(temp.path(), "flake.nix", "{}\n");
+    let output = common::simit()
+        .current_dir(temp.path())
+        .args(["init", "ci"])
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{output:?}");
+    let workflow: serde_yaml::Value = serde_yaml::from_str(
+        &fs::read_to_string(temp.path().join(".github/workflows/ci.yaml")).unwrap(),
+    )
+    .unwrap();
+    let step = &workflow["jobs"]["qualified"]["steps"][0];
+    let script = step["run"].as_str().unwrap();
+    let owners = step["env"]["OWNERS"].as_str().unwrap();
+    let results = |plan: &str, components: &[(&str, &str)]| {
+        let mut jobs = serde_json::Map::new();
+        jobs.insert("plan".to_owned(), serde_json::json!({"result": plan}));
+        for (id, result) in components {
+            jobs.insert(
+                format!("component-{id}"),
+                serde_json::json!({"result": result}),
+            );
+        }
+        Value::Object(jobs).to_string()
+    };
+    let aggregate = |selected: &str, results: &str| {
+        Command::new("bash")
+            .current_dir(temp.path())
+            .args(["-euo", "pipefail", "-c", script])
+            .env("SELECTED", selected)
+            .env("RESULTS", results)
+            .env("OWNERS", owners)
+            .output()
+            .unwrap()
+    };
+
+    // A cancelled run reports no selection at all.
+    let output = aggregate("", &results("cancelled", &[]));
+    assert!(!output.status.success(), "{output:?}");
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("the plan job is cancelled"),
+        "{output:?}"
+    );
+    // A plan step that succeeded without writing its output cannot be trusted.
+    let output = aggregate("", &results("success", &[]));
+    assert!(!output.status.success(), "{output:?}");
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("produced no selection output"),
+        "{output:?}"
+    );
+    // A selection that is not a component array was never produced by planning.
+    for malformed in ["null", "core,rust", "{\"selected\":[]}"] {
+        let output = aggregate(malformed, &results("success", &[]));
+        assert!(!output.status.success(), "{malformed}: {output:?}");
+        assert!(
+            String::from_utf8_lossy(&output.stderr).contains("not a JSON array"),
+            "{malformed}: {output:?}"
+        );
+    }
+    // Nothing changed: qualification passes instead of hanging on an empty list.
+    let output = aggregate("[]", &results("success", &[]));
+    assert!(output.status.success(), "{output:?}");
+    assert!(
+        String::from_utf8_lossy(&output.stdout).contains("no component changed"),
+        "{output:?}"
+    );
+    // A selected component that did not pass still fails the aggregate and is named.
+    let output = aggregate(
+        "[\"core\"]",
+        &results("success", &[("core", "failure"), ("rust", "success")]),
+    );
+    assert!(!output.status.success(), "{output:?}");
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("core"),
+        "{output:?}"
+    );
+    let output = aggregate(
+        "[\"core\"]",
+        &results("success", &[("core", "success"), ("rust", "failure")]),
+    );
+    assert!(output.status.success(), "{output:?}");
 }
 
 #[test]

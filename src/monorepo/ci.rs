@@ -14,6 +14,35 @@ use crate::render::ci::{GENERATED_WORKFLOW_MARKER, github_action_ref};
 const DIAGNOSTIC_GRACE_MINUTES: u64 = 2;
 const HOSTED_JOB_MINUTES: u64 = 360;
 
+/// The aggregate fails closed: a cancelled, absent or non-array selection means
+/// no one knows which components were qualified, so the gate must fail. Only an
+/// explicit empty array, written by a plan that saw nothing to qualify, passes.
+const REQUIRE_SELECTED: &str = r#"set -euo pipefail
+plan_result=$(printf '%s' "$RESULTS" | jq -r '.plan.result // "missing"')
+if [ "$plan_result" != success ]; then
+  printf 'Qualification failed: the plan job is %s, so the selected components are unknown.\n' "$plan_result" >&2
+  exit 1
+fi
+if [ -z "$SELECTED" ]; then
+  printf 'Qualification failed: the plan job produced no selection output.\n' >&2
+  exit 1
+fi
+if ! printf '%s' "$SELECTED" | jq -e 'type == "array"' >/dev/null 2>&1; then
+  printf 'Qualification failed: the plan selection is not a JSON array: %s\n' "$SELECTED" >&2
+  exit 1
+fi
+if [ "$(printf '%s' "$SELECTED" | jq length)" -eq 0 ]; then
+  printf 'Qualification passed: no component changed, so no gate is needed.\n'
+  exit 0
+fi
+failed=$(printf '%s' "$RESULTS" | jq -r --argjson selected "$SELECTED" --argjson owners "$OWNERS" '. as $jobs | $selected[] | select($jobs["component-" + $owners[.]].result != "success")')
+if [ -n "$failed" ]; then
+  printf 'Qualification failed: these selected components did not pass: %s\n' "$(printf '%s' "$failed" | tr '\n' ' ')" >&2
+  exit 1
+fi
+printf 'Qualification passed: every selected component succeeded.\n'
+"#;
+
 fn gate_budget() -> Value {
     json!({"id": "simit-gate-budget", "name": "Reserve timeout diagnostic grace", "shell": "bash", "run": format!("printf 'deadline=%s\\n' \"$(( $(date +%s) + {} ))\" >> \"$GITHUB_OUTPUT\"", (HOSTED_JOB_MINUTES - DIAGNOSTIC_GRACE_MINUTES) * 60)})
 }
@@ -339,20 +368,21 @@ pub(crate) fn files(
         job["steps"] = json!(steps);
         jobs.insert(id, job);
     }
-    // A cancelled plan leaves the output empty; default it so the cancelled
-    // result, not a jq parse error, is what fails qualification.
-    let mut require = json!({"name": "Require every selected component", "env": {"RESULTS": "${{ toJSON(needs) }}", "SELECTED": "${{ needs.plan.outputs.selected || '[]' }}"}, "run": "printf '%s' \"$RESULTS\" | jq -e --argjson selected \"$SELECTED\" '. as $jobs | $jobs.plan.result == \"success\" and all($selected[]; $jobs[\"component-\" + .].result == \"success\")'"});
-    if graph.components.values().any(|c| c.job_id() != c.id) {
-        let owners: serde_json::Map<_, _> = graph
-            .components
-            .values()
-            .map(|c| (c.id.clone(), json!(c.job_id())))
-            .collect();
-        require["env"]["OWNERS"] = json!(serde_json::to_string(&owners)?);
-        require["run"] = json!(
-            "printf '%s' \"$RESULTS\" | jq -e --argjson selected \"$SELECTED\" --argjson owners \"$OWNERS\" '. as $jobs | $jobs.plan.result == \"success\" and all($selected[]; $jobs[\"component-\" + $owners[.]].result == \"success\")'"
-        );
-    }
+    let owners: serde_json::Map<_, _> = graph
+        .components
+        .values()
+        .map(|c| (c.id.clone(), json!(c.job_id())))
+        .collect();
+    let require = json!({
+        "name": "Require every selected component",
+        "shell": "bash",
+        "env": {
+            "RESULTS": "${{ toJSON(needs) }}",
+            "SELECTED": "${{ needs.plan.outputs.selected }}",
+            "OWNERS": serde_json::to_string(&owners)?,
+        },
+        "run": REQUIRE_SELECTED,
+    });
     jobs.insert(
         "qualified".into(),
         json!({
