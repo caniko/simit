@@ -3099,6 +3099,13 @@ fn qualified_aggregate_fails_closed_on_unusable_plan_output() {
         String::from_utf8_lossy(&output.stdout).contains("no component changed"),
         "{output:?}"
     );
+    // A selected entry that names no component job cannot have come from planning.
+    let output = aggregate("[\"\"]", &results("success", &[("core", "success")]));
+    assert!(!output.status.success(), "{output:?}");
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("no component job"),
+        "{output:?}"
+    );
     // A selected component that did not pass still fails the aggregate and is named.
     let output = aggregate(
         "[\"core\"]",

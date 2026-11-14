@@ -35,9 +35,9 @@ if [ "$(printf '%s' "$SELECTED" | jq length)" -eq 0 ]; then
   printf 'Qualification passed: no component changed, so no gate is needed.\n'
   exit 0
 fi
-failed=$(printf '%s' "$RESULTS" | jq -r --argjson selected "$SELECTED" --argjson owners "$OWNERS" '. as $jobs | $selected[] | select($jobs["component-" + $owners[.]].result != "success")')
-if [ -n "$failed" ]; then
-  printf 'Qualification failed: these selected components did not pass: %s\n' "$(printf '%s' "$failed" | tr '\n' ' ')" >&2
+failed=$(printf '%s' "$RESULTS" | jq -c --argjson selected "$SELECTED" --argjson owners "$OWNERS" '. as $jobs | [ $selected[] | if $owners[.] == null then {component: ., reason: "no component job"} elif $jobs["component-" + $owners[.]].result != "success" then {component: ., reason: ($jobs["component-" + $owners[.]].result // "missing")} else empty end ]')
+if [ "$(printf '%s' "$failed" | jq length)" -ne 0 ]; then
+  printf 'Qualification failed: these selected components did not pass: %s\n' "$(printf '%s' "$failed" | jq -r '.[] | "\(.component)=\(.reason)"' | tr '\n' ' ')" >&2
   exit 1
 fi
 printf 'Qualification passed: every selected component succeeded.\n'
