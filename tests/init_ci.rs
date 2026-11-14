@@ -1926,6 +1926,8 @@ token_secret = "ATTIC_TOKEN"
     );
     assert!(workflow.contains("nix run '.#push-flake-inputs'"));
     assert!(workflow.contains("HARBOR_ATTIC_MANIFEST: attic-paths.txt"));
+    // Ephemeral hosted runner: also publish build-time outputs (crane deps).
+    assert!(workflow.contains("HARBOR_ATTIC_BUILT_PATHS: \"1\""));
     assert!(workflow.contains("github.event.repository.default_branch"));
     assert!(workflow.contains("name: flake-inputs-${{ matrix.system }}"));
     assert!(!workflow.contains("attic push"));
