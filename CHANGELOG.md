@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Changed: the GitHub prebuild's Attic publish step sets
+  `HARBOR_ATTIC_BUILT_PATHS=1`, so an rs-harbor `mkAtticPush` app that supports
+  it also publishes what the runner built (crane deps, toolchains), not only
+  runtime closures. Older apps ignore it.
 - Added: `[release.artifacts].platforms` expands `["linux", "macos", "windows"]`
   to the native runner defaults (`x86_64-linux` on `ubuntu-24.04`,
   `aarch64-darwin` on `macos-15`) instead of restating `system_runners`;
