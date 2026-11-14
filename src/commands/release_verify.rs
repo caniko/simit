@@ -12,7 +12,7 @@ use serde::{Deserialize, Serialize};
 use crate::cargo::{self, Package};
 use crate::changelog;
 use crate::cli::ReleaseCommand;
-use crate::config::ProjectConfig;
+use crate::config::{ProjectConfig, ReleasePlatform};
 use crate::git;
 use crate::registry::{self, FeatureStatus};
 use crate::release_identity::ReleaseTag;
@@ -259,6 +259,13 @@ pub fn run(command: ReleaseCommand) -> Result<()> {
     }
     if config.release.artifacts.binstall {
         results.push(check_binstall(workspace_root, &metadata));
+    }
+    if !config.release.artifacts.platforms.is_empty() {
+        results.push(check_release_platforms(
+            workspace_root,
+            &metadata,
+            &config.release.artifacts.platforms,
+        ));
     }
     // Preserve registry verification for legacy crate projects without a hosted target.
     if (config.ci.publish_crates || (!hosted && command.component.is_none()))
@@ -633,6 +640,81 @@ fn check_binstall(workspace_root: &Path, metadata: &cargo::Metadata) -> CheckRes
                 drifted.join(", ")
             ),
             updated(),
+        )
+    }
+}
+
+/// `[release.artifacts].platforms`: every requested platform must be served
+/// by an archive in the evaluated release-bundle binstall metadata, which
+/// harbor-rs derives from the bundle's archive descriptors for every declared
+/// target system. The metadata is read directly rather than through
+/// [`crate::binstall::plan`], which only selects crates.io-eligible crates and
+/// would block a desktop app that is `publish = false`.
+fn check_release_platforms(
+    workspace_root: &Path,
+    metadata: &cargo::Metadata,
+    platforms: &[ReleasePlatform],
+) -> CheckResult {
+    const CHECK: &str = "release platforms";
+    let system = match crate::binstall::resolve_system(None) {
+        Ok(system) => system,
+        Err(error) => {
+            return CheckResult::blocked(
+                CHECK,
+                error.to_string(),
+                "run release verification on a supported Linux or macOS host",
+            );
+        }
+    };
+    match crate::binstall::archive_targets_for(workspace_root, metadata, &system) {
+        Ok(targets) => check_platform_targets(platforms, &system, &targets),
+        Err(error) => CheckResult::fail(CHECK, error.to_string(), crate::binstall::MISSING_HINT),
+    }
+}
+
+/// Report the requested platforms with no archive among `targets`. Empty
+/// metadata is `blocked`: the bundle's archive list could not be read at all.
+fn check_platform_targets(
+    platforms: &[ReleasePlatform],
+    system: &str,
+    targets: &std::collections::BTreeSet<String>,
+) -> CheckResult {
+    const CHECK: &str = "release platforms";
+    let requested = platforms
+        .iter()
+        .map(|platform| platform.key())
+        .collect::<Vec<_>>()
+        .join(", ");
+    if targets.is_empty() {
+        return CheckResult::blocked(
+            CHECK,
+            format!(
+                "no evaluated release bundle metadata for {system}; cannot prove {requested} archives"
+            ),
+            crate::binstall::MISSING_HINT,
+        );
+    }
+    let missing = platforms
+        .iter()
+        .filter(|platform| !targets.iter().any(|target| platform.serves_target(target)))
+        .map(|platform| platform.key())
+        .collect::<Vec<_>>();
+    if missing.is_empty() {
+        CheckResult::pass(
+            CHECK,
+            format!("{system} release bundle metadata serves {requested}"),
+        )
+    } else {
+        CheckResult::fail(
+            CHECK,
+            format!(
+                "{system} release bundle metadata has no archive for {}",
+                missing.join(", ")
+            ),
+            format!(
+                "add a {} target to the release bundle's archive list or drop it from [release.artifacts].platforms",
+                missing.join(", ")
+            ),
         )
     }
 }
@@ -1097,7 +1179,86 @@ fn print_text_report(report: &VerifyReport) {
 mod tests {
     use semver::Version;
 
-    use super::{CheckResult, changelog_has_version_entry, parse_crates_io_versions, report};
+    use super::{
+        CheckResult, CheckStatus, changelog_has_version_entry, check_platform_targets,
+        parse_crates_io_versions, report,
+    };
+
+    /// A single `publish = false` binary crate, as a desktop app is.
+    fn publish_false_binary() -> crate::cargo::Metadata {
+        serde_json::from_value(serde_json::json!({
+            "packages": [{
+                "id": "path+file:///app#app@0.1.0",
+                "name": "app",
+                "version": "0.1.0",
+                "publish": [],
+                "targets": [{"kind": ["bin"]}],
+                "manifest_path": "/app/Cargo.toml"
+            }],
+            "workspace_members": ["path+file:///app#app@0.1.0"],
+            "workspace_root": "/app"
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn platform_check_probes_the_bundle_check_beside_unreleased_binaries() {
+        // An app released next to an unreleased `xtask` exposes only the
+        // unsuffixed check, so it must be probed whatever the binary count.
+        let metadata: crate::cargo::Metadata = serde_json::from_value(serde_json::json!({
+            "packages": [
+                {"id": "path+file:///w/app#app@0.1.0", "name": "app", "version": "0.1.0",
+                 "publish": [], "targets": [{"kind": ["bin"]}], "manifest_path": "/w/app/Cargo.toml"},
+                {"id": "path+file:///w/xtask#xtask@0.1.0", "name": "xtask", "version": "0.1.0",
+                 "publish": [], "targets": [{"kind": ["bin"]}], "manifest_path": "/w/xtask/Cargo.toml"}
+            ],
+            "workspace_members": ["path+file:///w/app#app@0.1.0", "path+file:///w/xtask#xtask@0.1.0"],
+            "workspace_root": "/w"
+        }))
+        .unwrap();
+        assert!(
+            crate::binstall::archive_check_names(&metadata)
+                .contains(&"binstall-metadata".to_owned())
+        );
+    }
+
+    #[test]
+    fn platform_check_reads_publish_false_binary_metadata() {
+        use crate::config::ReleasePlatform;
+
+        let metadata = publish_false_binary();
+        // `binstall::plan` skips this crate, so the platform check must not
+        // read its evaluated metadata through that selection.
+        assert!(crate::binstall::candidates(&metadata).is_empty());
+        assert_eq!(
+            crate::binstall::archive_check_names(&metadata),
+            [
+                "binstall-metadata-app".to_owned(),
+                "binstall-metadata".to_owned()
+            ]
+        );
+
+        let platforms = [
+            ReleasePlatform::Linux,
+            ReleasePlatform::Macos,
+            ReleasePlatform::Windows,
+        ];
+        let complete = "[package.metadata.binstall.overrides.\"x86_64-unknown-linux-musl\"]\npkg-fmt = \"tgz\"\n\n[package.metadata.binstall.overrides.\"aarch64-apple-darwin\"]\npkg-fmt = \"tgz\"\n\n[package.metadata.binstall.overrides.\"x86_64-pc-windows-gnu\"]\npkg-fmt = \"zip\"\n";
+        let targets = crate::binstall::archive_targets(complete);
+        assert_eq!(
+            check_platform_targets(&platforms, "x86_64-linux", &targets).status,
+            CheckStatus::Pass
+        );
+
+        let without_macos = targets
+            .iter()
+            .filter(|target| !target.ends_with("-apple-darwin"))
+            .cloned()
+            .collect();
+        let result = check_platform_targets(&platforms, "x86_64-linux", &without_macos);
+        assert_eq!(result.status, CheckStatus::Fail);
+        assert!(result.message.contains("macos"), "{}", result.message);
+    }
 
     #[test]
     fn changelog_entry_must_be_released_version() {
