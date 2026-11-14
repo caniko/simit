@@ -7,6 +7,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Added: `[release.artifacts].platforms` expands `["linux", "macos", "windows"]`
+  to the native runner defaults (`x86_64-linux` on `ubuntu-24.04`,
+  `aarch64-darwin` on `macos-15`) instead of restating `system_runners`;
+  `windows` adds no runner because the `x86_64-linux` job cross-builds it,
+  explicit `system_runners` entries win for the same system, and `windows`
+  without `linux` is rejected. `simit release verify` now fails when a requested
+  platform has no archive in the evaluated release bundle metadata and reports
+  `blocked` when the flake exposes no `binstall-metadata` check. Configs
+  without `platforms` render unchanged. The distribution docs describe the
+  glibc/portable Linux bundle a Dioxus desktop release needs.
+
+- Added: `[release.artifacts].platforms` names the operating systems a release
+  ships and expands them to the native runner defaults (`linux` to
+  `x86_64-linux` on `ubuntu-24.04`, `macos` to `aarch64-darwin` on `macos-15`).
+  `windows` adds no runner because the `x86_64-linux` job cross-builds it with
+  MinGW, so it requires `linux`; an explicit `system_runners` entry wins for the
+  same system. With `platforms` set, `simit release verify` fails when a
+  requested platform has no archive in the evaluated release bundle metadata
+  and reports `blocked` when no `binstall-metadata` check exposes it. Configs
+  without `platforms` render unchanged.
 - Fixed: the release workflow's `attic push` step retries only the idempotent
   push command, up to three times 30 s and 60 s apart, instead of failing the
   whole release job after its artefacts and hosted release already exist. The

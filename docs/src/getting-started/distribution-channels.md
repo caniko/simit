@@ -189,6 +189,59 @@ system. A crate with binaries but no check is reported as `missing` with the
 hint to expose `mkBinstallRelease` checks. With `binstall = true`,
 `simit release verify` runs the same check fatally.
 
+### Release platforms
+
+`platforms` names the operating systems a release ships, so the project does
+not repeat the Nix system table. `linux` expands to `x86_64-linux` on
+`ubuntu-24.04`, `macos` to `aarch64-darwin` on `macos-15`, and `windows` adds
+no runner: the `x86_64-linux` job cross-builds `x86_64-pc-windows-gnu` with
+MinGW, so `windows` requires `linux`. An explicit `system_runners` entry wins
+for the same system.
+
+```toml
+[release.artifacts]
+binstall = true
+platforms = ["linux", "macos", "windows"]
+```
+
+A nonempty `platforms` selects the conventional `packages.<system>.release-bundle`
+output, so `prebuild_binaries = true` is not required; an explicit
+`nix_bundle_attrs` list still wins.
+
+`simit release verify` fails when a requested platform has no archive in the
+evaluated release bundle metadata and reports `blocked` when the flake exposes
+no `binstall-metadata` check to read the archive targets from.
+
+### Desktop binaries
+
+A webview app cannot use the static musl archive: a Linux build links
+webkit2gtk/GTK from glibc, macOS links system frameworks, and Windows links
+WebView2, which the `x86_64-linux` job cross-builds against MinGW. Keep the
+same release config and ship the Linux archives from a portable nix-bundle
+build, next to the Windows cross archive and the macOS native archive, all in
+`packages.<system>.release-bundle`:
+
+```toml
+[release.artifacts]
+platforms = ["linux", "macos", "windows"]
+```
+
+```nix
+# glibc desktop build, made portable with nix-bundle.
+desktop = harbor.lib.mkPortableBinaryRelease {
+  inherit pkgs pname version;
+  artifacts.x86_64-linux.entries.${pname}.package = desktopPackage;
+};
+
+packages.release-bundle = desktop.releaseBundle;
+```
+
+`mkPortableBinaryRelease` produces the Linux archives. The Windows `.zip` from
+the MinGW cross target and the macOS archive must join the same bundle, and
+the flake must expose the bundle's `binstall` metadata as a
+`checks.<system>.binstall-metadata*` check so `simit binstall sync` and
+`simit release verify` can prove every requested platform is shipped.
+
 With `auto_draft`, `simit release` runs `simit changelog draft` before
 promoting `[Unreleased]`. The draft uses the latest reachable semver tag (or
 the root commit for a first release), accepts optional guidance from
