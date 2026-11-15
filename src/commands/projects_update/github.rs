@@ -1,5 +1,6 @@
 //! GitHub Actions adapter. Provider identifiers and API location come from policy.
 use super::schema::*;
+use crate::render::ci::step_conditions::{PushOutcome, StepCondition, is_optional_step};
 use anyhow::{Context, Result, ensure};
 use base64::Engine;
 use serde_json::Value;
@@ -242,12 +243,34 @@ fn workflow_source(path: &str, file: &Value) -> Result<serde_yaml::Value> {
     Ok(serde_yaml::from_slice(&workflow_bytes(path, file)?)?)
 }
 
+/// What a source-bound step must conclude on the qualified push run.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum StepOutcome {
+    Success,
+    Skipped,
+    /// A generator-declared optional step: either outcome is fine.
+    Either,
+}
+
+impl StepOutcome {
+    fn admits(self, conclusion: &Value) -> bool {
+        match conclusion.as_str() {
+            Some("success") => self != Self::Skipped,
+            Some("skipped") => self != Self::Success,
+            _ => false,
+        }
+    }
+}
+
+/// Expected outcome of every step of one source job, by API step number.
+type StepOutcomes = BTreeMap<u64, (String, StepOutcome)>;
+
 #[derive(Default)]
 struct PushSteps {
+    /// Every API job name of the run, once any job is source-bound.
     jobs: Option<BTreeSet<String>>,
-    outcomes: BTreeMap<u64, (String, bool)>,
-    /// API job names whose steps the conditional binding covers.
-    outcome_jobs: BTreeSet<String>,
+    /// Source-bound step outcomes by API job name.
+    bound: BTreeMap<String, StepOutcomes>,
     /// The workflow carries the generated docs-only gate, so a successful run
     /// may leave its gated jobs skipped.
     docs_gate: bool,
@@ -298,28 +321,130 @@ fn is_generated_docs_gate(workflow: &serde_yaml::Value) -> bool {
             })
 }
 
-/// `if:` wraps a bare expression in `${{ }}` itself, so both spellings are one predicate.
-fn always_runs(condition: &str) -> bool {
-    matches!(condition, "always()" | "${{ always() }}")
+/// Whether a step can be skipped in a job that succeeded, so that its outcome
+/// must be bound to the source. A step without a condition, or with one that
+/// holds in every successful job, always runs, and `admit_run` requires every
+/// unbound step to succeed.
+fn needs_binding(step: &serde_yaml::Value) -> bool {
+    step.get("if").is_some_and(|condition| {
+        !condition
+            .as_str()
+            .and_then(StepCondition::parse)
+            .is_some_and(StepCondition::always_runs)
+    })
 }
 
-fn push_step_runs(condition: &str, default_branch: bool) -> Result<bool> {
-    // ponytail: prove only these generated branch-push predicates. Inputs are
-    // absent on push, hence false; extend with source-aware proofs, not eval.
-    // https://docs.github.com/en/actions/reference/workflows-and-actions/contexts#inputs-context
-    match condition {
-        "${{ inputs.release }}"
-        | "${{ inputs.release && github.event_name != 'pull_request' }}" => Ok(false),
-        "${{ (github.event_name == 'push' && github.ref == format('refs/heads/{0}', github.event.repository.default_branch)) || (inputs.release && github.event_name != 'pull_request') }}"
-        // The same publication predicate of a prebuild without a release entry.
-        | "${{ github.event_name == 'push' && github.ref == format('refs/heads/{0}', github.event.repository.default_branch) }}" => {
-            Ok(default_branch)
-        }
-        condition if always_runs(condition) => Ok(true),
-        _ => anyhow::bail!(
-            "conditional jobs or steps require an adapter with a proven push predicate"
-        ),
+/// The outcome the generator's declarations prove for a step on a push. No
+/// expression is evaluated: a condition is one the generator declares, the
+/// step is a declared optional one, or admission fails.
+fn step_outcome(step: &serde_yaml::Value, default_branch: bool) -> Result<StepOutcome> {
+    let Some(condition) = step.get("if") else {
+        return Ok(StepOutcome::Success);
+    };
+    if is_optional_step(step) {
+        return Ok(StepOutcome::Either);
     }
+    let condition = condition
+        .as_str()
+        .context("conditional jobs or steps need a literal predicate")?;
+    // Inputs are absent on push, hence false:
+    // https://docs.github.com/en/actions/reference/workflows-and-actions/contexts#inputs-context
+    let outcome = StepCondition::parse(condition)
+        .context("conditional jobs or steps require an adapter with a proven push predicate")?
+        .push_outcome();
+    Ok(match outcome {
+        PushOutcome::Runs => StepOutcome::Success,
+        PushOutcome::DefaultBranch if default_branch => StepOutcome::Success,
+        PushOutcome::DefaultBranch | PushOutcome::Skipped => StepOutcome::Skipped,
+    })
+}
+
+/// Replace every `${{ matrix.KEY }}` of a job name with the row's literal.
+fn expand_job_name(template: &str, row: &serde_yaml::Mapping) -> Result<String> {
+    let mut name = String::new();
+    let mut rest = template;
+    while let Some((head, tail)) = rest.split_once("${{") {
+        let (expression, tail) = tail
+            .split_once("}}")
+            .context("conditional matrix job names need closed expressions")?;
+        let value = expression
+            .trim()
+            .strip_prefix("matrix.")
+            .and_then(|key| row.get(serde_yaml::Value::String(key.into())))
+            .and_then(serde_yaml::Value::as_str)
+            .filter(|value| !value.is_empty() && !value.contains("${{"))
+            .context("conditional matrix job names need literal matrix values")?;
+        name.push_str(head);
+        name.push_str(value);
+        rest = tail;
+    }
+    Ok(name + rest)
+}
+
+/// The API job names a source job reports, when its source proves them: a
+/// literal name, or one name per row of a static include-only matrix. A row
+/// names its job through the job's `${{ matrix.KEY }}` template or, without a
+/// `name`, through GitHub's native expansion of a system/runner row.
+fn job_names(id: &serde_yaml::Value, job: &serde_yaml::Value) -> Result<BTreeSet<String>> {
+    let name = job
+        .get("name")
+        .unwrap_or(id)
+        .as_str()
+        .filter(|name| !name.is_empty())
+        .context("conditional steps need a literal job name")?;
+    let Some(matrix) = job
+        .get("strategy")
+        .and_then(|strategy| strategy.get("matrix"))
+    else {
+        ensure!(
+            !name.contains("${{"),
+            "conditional steps need a literal job name"
+        );
+        return Ok(BTreeSet::from([name.to_owned()]));
+    };
+    let mapping = matrix
+        .as_mapping()
+        .context("conditional steps need a static include matrix")?;
+    let include = matrix["include"]
+        .as_sequence()
+        .context("conditional steps need a static include matrix")?;
+    ensure!(
+        mapping.len() == 1 && !include.is_empty(),
+        "conditional steps need a nonempty include-only matrix"
+    );
+    let mut names = BTreeSet::new();
+    for row in include {
+        let row = row
+            .as_mapping()
+            .context("conditional steps need literal matrix rows")?;
+        let concrete = if job.get("name").is_some() {
+            expand_job_name(name, row)?
+        } else {
+            ensure!(
+                row.len() == 2
+                    && row
+                        .get(serde_yaml::Value::String("system".into()))
+                        .is_some()
+                    && row
+                        .get(serde_yaml::Value::String("runner".into()))
+                        .is_some()
+                    && row.values().all(|value| value
+                        .as_str()
+                        .is_some_and(|value| !value.is_empty() && !value.contains("${{"))),
+                "conditional steps need literal native system/runner matrix rows"
+            );
+            let values = row
+                .values()
+                .map(|value| value.as_str().unwrap())
+                .collect::<Vec<_>>();
+            format!("{name} ({})", values.join(", "))
+        };
+        ensure!(
+            names.insert(concrete),
+            "conditional matrix job names collide"
+        );
+    }
+    Ok(names)
 }
 
 fn push_steps(workflow: &serde_yaml::Value, default_branch: bool) -> Result<PushSteps> {
@@ -331,135 +456,45 @@ fn push_steps(workflow: &serde_yaml::Value, default_branch: bool) -> Result<Push
             && jobs.values().any(|job| job.get("if").is_some()),
         ..PushSteps::default()
     };
-    let conditional = jobs
-        .iter()
-        .filter(|(_, job)| {
-            // An `always()` step runs on every outcome, and `admit_run` requires
-            // every unbound step to succeed, so it needs no source binding.
-            job["steps"].as_sequence().is_some_and(|steps| {
-                steps.iter().any(|step| {
-                    step.get("if")
-                        .is_some_and(|condition| !condition.as_str().is_some_and(always_runs))
-                })
-            })
-        })
-        .collect::<Vec<_>>();
-    if conditional.is_empty() {
+    let conditional = |job: &serde_yaml::Value| {
+        job["steps"]
+            .as_sequence()
+            .is_some_and(|steps| steps.iter().any(needs_binding))
+    };
+    if !jobs.values().any(conditional) {
         return Ok(expected);
     }
-    // ponytail: conditional steps support one source job and a static include
-    // matrix; add provider-native job-id binding before supporting other shapes.
-    ensure!(
-        conditional.len() == 1,
-        "conditional steps require one source job"
-    );
-    for (id, job) in conditional {
-        let steps = job["steps"]
-            .as_sequence()
-            .context("missing workflow steps")?;
-        for (index, step) in steps.iter().enumerate() {
-            let runs = if let Some(condition) = step.get("if") {
-                let condition = condition
+    // Binding one job's steps needs the run's exact job inventory, so every
+    // source job must then prove the names it reports.
+    let mut inventory = BTreeSet::new();
+    for (id, job) in jobs {
+        let names = job_names(id, job)?;
+        if conditional(job) {
+            let steps = job["steps"]
+                .as_sequence()
+                .context("missing workflow steps")?;
+            let mut outcomes = StepOutcomes::new();
+            for (index, step) in steps.iter().enumerate() {
+                let outcome = step_outcome(step, default_branch)?;
+                let name = step["name"]
                     .as_str()
-                    .context("conditional jobs or steps need a literal predicate")?;
-                push_step_runs(condition, default_branch)?
-            } else {
-                true
-            };
-            let name = step["name"]
-                .as_str()
-                .context("conditional workflow steps need literal names")?;
-            ensure!(
-                !name.is_empty() && !name.contains("${{"),
-                "conditional workflow steps need literal names"
-            );
-            expected
-                .outcomes
-                .insert(index as u64 + 2, (name.into(), runs));
-        }
-        if !expected.outcomes.is_empty() {
-            let name = job
-                .get("name")
-                .unwrap_or(id)
-                .as_str()
-                .context("conditional steps need a literal job name")?;
-            ensure!(
-                !name.is_empty() && !name.contains("${{"),
-                "conditional steps need a literal job name"
-            );
-            let mut names = if let Some(matrix) = job
-                .get("strategy")
-                .and_then(|strategy| strategy.get("matrix"))
-            {
-                let mapping = matrix
-                    .as_mapping()
-                    .context("conditional steps need a static include matrix")?;
-                let include = matrix["include"]
-                    .as_sequence()
-                    .context("conditional steps need a static include matrix")?;
-                ensure!(
-                    mapping.len() == 1 && !include.is_empty(),
-                    "conditional steps need a nonempty include-only matrix"
-                );
-                ensure!(
-                    job.get("name").is_none(),
-                    "conditional matrix job names must use native expansion"
-                );
-                let mut names = BTreeSet::new();
-                for row in include {
-                    let row = row
-                        .as_mapping()
-                        .context("conditional steps need literal matrix rows")?;
-                    ensure!(
-                        row.len() == 2
-                            && row
-                                .get(serde_yaml::Value::String("system".into()))
-                                .is_some()
-                            && row
-                                .get(serde_yaml::Value::String("runner".into()))
-                                .is_some()
-                            && row.values().all(|value| value
-                                .as_str()
-                                .is_some_and(|value| !value.is_empty() && !value.contains("${{"))),
-                        "conditional steps need literal native system/runner matrix rows"
-                    );
-                    let values = row
-                        .values()
-                        .map(|value| value.as_str().unwrap())
-                        .collect::<Vec<_>>();
-                    ensure!(
-                        names.insert(format!("{name} ({})", values.join(", "))),
-                        "conditional matrix job names collide"
-                    );
-                }
-                names
-            } else {
-                BTreeSet::from([name.to_owned()])
-            };
-            expected.outcome_jobs = names.clone();
-            // Every other source job reports a literal name, which keeps the
-            // completed-run inventory exact.
-            for (other, source) in jobs {
-                if other == id {
-                    continue;
-                }
-                let name = source
-                    .get("name")
-                    .unwrap_or(other)
-                    .as_str()
-                    .context("conditional steps require literal job names")?;
-                ensure!(
-                    !name.is_empty() && !name.contains("${{"),
-                    "conditional steps require literal job names"
-                );
-                ensure!(
-                    names.insert(name.to_owned()),
-                    "conditional matrix job names collide"
-                );
+                    .filter(|name| !name.is_empty() && !name.contains("${{"))
+                    .context("conditional workflow steps need literal names")?;
+                // Step 1 is the runner's own job setup.
+                outcomes.insert(index as u64 + 2, (name.into(), outcome));
             }
-            expected.jobs = Some(names);
+            for name in &names {
+                expected.bound.insert(name.clone(), outcomes.clone());
+            }
+        }
+        for name in names {
+            ensure!(
+                inventory.insert(name),
+                "conditional matrix job names collide"
+            );
         }
     }
+    expected.jobs = Some(inventory);
     Ok(expected)
 }
 
@@ -1259,7 +1294,7 @@ fn execute_with(
             branch.eq_ignore_ascii_case(&default_branch),
         )?;
         ensure!(
-            expected.outcomes.is_empty()
+            expected.bound.is_empty()
                 || (branch.is_ascii() && default_branch.is_ascii())
                 || branch == default_branch,
             "conditional push qualification needs a provable branch-name comparison"
@@ -1609,22 +1644,18 @@ fn admit_run(
         ensure!(!steps.is_empty(), "job has an empty step inventory");
         let bound = job["name"]
             .as_str()
-            .is_some_and(|name| expected.outcome_jobs.contains(name));
-        let mut outcomes = if bound {
-            expected.outcomes.clone()
-        } else {
-            BTreeMap::new()
-        };
+            .and_then(|name| expected.bound.get(name));
+        let mut outcomes = bound.cloned().unwrap_or_default();
         let mut step_numbers = BTreeSet::new();
         for step in steps {
             ensure!(
-                !bound
+                bound.is_none()
                     || step["number"]
                         .as_u64()
                         .is_some_and(|number| step_numbers.insert(number)),
                 "missing or duplicate source-bound step number"
             );
-            let conclusion = if let Some((name, runs)) = step["number"]
+            let outcome = if let Some((name, outcome)) = step["number"]
                 .as_u64()
                 .and_then(|number| outcomes.remove(&number))
             {
@@ -1632,12 +1663,12 @@ fn admit_run(
                     step["name"] == name,
                     "conditional step source identity mismatch"
                 );
-                if runs { "success" } else { "skipped" }
+                outcome
             } else {
-                "success"
+                StepOutcome::Success
             };
             ensure!(
-                step["status"] == "completed" && step["conclusion"] == conclusion,
+                step["status"] == "completed" && outcome.admits(&step["conclusion"]),
                 "job has an unproved step outcome"
             );
         }
@@ -1666,7 +1697,7 @@ mod tests {
         )
         .unwrap();
         let steps = push_steps(&workflow, false).unwrap();
-        assert!(steps.outcomes.is_empty() && steps.jobs.is_none());
+        assert!(steps.bound.is_empty() && steps.jobs.is_none());
         // Any other predicate is still bound or refused.
         let guarded: serde_yaml::Value =
             serde_yaml::from_str("jobs:\n  build:\n    steps:\n      - name: Test\n        if: ${{ vars.SKIP != '' }}\n        run: test\n")
@@ -2303,9 +2334,18 @@ mod tests {
             ("if: ${{ inputs.release }}", "if: true"),
             ("name: Validate tag", "name: '${{ inputs.name }}'"),
             ("runner: macos-15", "runner: '${{ inputs.runner }}'"),
+            // A job name must be proven from literal matrix values.
             (
                 "runs-on: ${{ matrix.runner }}",
-                "name: '${{ matrix.system }}'\n    runs-on: ${{ matrix.runner }}",
+                "name: '${{ matrix.missing }}'\n    runs-on: ${{ matrix.runner }}",
+            ),
+            (
+                "runs-on: ${{ matrix.runner }}",
+                "name: '${{ inputs.name }}'\n    runs-on: ${{ matrix.runner }}",
+            ),
+            (
+                "runs-on: ${{ matrix.runner }}",
+                "name: build\n    runs-on: ${{ matrix.runner }}",
             ),
             ("include:", "other: [x86_64-linux]\n        include:"),
             (
@@ -2320,6 +2360,44 @@ mod tests {
                 "{from} -> {to}"
             );
         }
+    }
+
+    #[test]
+    fn templated_matrix_job_names_and_optional_steps_are_proven_from_source() {
+        let save = crate::render::ci::step_conditions::cache_action("save");
+        let workflow: serde_yaml::Value = serde_yaml::from_str(&format!(
+            "jobs:\n  build:\n    name: build (${{{{ matrix.group }}}})\n    strategy:\n      matrix:\n        include:\n          - group: checks\n            installables: '[\".#a\"]'\n          - group: packages\n            installables: '[\".#b\"]'\n    steps:\n      - name: Build\n        run: build\n      - name: Diagnose\n        if: ${{{{ !cancelled() }}}}\n        run: diagnose\n      - name: Save\n        if: ${{{{ steps.export.outputs.save == 'true' }}}}\n        uses: {save}\n  changes:\n    name: Classify changed paths\n    steps:\n      - run: classify\n"
+        ))
+        .unwrap();
+        let steps = push_steps(&workflow, false).unwrap();
+        assert_eq!(
+            steps.jobs.unwrap(),
+            BTreeSet::from([
+                "build (checks)".to_owned(),
+                "build (packages)".to_owned(),
+                "Classify changed paths".to_owned()
+            ])
+        );
+        assert_eq!(steps.bound.len(), 2);
+        assert_eq!(
+            steps.bound["build (packages)"],
+            BTreeMap::from([
+                (2, ("Build".to_owned(), StepOutcome::Success)),
+                (3, ("Diagnose".to_owned(), StepOutcome::Success)),
+                (4, ("Save".to_owned(), StepOutcome::Either)),
+            ])
+        );
+        assert!(StepOutcome::Either.admits(&json!("skipped")));
+        assert!(StepOutcome::Either.admits(&json!("success")));
+        assert!(!StepOutcome::Either.admits(&json!("failure")));
+        assert!(!StepOutcome::Success.admits(&json!("skipped")));
+        assert!(!StepOutcome::Skipped.admits(&json!("success")));
+        // The same condition on a step that can do work is not optional.
+        let masked: serde_yaml::Value = serde_yaml::from_str(
+            "jobs:\n  build:\n    steps:\n      - name: Test\n        if: ${{ steps.export.outputs.save == 'true' }}\n        run: cargo test\n",
+        )
+        .unwrap();
+        assert!(push_steps(&masked, false).is_err());
     }
 
     #[test]

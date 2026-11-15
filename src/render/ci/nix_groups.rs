@@ -1,4 +1,5 @@
 //! Opt-in Nix groups keep shared dependencies on one runner and retain each gate.
+use super::step_conditions::cache_action;
 use super::*;
 use crate::config::NixBuildConfig;
 use anyhow::ensure;
@@ -41,6 +42,15 @@ pub(super) fn render(
     push_required_secrets_header(&mut workflow, &options.required_secrets);
     workflow.push_str("name: Nix installable builds\n\non:\n  push:\n");
     push_ci_branches(&mut workflow, &options.push_branches);
+    // Like the installable matrix: a workflow that coalesces push and
+    // pull-request runs names its group by its own path and excludes tags,
+    // the form updater admission proves.
+    let coalesced = !options.separate_events
+        && options.push_branches.is_empty()
+        && options.push_tags.is_empty();
+    if coalesced {
+        workflow.push_str("    tags-ignore: [\"**\"]\n");
+    }
     if !options.push_tags.is_empty() {
         workflow.push_str("    tags:\n");
         for pattern in &options.push_tags {
@@ -51,6 +61,8 @@ pub(super) fn render(
         .push_str("  pull_request:\n  workflow_dispatch:\n\npermissions:\n  contents: read\n\n");
     if options.separate_events || !options.push_branches.is_empty() {
         push_independent_source_concurrency(&mut workflow);
+    } else if coalesced {
+        workflow.push_str("concurrency:\n  group: .github/workflows/nix-builds.yaml-${{ github.event.pull_request.head.repo.full_name || github.repository }}-${{ github.event.pull_request.head.ref || github.ref_name }}\n  cancel-in-progress: true\n\n");
     } else {
         workflow.push_str("concurrency:\n  group: nix-groups-${{ github.event.pull_request.head.repo.full_name || github.repository }}-${{ github.ref_type == 'tag' && github.ref || format('refs/heads/{0}', github.event.pull_request.head.ref || github.ref_name) }}\n  cancel-in-progress: true\n\n");
     }
@@ -149,11 +161,7 @@ pub(super) fn render(
         push_producer_env(w, options)
     });
     if options.kvm {
-        workflow.push_str("      - name: Enable hosted KVM\n");
-        if native_runners {
-            workflow.push_str("        if: ${{ matrix.system == 'x86_64-linux' }}\n");
-        }
-        workflow.push_str("        run: |\n          test \"${RUNNER_ENVIRONMENT:-}\" = github-hosted\n          test -c /dev/kvm\n          sudo chmod a+rw /dev/kvm\n          test -r /dev/kvm && test -w /dev/kvm\n");
+        push_hosted_kvm_step(&mut workflow, native_runners);
     }
     push_extra_setup_steps_with_context(&mut workflow, extra_setup, |w| {
         push_producer_env(w, options)
@@ -196,7 +204,10 @@ pub(super) fn render(
     workflow.push_str("            *) echo 'Unknown Nix execution group' >&2; exit 1 ;;\n          esac\n          \"$SIMIT_CI_ENGINE\" ci nix-group --spec \"$SIMIT_NIX_BUILD_RESULTS/group-spec.json\"\n");
     push_input_cache_save(&mut workflow, options);
     push_diagnostics_fallback(&mut workflow, options);
-    workflow.push_str("      - name: Upload Nix build evidence\n        if: always()\n");
+    workflow.push_str(&format!(
+        "      - name: Upload Nix build evidence\n        if: {}\n",
+        StepCondition::Always.expression()
+    ));
     push_action_uses(
         &mut workflow,
         Platform::Github,
@@ -249,12 +260,17 @@ fn engine_cache_key(revision: &str) -> String {
 /// every group job. Provisioning still evaluates the same pin and records its
 /// digest; a miss or unreadable entry is an ordinary build. Like cached inputs,
 /// entries carry the trust of the repository's default-branch runs.
+///
+/// The restore, import and export steps always run and decide inside their
+/// scripts, so their outcome needs no proof: without an enrolled revision the
+/// restore misses and provisioning fails as before. Only the save, an action
+/// that cannot be guarded by a script, stays conditional (an optional step).
 fn push_engine_cache_restore(workflow: &mut String, revision: &str) {
-    workflow.push_str(&format!("      - name: Restore grouped-build engine\n        id: simit-engine-cache\n        if: ${{{{ {revision} != '' }}}}\n        uses: {}\n        with:\n          path: ${{{{ runner.temp }}}}/simit-engine-cache\n          key: {}\n", input_cache_action("restore"), engine_cache_key(revision)));
+    workflow.push_str(&format!("      - name: Restore grouped-build engine\n        id: simit-engine-cache\n        uses: {}\n        with:\n          path: ${{{{ runner.temp }}}}/simit-engine-cache\n          key: {}\n", cache_action("restore"), engine_cache_key(revision)));
     workflow.push_str(r#"      - name: Import grouped-build engine
-        if: ${{ steps.simit-engine-cache.outputs.cache-hit == 'true' }}
         shell: bash
         env:
+          SIMIT_ENGINE_CACHE_HIT: ${{ steps.simit-engine-cache.outputs.cache-hit }}
           BASH_ENV: ''
           ENV: ''
           NIX_CONFIG: 'experimental-features = nix-command flakes'
@@ -262,6 +278,7 @@ fn push_engine_cache_restore(workflow: &mut String, revision: &str) {
           NIX_PATH: ''
         run: |
           set -euo pipefail
+          [ "$SIMIT_ENGINE_CACHE_HIT" = true ] || exit 0
           cache_root="$RUNNER_TEMP/simit-engine-cache"
           env -u GH_TOKEN -u GITHUB_TOKEN -u GITHUB_OAUTH_TOKEN -u ATTIC_TOKEN -u CACHIX_AUTH_TOKEN -u CACHIX_SIGNING_KEY nix copy --no-check-sigs --all --from "file://$cache_root" || echo '::warning::Cached grouped-build engine failed to import; building it normally'
           rm -rf "$cache_root"
@@ -269,9 +286,11 @@ fn push_engine_cache_restore(workflow: &mut String, revision: &str) {
 }
 
 fn push_engine_cache_save(workflow: &mut String, revision: &str) {
-    workflow.push_str(&format!("      - name: Export grouped-build engine\n        id: simit-engine-cache-save\n        if: ${{{{ {revision} != '' && steps.simit-engine-cache.outputs.cache-hit != 'true' }}}}\n"));
-    workflow.push_str(r#"        shell: bash
+    workflow.push_str(r#"      - name: Export grouped-build engine
+        id: simit-engine-cache-save
+        shell: bash
         env:
+          SIMIT_ENGINE_CACHE_HIT: ${{ steps.simit-engine-cache.outputs.cache-hit }}
           BASH_ENV: ''
           ENV: ''
           NIX_CONFIG: 'experimental-features = nix-command flakes'
@@ -279,6 +298,7 @@ fn push_engine_cache_save(workflow: &mut String, revision: &str) {
           NIX_PATH: ''
         run: |
           set -euo pipefail
+          [ "$SIMIT_ENGINE_CACHE_HIT" != true ] || exit 0
           cache_root="$RUNNER_TEMP/simit-engine-cache"
           rm -rf "$cache_root"
           if nix copy --to "file://$cache_root?compression=zstd" "${SIMIT_CI_ENGINE%/bin/simit}"; then
@@ -287,16 +307,7 @@ fn push_engine_cache_save(workflow: &mut String, revision: &str) {
             echo '::warning::Grouped-build engine failed to export; not saving it'
           fi
 "#);
-    workflow.push_str(&format!("      - name: Save grouped-build engine\n        if: ${{{{ steps.simit-engine-cache-save.outputs.save == 'true' }}}}\n        uses: {}\n        with:\n          path: ${{{{ runner.temp }}}}/simit-engine-cache\n          key: {}\n", input_cache_action("save"), engine_cache_key(revision)));
-}
-
-fn input_cache_action(action: &str) -> String {
-    // Restore and save are subdirectories of the pinned actions/cache commit.
-    github_action_ref("actions/cache", "v6.1.0").replacen(
-        "actions/cache@",
-        &format!("actions/cache/{action}@"),
-        1,
-    )
+    workflow.push_str(&format!("      - name: Save grouped-build engine\n        if: ${{{{ steps.simit-engine-cache-save.outputs.save == 'true' }}}}\n        uses: {}\n        with:\n          path: ${{{{ runner.temp }}}}/simit-engine-cache\n          key: {}\n", cache_action("save"), engine_cache_key(revision)));
 }
 
 fn push_input_cache_hits(workflow: &mut String, options: &NixBuildConfig) {
@@ -333,7 +344,7 @@ fn push_input_cache_restore(workflow: &mut String, options: &NixBuildConfig) {
         ));
     }
     for index in 0..options.cache_installables.len() {
-        workflow.push_str(&format!("      - name: Restore cached Nix input {index}\n        id: simit-nix-cache-{index}\n        uses: {}\n        with:\n          path: ${{{{ runner.temp }}}}/simit-nix-cache/{index}\n          key: ${{{{ steps.simit-nix-cache.outputs.key-{index} }}}}\n", input_cache_action("restore")));
+        workflow.push_str(&format!("      - name: Restore cached Nix input {index}\n        id: simit-nix-cache-{index}\n        uses: {}\n        with:\n          path: ${{{{ runner.temp }}}}/simit-nix-cache/{index}\n          key: ${{{{ steps.simit-nix-cache.outputs.key-{index} }}}}\n", cache_action("restore")));
     }
     workflow.push_str("      - name: Import cached Nix inputs\n        shell: bash\n        env:\n          SIMIT_NIX_GROUP: ${{ matrix.group }}\n");
     push_input_cache_hits(workflow, options);
@@ -382,7 +393,10 @@ fn push_input_cache_save(workflow: &mut String, options: &NixBuildConfig) {
     if options.cache_installables.is_empty() {
         return;
     }
-    workflow.push_str("      - name: Export cached Nix inputs\n        id: simit-nix-cache-save\n        if: ${{ !cancelled() }}\n        shell: bash\n        env:\n");
+    workflow.push_str(&format!(
+        "      - name: Export cached Nix inputs\n        id: simit-nix-cache-save\n        if: {}\n        shell: bash\n        env:\n",
+        StepCondition::NotCancelled.wrapped()
+    ));
     push_input_cache_hits(workflow, options);
     push_producer_env_lines(workflow, options);
     workflow.push_str(&r#"        run: |
@@ -412,7 +426,7 @@ fn push_input_cache_save(workflow: &mut String, options: &NixBuildConfig) {
         workflow.push_str(&format!("          export_input {index}\n"));
     }
     for index in 0..options.cache_installables.len() {
-        workflow.push_str(&format!("      - name: Save cached Nix input {index}\n        if: ${{{{ !cancelled() && steps.simit-nix-cache-save.outputs.save-{index} == 'true' }}}}\n        uses: {}\n        with:\n          path: ${{{{ runner.temp }}}}/simit-nix-cache/{index}\n          key: ${{{{ steps.simit-nix-cache.outputs.key-{index} }}}}\n", input_cache_action("save")));
+        workflow.push_str(&format!("      - name: Save cached Nix input {index}\n        if: ${{{{ !cancelled() && steps.simit-nix-cache-save.outputs.save-{index} == 'true' }}}}\n        uses: {}\n        with:\n          path: ${{{{ runner.temp }}}}/simit-nix-cache/{index}\n          key: ${{{{ steps.simit-nix-cache.outputs.key-{index} }}}}\n", cache_action("save")));
     }
 }
 
@@ -422,7 +436,11 @@ fn push_diagnostics_fallback(workflow: &mut String, options: &NixBuildConfig) {
     }
     // The collectors must survive failed engine provisioning or admission.
     // Render static member arms so the fallback needs only the job's shell.
-    workflow.push_str("      - name: Retain uncollected group diagnostics\n        if: ${{ !cancelled() }}\n        env:\n          SIMIT_NIX_GROUP: ${{ matrix.group }}\n          SIMIT_NIX_BUILD_RESULTS: ${{ runner.temp }}/simit-nix-build-${{ strategy.job-index }}\n");
+    workflow.push_str(&format!(
+        "      - name: Retain uncollected group diagnostics\n        if: {}\n",
+        StepCondition::NotCancelled.wrapped()
+    ));
+    workflow.push_str("        env:\n          SIMIT_NIX_GROUP: ${{ matrix.group }}\n          SIMIT_NIX_BUILD_RESULTS: ${{ runner.temp }}/simit-nix-build-${{ strategy.job-index }}\n");
     push_producer_env_lines(workflow, options);
     workflow.push_str("        run: |\n          group_root=\"$SIMIT_NIX_BUILD_RESULTS\"\n          collector_failed=0\n          case \"$SIMIT_NIX_GROUP\" in\n");
     for (name, members) in &options.groups {

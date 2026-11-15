@@ -19,6 +19,8 @@ mod independent_lanes;
 pub mod local;
 mod nix_dependencies;
 mod nix_groups;
+pub mod step_conditions;
+use step_conditions::StepCondition;
 pub(super) mod trusted_publisher;
 
 pub const OMNIX_REF_DEFAULT: &str = "github:juspay/omnix/v1.3.2";
@@ -1270,7 +1272,10 @@ pub fn github_prebuild_file_with_policy(
         let validation = super::release_workflow::tag_validation_step(artifacts, prefix, notes);
         workflow.push_str(&validation.replacen(
             "        run: |",
-            "        if: ${{ inputs.release }}\n        run: |",
+            &format!(
+                "        if: {}\n        run: |",
+                StepCondition::Release.wrapped()
+            ),
             1,
         ));
     }
@@ -1286,7 +1291,11 @@ pub fn github_prebuild_file_with_policy(
         }
     }
     if prebuild.release_archives {
-        workflow.push_str("      - name: Build unsigned release archives\n        if: ${{ inputs.release && github.event_name != 'pull_request' }}\n        run: |\n          set -euo pipefail\n          shopt -s nullglob\n          mkdir -p .simit-prebuild release\n          VERSION=\"${GITHUB_REF_NAME#v}\"\n");
+        let release_if = StepCondition::ReleaseOutsidePullRequests.wrapped();
+        workflow.push_str(&format!(
+            "      - name: Build unsigned release archives\n        if: {release_if}\n"
+        ));
+        workflow.push_str("        run: |\n          set -euo pipefail\n          shopt -s nullglob\n          mkdir -p .simit-prebuild release\n          VERSION=\"${GITHUB_REF_NAME#v}\"\n");
         for (index, attr) in release_attrs.iter().enumerate() {
             let link = format!(".simit-prebuild/release-{index}");
             workflow.push_str("          nix build ");
@@ -1301,7 +1310,9 @@ pub fn github_prebuild_file_with_policy(
             workflow.push_str(&shell_quote(&link));
             workflow.push_str(" -mindepth 1 -maxdepth 1 -type f ! -name '*-release-manifest.json' -print | LC_ALL=C sort)\n");
         }
-        workflow.push_str("      - name: Upload unsigned release archives\n        if: ${{ inputs.release && github.event_name != 'pull_request' }}\n        uses: ");
+        workflow.push_str(&format!(
+            "      - name: Upload unsigned release archives\n        if: {release_if}\n        uses: "
+        ));
         workflow.push_str(&github_action_ref(
             "actions/upload-artifact",
             artifact_version,
@@ -1318,12 +1329,13 @@ pub fn github_prebuild_file_with_policy(
             .as_deref()
             .expect("validated rs-harbor Attic app");
         let publish_if = if release_entry {
-            "${{ (github.event_name == 'push' && github.ref == format('refs/heads/{0}', github.event.repository.default_branch)) || (inputs.release && github.event_name != 'pull_request') }}"
+            StepCondition::DefaultBranchPushOrRelease
         } else {
-            "${{ github.event_name == 'push' && github.ref == format('refs/heads/{0}', github.event.repository.default_branch) }}"
-        };
+            StepCondition::DefaultBranchPush
+        }
+        .wrapped();
         workflow.push_str("      - name: Publish flake inputs to Attic\n        if: ");
-        workflow.push_str(publish_if);
+        workflow.push_str(&publish_if);
         workflow.push_str("\n        env:\n          ATTIC_TOKEN: ${{ ");
         if release_entry {
             // A reusable call only sees the declared `attic_token`; a direct
@@ -1340,7 +1352,7 @@ pub fn github_prebuild_file_with_policy(
         workflow.push_str(&shell_quote(attic_app));
         workflow.push_str(" && exit 0\n            test \"$attempt\" = 3 || sleep $((attempt * 30))\n          done\n          exit 1\n");
         workflow.push_str("      - name: Upload flake input manifest\n        if: ");
-        workflow.push_str(publish_if);
+        workflow.push_str(&publish_if);
         workflow.push_str("\n        uses: ");
         workflow.push_str(&github_action_ref(
             "actions/upload-artifact",
@@ -1522,11 +1534,7 @@ pub fn nix_build_matrix_file_with_options(
         push_native_nix_runner_step(&mut workflow);
     }
     if options.kvm {
-        workflow.push_str("      - name: Enable hosted KVM\n");
-        if native_runners {
-            workflow.push_str("        if: ${{ matrix.system == 'x86_64-linux' }}\n");
-        }
-        workflow.push_str("        run: |\n          test \"${RUNNER_ENVIRONMENT:-}\" = github-hosted\n          test -c /dev/kvm\n          sudo chmod a+rw /dev/kvm\n          test -r /dev/kvm && test -w /dev/kvm\n");
+        push_hosted_kvm_step(&mut workflow, native_runners);
     }
     push_extra_setup_steps(&mut workflow, extra_setup);
     push_extra_setup_steps(&mut workflow, &options.extra_setup);
@@ -1560,14 +1568,18 @@ pub fn nix_build_matrix_file_with_options(
         // Collect failed-build diagnostics without keeping canceled runs alive.
         for (index, script) in options.post_build_always.iter().enumerate() {
             workflow.push_str(&format!(
-                "      - name: Retain Nix diagnostics {}\n        if: ${{{{ !cancelled() }}}}\n        run: |\n",
-                index + 1
+                "      - name: Retain Nix diagnostics {}\n        if: {}\n        run: |\n",
+                index + 1,
+                StepCondition::NotCancelled.wrapped()
             ));
             for line in script.lines() {
                 workflow.push_str(&format!("          {line}\n"));
             }
         }
-        workflow.push_str("      - name: Upload Nix build evidence\n        if: always()\n");
+        workflow.push_str(&format!(
+            "      - name: Upload Nix build evidence\n        if: {}\n",
+            StepCondition::Always.expression()
+        ));
         push_action_uses(
             &mut workflow,
             platform,
@@ -4876,6 +4888,21 @@ pub(crate) fn with_maintenance_branches(branches: &[String]) -> Vec<String> {
         branches.push(format!("{prefix}**"));
     }
     branches
+}
+
+/// Only x86_64 Linux hosted runners expose KVM. A native runner matrix
+/// decides that inside the script, so the step itself stays unconditional and
+/// its outcome needs no proof.
+fn push_hosted_kvm_step(workflow: &mut String, native_runners: bool) {
+    workflow.push_str("      - name: Enable hosted KVM\n");
+    if native_runners {
+        workflow.push_str("        env:\n          SIMIT_NIX_SYSTEM: ${{ matrix.system }}\n");
+    }
+    workflow.push_str("        run: |\n");
+    if native_runners {
+        workflow.push_str("          [ \"$SIMIT_NIX_SYSTEM\" = x86_64-linux ] || exit 0\n");
+    }
+    workflow.push_str("          test \"${RUNNER_ENVIRONMENT:-}\" = github-hosted\n          test -c /dev/kvm\n          sudo chmod a+rw /dev/kvm\n          test -r /dev/kvm && test -w /dev/kvm\n");
 }
 
 fn push_ci_branches(workflow: &mut String, branches: &[String]) {
