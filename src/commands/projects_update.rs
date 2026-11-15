@@ -318,6 +318,7 @@ pub fn run(args: Args) -> Result<()> {
             pins: pins.clone(),
             inventory_digest: crate::review::canonical_digest(&inventory)?,
             completed: false,
+            profile: Some(args.profile.clone()),
         }
     };
     if args.push {

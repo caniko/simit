@@ -30,8 +30,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     this release: finish or `--retire` in-flight candidates before upgrading.
 - Added: `simit projects update --profile NAME --retire COORDINATE` abandons an
   unfinished candidate (deletes its maintenance ref, archives the receipt,
-  drops it from frozen rollouts); `--prune-refs` also deletes maintenance refs
-  no receipt names.
+  drops it from this profile's frozen rollouts; canaries stay as barriers and a
+  landed candidate is refused); `--prune-refs` also deletes candidate-shaped
+  maintenance refs no receipt names.
 - Added: `simit::commands::projects_update::admit_candidate_source` runs the
   GitHub adapter's source-level admission on a generation plan without forge
   access. A conformance test renders representative configurations and

@@ -255,13 +255,19 @@ is selected again when the next rollout freezes a new selection.
 the given profile. It deletes the candidate's maintenance ref under a lease on
 the candidate commit (an open pull request closes with its branch), archives
 the receipt as `invalidated-<digest>.json` beside the adopted baseline, and
-drops the coordinate from every unfinished frozen rollout in the workspace, so
-the next run generates a fresh candidate. An adopted receipt is left alone, and
-repeating the command is a no-op. If the ref cannot be deleted, the receipt is
+drops the coordinate from this profile's unfinished frozen rollouts, so the
+next run generates a fresh candidate. A canary stays in its rollout and gates
+the rest again; rollouts frozen before the profile was recorded are left alone
+while another profile has an unfinished candidate of the repository. A
+candidate that is already on the default branch (phase `adopting`, or reachable
+from it) is refused: resume it instead, since its baseline would otherwise no
+longer match the branch. An adopted receipt is left alone, and repeating the
+command is a no-op. If the ref cannot be deleted, the receipt is
 kept and the command fails. A coordinate the profile holds no receipt for is
-refused unless `--prune-refs` is given; that flag also deletes every ref under
-`maintenanceRefPrefix` that no unfinished receipt of the repository names, in
-any profile. Pruning reaches the remote through the repository's retained state
+refused unless `--prune-refs` is given; that flag also deletes refs shaped like simit
+candidates (`maintenanceRefPrefix` followed by the first 16 hex digits of the
+commit they point at) that no unfinished receipt of the repository names, in
+any profile. Other refs under the prefix are never touched. Pruning reaches the remote through the repository's retained state
 checkout, so a repository the updater never cloned needs a `--dry-run` first.
 
 For each repository:

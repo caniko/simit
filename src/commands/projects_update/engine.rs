@@ -200,6 +200,10 @@ pub struct FrozenSelection {
     pub pins: Option<Vec<PinItem>>,
     pub inventory_digest: String,
     pub completed: bool,
+    /// Profile that froze this rollout; absent in rollouts written before it
+    /// was recorded. `--retire` edits only its own profile's rollouts.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub profile: Option<String>,
 }
 
 /// Whether a repository has an unfinished transaction. A failure without one
@@ -457,6 +461,31 @@ fn pull_request(
 
 /// Deletes a published maintenance ref under a lease on its candidate. A ref
 /// that is already gone is success; one that moved belongs to another writer.
+/// Whether the receipt's candidate is reachable from the remote default branch.
+/// Only a candidate that reached landing, or a proposed pull request, can be
+/// there; any other phase never pushed to the default branch.
+fn candidate_landed(checkout: &Path, receipt: &Receipt) -> Result<bool> {
+    if !matches!(receipt.phase.as_str(), "landing" | "adopting" | "proposed") {
+        return Ok(false);
+    }
+    ensure!(
+        checkout.join(".git").is_dir(),
+        "cannot verify that {} did not land without the retained checkout",
+        receipt.candidate
+    );
+    git(
+        checkout,
+        &[
+            "fetch",
+            "--quiet",
+            "origin",
+            &format!("refs/heads/{}", receipt.default_branch),
+        ],
+    )?;
+    let base = git(checkout, &["merge-base", &receipt.candidate, "FETCH_HEAD"])?;
+    Ok(base.trim() == receipt.candidate)
+}
+
 fn retire_maintenance_ref(checkout: &Path, branch: &str, candidate: &str) -> Result<()> {
     let reference = format!("refs/heads/{branch}");
     if git(checkout, &["ls-remote", "origin", &reference])?.is_empty() {
@@ -557,6 +586,15 @@ pub fn retire(
     if let Some(receipt) =
         receipt.filter(|receipt| !matches!(receipt.phase.as_str(), "qualified" | "unchanged"))
     {
+        // A landed candidate moved the default branch past the baseline;
+        // archiving its receipt would leave every later run refused on changed
+        // managed outputs. Resume it instead.
+        ensure!(
+            receipt.phase != "adopting" && !candidate_landed(&checkout, &receipt)?,
+            "{target}: candidate {} already landed on {}; resume the rollout instead of retiring it",
+            receipt.candidate,
+            receipt.default_branch
+        );
         if !receipt.branch.is_empty() {
             retire_maintenance_ref(&checkout, &receipt.branch, &receipt.candidate)
                 .context("maintenance ref was not deleted; the receipt is retained")?;
@@ -594,12 +632,36 @@ pub fn retire(
             let Some(branch) = reference.strip_prefix("refs/heads/") else {
                 continue;
             };
-            if reference.starts_with(&prefix) && !referenced.contains(branch) {
+            // Candidate branches are named after their commit; anything else
+            // under the prefix was not created by simit.
+            let owned = revision.len() >= 16
+                && branch
+                    == format!(
+                        "{}{}",
+                        profile.rollout.maintenance_ref_prefix,
+                        &revision[..16]
+                    );
+            if owned && reference.starts_with(&prefix) && !referenced.contains(branch) {
                 retire_maintenance_ref(&checkout, branch, revision)?;
                 report.deleted_refs.push(branch.into());
             }
         }
     }
+    // A legacy rollout does not name its profile; leave it alone while another
+    // profile still has an unfinished candidate of this repository.
+    let own = profile_directory(workspace, profile_name);
+    let mut other_in_flight = false;
+    for entry in fs::read_dir(state_directory)? {
+        let directory = entry?.path();
+        let path = directory.join(&repository).join("receipt.json");
+        if directory != own && path.is_file() {
+            other_in_flight |= crate::review::read_json::<Receipt>(&path).map_or(true, |r| {
+                !matches!(r.phase.as_str(), "qualified" | "unchanged")
+            });
+        }
+    }
+    // A canary stays in its rollout so it regenerates and gates the rest again.
+    let canary = profile.rollout.canaries.iter().any(|c| c == target);
     for entry in fs::read_dir(state_directory)? {
         let path = entry?.path();
         let name = path.file_name().unwrap_or_default().to_string_lossy();
@@ -607,6 +669,13 @@ pub fn retire(
             continue;
         }
         let mut frozen: FrozenSelection = crate::review::read_json(&path)?;
+        let mine = match &frozen.profile {
+            Some(name) => name == profile_name,
+            None => !other_in_flight,
+        };
+        if !mine || canary {
+            continue;
+        }
         let before = frozen.projects.len();
         frozen
             .projects
@@ -5055,26 +5124,28 @@ else:
         f.write_inventory();
         f.control(json!({"candidate":"pending"}));
         assert!(f.cli("fleet", true).is_err());
-        // A ref no receipt names survives an ordinary retirement.
-        git(
-            &f.source,
-            &[
-                "push",
-                "--quiet",
-                f.remote.to_str().unwrap(),
-                "HEAD:refs/heads/maintenance/orphan",
-            ],
-        )
-        .unwrap();
-        assert_eq!(f.maintenance_refs().lines().count(), 2);
+        // Refs no receipt names survive an ordinary retirement: one shaped like
+        // a simit candidate (named after its commit) and one made by hand.
+        let head = git(&f.source, &["rev-parse", "HEAD"]).unwrap();
+        let orphan = format!("maintenance/{}", &head.trim()[..16]);
+        for branch in [orphan.as_str(), "maintenance/by-hand"] {
+            git(
+                &f.source,
+                &[
+                    "push",
+                    "--quiet",
+                    f.remote.to_str().unwrap(),
+                    &format!("HEAD:refs/heads/{branch}"),
+                ],
+            )
+            .unwrap();
+        }
+        assert_eq!(f.maintenance_refs().lines().count(), 3);
         let retired = f.retire(demo, false).unwrap();
         assert_eq!((retired.phase, retired.rollouts), ("retired", 1));
         assert_eq!(retired.deleted_refs.len(), 1);
         assert!(!f.root().join("receipt.json").exists());
-        assert!(
-            f.maintenance_refs()
-                .ends_with("refs/heads/maintenance/orphan")
-        );
+        assert_eq!(f.maintenance_refs().lines().count(), 2);
         assert_eq!(f.remote_head(), source);
         let state = &f.config.workspaces["projects"].state_directory;
         for entry in fs::read_dir(state).unwrap() {
@@ -5087,11 +5158,14 @@ else:
                 assert!(frozen.completed && frozen.projects.is_empty());
             }
         }
-        // Repeating it is a no-op; pruning deletes the orphan.
+        // Repeating it is a no-op; pruning deletes only the simit-shaped orphan.
         let again = f.retire(demo, true).unwrap();
         assert_eq!((again.phase, again.rollouts), ("idle", 0));
-        assert_eq!(again.deleted_refs, ["maintenance/orphan"]);
-        assert!(f.maintenance_refs().is_empty());
+        assert_eq!(again.deleted_refs, [orphan.as_str()]);
+        assert!(
+            f.maintenance_refs()
+                .ends_with("refs/heads/maintenance/by-hand")
+        );
         // A repository this profile holds no state for is refused.
         assert!(
             f.retire("fixture.example/team/next", false)
@@ -5107,6 +5181,79 @@ else:
         // An adopted receipt is not a candidate: nothing is archived.
         assert_eq!(f.retire(demo, false).unwrap().phase, "idle");
         assert!(f.root().join("receipt.json").exists());
+    }
+
+    #[test]
+    fn namespace_retire_refuses_a_landed_candidate() {
+        let f = Fixture::new();
+        f.control(json!({"adoption":"pending"}));
+        let adopting = f.update(true).unwrap();
+        assert_eq!(adopting.phase, "adopting");
+        let error = f.retire(&f.project.coordinate, false).unwrap_err();
+        assert!(error.to_string().contains("already landed"), "{error:#}");
+        // The receipt stays, so the next run resumes the landed candidate.
+        assert!(f.root().join("receipt.json").exists());
+    }
+
+    #[test]
+    fn namespace_retire_keeps_a_canary_as_its_rollout_barrier() {
+        let mut f = Fixture::new();
+        let demo = f.project.coordinate.clone();
+        f.config
+            .profiles
+            .get_mut("fleet")
+            .unwrap()
+            .rollout
+            .canaries
+            .push(demo.clone());
+        f.write_inventory();
+        f.control(json!({"candidate":"pending"}));
+        assert!(f.cli("fleet", true).is_err());
+        let retired = f.retire(&demo, false).unwrap();
+        assert_eq!((retired.phase, retired.rollouts), ("retired", 0));
+        let state = &f.config.workspaces["projects"].state_directory;
+        let kept = fs::read_dir(state)
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .filter(|path| {
+                path.file_name()
+                    .is_some_and(|name| name.to_string_lossy().starts_with("rollout-"))
+            })
+            .any(|path| {
+                let frozen: FrozenSelection = crate::review::read_json(&path).unwrap();
+                !frozen.completed && frozen.projects.iter().any(|p| p.coordinate == demo)
+            });
+        assert!(kept, "the canary must stay in its rollout");
+    }
+
+    #[test]
+    fn namespace_retire_leaves_other_profiles_rollouts() {
+        let mut f = Fixture::new();
+        let demo = f.project.coordinate.clone();
+        let other =
+            serde_json::from_value(serde_json::to_value(&f.config.profiles["fleet"]).unwrap())
+                .unwrap();
+        f.config.profiles.insert("other".into(), other);
+        f.write_inventory();
+        f.control(json!({"candidate":"pending"}));
+        assert!(f.cli("fleet", true).is_err());
+        assert!(f.cli("other", true).is_err());
+        let retired = f.retire(&demo, false).unwrap();
+        assert_eq!((retired.phase, retired.rollouts), ("retired", 1));
+        let state = &f.config.workspaces["projects"].state_directory;
+        let others = fs::read_dir(state)
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .filter(|path| {
+                path.file_name()
+                    .is_some_and(|name| name.to_string_lossy().starts_with("rollout-"))
+            })
+            .map(|path| crate::review::read_json::<FrozenSelection>(&path).unwrap())
+            .filter(|frozen| frozen.profile.as_deref() == Some("other"))
+            .collect::<Vec<_>>();
+        assert_eq!(others.len(), 1);
+        assert!(!others[0].completed);
+        assert!(others[0].projects.iter().any(|p| p.coordinate == demo));
     }
 
     #[test]
