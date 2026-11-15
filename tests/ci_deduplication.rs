@@ -334,9 +334,10 @@ fn ordinary_github_jobs_admit_prs_and_default_branch_pushes_without_cross_event_
             );
             assert_eq!(job["needs"], serde_yaml::to_value(["changes"]).unwrap());
         }
+        // A branch filter always admits the updater's maintenance refs.
         assert_eq!(
             yaml["on"]["push"]["branches"],
-            serde_yaml::to_value(["trunk"]).unwrap()
+            serde_yaml::to_value(["trunk", "simit/update/**"]).unwrap()
         );
         assert!(
             yaml["on"]
@@ -513,9 +514,10 @@ fn flake_and_python_primary_filters_preserve_pr_qualification_and_scope() {
         generate(temp.path(), false);
         let workflow = fs::read_to_string(temp.path().join(".github/workflows/ci.yaml")).unwrap();
         let yaml: serde_yaml::Value = serde_yaml::from_str(&workflow).unwrap();
+        // A branch filter always admits the updater's maintenance refs.
         assert_eq!(
             yaml["on"]["push"]["branches"],
-            serde_yaml::to_value(["trunk"]).unwrap()
+            serde_yaml::to_value(["trunk", "simit/update/**"]).unwrap()
         );
         if !python {
             assert_eq!(

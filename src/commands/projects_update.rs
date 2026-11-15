@@ -34,6 +34,13 @@ pub struct Args {
     /// Explain every enrolled coordinate without forge requests or candidate generation.
     #[arg(long, conflicts_with_all = ["push", "status", "dry_run", "limit"])]
     pub plan: bool,
+    /// Abandon this coordinate's unfinished candidate: delete its maintenance
+    /// ref, archive its receipt and drop it from every frozen rollout.
+    #[arg(long, value_name = "COORDINATE", conflicts_with_all = ["repo", "pin_file", "dry_run", "push", "status", "plan", "limit"])]
+    pub retire: Option<String>,
+    /// With --retire, also delete maintenance refs that no receipt references.
+    #[arg(long, requires = "retire")]
+    pub prune_refs: bool,
     #[arg(long, default_value_t = 900, value_parser = clap::value_parser!(u64).range(0..=21600))]
     pub wait_seconds: u64,
     #[arg(long, value_parser = clap::value_parser!(u32).range(1..))]
@@ -55,6 +62,46 @@ pub fn adapter(args: AdapterArgs) -> Result<()> {
 
 pub fn forgejo_adapter(args: AdapterArgs) -> Result<()> {
     respond(args, forgejo::execute)
+}
+
+/// Source-level candidate admission of a generation plan, without forge
+/// state: the proofs the GitHub adapter demands of the owned push workflows
+/// before a candidate may be published on `branch`. Registration, rulesets
+/// and secrets are checked only by the adapter's online admission.
+pub fn admit_candidate_source(
+    plan: &crate::project::CiUpdatePlan,
+    branch: &str,
+    required_checks: &[&str],
+) -> Result<()> {
+    let authority = "0".to_owned();
+    let request = AdapterRequest {
+        schema_version: 1,
+        operation: "admit".into(),
+        coordinate: String::new(),
+        api_url: String::new(),
+        credential_file: None,
+        ci_credential_file: None,
+        authority: authority.clone(),
+        revision: None,
+        branch: Some(branch.into()),
+        workflows: plan
+            .files
+            .iter()
+            .map(|file| file.relative_path.to_string_lossy().into_owned())
+            .collect(),
+        required_checks: required_checks
+            .iter()
+            .map(|name| Requirement {
+                name: (*name).into(),
+                authority: authority.clone(),
+            })
+            .collect(),
+        plan: Some(plan.clone()),
+        landing: None,
+        target: None,
+        change: None,
+    };
+    github::admit_workflows(&request).map(drop)
 }
 
 fn respond(
@@ -89,6 +136,26 @@ pub fn run(args: Args) -> Result<()> {
     let state_directory = config.state_directory(workspace)?;
     let lock = engine::lock(&state_directory)?;
     checkpoint::ensure_idle(&state_directory)?;
+    if let Some(coordinate) = &args.retire {
+        let report = engine::retire(
+            &state_directory,
+            workspace,
+            &args.profile,
+            profile,
+            coordinate,
+            args.prune_refs,
+        )?;
+        engine::verify_lock(&state_directory, &lock)?;
+        if args.json {
+            println!("{}", serde_json::to_string_pretty(&report)?);
+        } else {
+            println!("{}: {}", report.coordinate, report.phase);
+            for branch in &report.deleted_refs {
+                println!("  deleted {branch}");
+            }
+        }
+        return Ok(());
+    }
     // The work list is a one-shot input, not policy: validate it before any
     // state or inventory work, and bind it into the rollout key.
     let pins = match &args.pin_file {
@@ -315,8 +382,17 @@ pub fn run(args: Args) -> Result<()> {
                     }));
                     continue;
                 }
-                reports.push(serde_json::json!({"coordinate":project.coordinate,"phase":"failed","error":format!("{error:#}")}));
+                // A repository refused before publication has nothing to resume
+                // and fails identically on retry: report it and release the
+                // rollout. A canary and an in-flight candidate stay barriers.
+                let refused = args.push
+                    && !profile.rollout.canaries.contains(&project.coordinate)
+                    && !engine::in_flight(workspace, &args.profile, &project.coordinate);
+                reports.push(serde_json::json!({"coordinate":project.coordinate,"phase":if refused {"refused"} else {"failed"},"error":format!("{error:#}")}));
                 failed = true;
+                if refused {
+                    continue;
+                }
                 if profile.rollout.stop_on_failure
                     || profile.rollout.canaries.contains(&project.coordinate)
                 {
@@ -334,7 +410,7 @@ pub fn run(args: Args) -> Result<()> {
                 r["coordinate"] == p.coordinate
                     && matches!(
                         r["phase"].as_str(),
-                        Some("qualified" | "unchanged" | "skipped")
+                        Some("qualified" | "unchanged" | "skipped" | "refused")
                     )
             })
         });

@@ -1426,6 +1426,15 @@ pub fn nix_build_matrix_file_with_options(
     push_required_secrets_header(&mut workflow, &options.required_secrets);
     workflow.push_str("name: Nix installable builds\n\non:\n  push:\n");
     push_ci_branches(&mut workflow, &options.push_branches);
+    // A workflow that coalesces push and pull-request runs names its group by
+    // its own path and excludes tags, the form updater admission proves.
+    let coalesced = platform == Platform::Github
+        && !(options.separate_events || !options.push_branches.is_empty())
+        && *options != crate::config::NixBuildConfig::default()
+        && options.push_tags.is_empty();
+    if coalesced {
+        workflow.push_str("    tags-ignore: [\"**\"]\n");
+    }
     if !options.push_tags.is_empty() {
         workflow.push_str("    tags:\n");
         for pattern in &options.push_tags {
@@ -1440,6 +1449,8 @@ pub fn nix_build_matrix_file_with_options(
         && (options.separate_events || !options.push_branches.is_empty())
     {
         push_github_concurrency(&mut workflow);
+    } else if coalesced {
+        workflow.push_str("concurrency:\n  group: .github/workflows/nix-builds.yaml-${{ github.event.pull_request.head.repo.full_name || github.repository }}-${{ github.event.pull_request.head.ref || github.ref_name }}\n  cancel-in-progress: true\n\n");
     } else if platform == Platform::Github && *options != crate::config::NixBuildConfig::default() {
         // Coalesce one repository's push/PR branch without canceling unrelated
         // forks or a tag that happens to use the same branch name.
@@ -4837,13 +4848,43 @@ fn push_rust_ci_concurrency(workflow: &mut String, platform: Platform, options: 
     }
 }
 
+/// A branch push filter always admits the fleet updater's maintenance refs:
+/// candidates are pushed without a pull request, so a filter that omits them
+/// leaves the candidate with no qualifying run. Mirrors the Crow renderer.
+// ponytail: matches the default `rollout.maintenanceRefPrefix`, like
+// `crow::push_to_maintained_branches`; a profile with another prefix must list it.
+pub(crate) fn with_maintenance_branches(branches: &[String]) -> Vec<String> {
+    let prefix = crate::commands::projects_update::schema::maintenance_prefix();
+    let probe = format!("{prefix}0123456789abcdef");
+    let options = glob::MatchOptions {
+        case_sensitive: true,
+        require_literal_separator: true,
+        require_literal_leading_dot: false,
+    };
+    // GitHub applies patterns in order and a later `!pattern` re-excludes.
+    let mut admitted = false;
+    for branch in branches {
+        let (negated, pattern) = branch
+            .strip_prefix('!')
+            .map_or((false, branch.as_str()), |pattern| (true, pattern));
+        if glob::Pattern::new(pattern).is_ok_and(|p| p.matches_with(&probe, options)) {
+            admitted = !negated;
+        }
+    }
+    let mut branches = branches.to_vec();
+    if !branches.is_empty() && !admitted {
+        branches.push(format!("{prefix}**"));
+    }
+    branches
+}
+
 fn push_ci_branches(workflow: &mut String, branches: &[String]) {
     if branches.is_empty() {
         workflow.push_str("    branches: [\"**\"]\n");
     } else {
         workflow.push_str("    branches:\n");
-        for branch in branches {
-            workflow.push_str(&format!("      - \"{}\"\n", yaml_double_quote(branch)));
+        for branch in with_maintenance_branches(branches) {
+            workflow.push_str(&format!("      - \"{}\"\n", yaml_double_quote(&branch)));
         }
     }
 }
@@ -6605,5 +6646,28 @@ mod docs_gate_tests {
             ),
             "code=true"
         );
+    }
+}
+
+#[cfg(test)]
+mod maintenance_branch_tests {
+    #[test]
+    fn branch_push_filters_always_admit_updater_maintenance_refs() {
+        let filter = |branches: &[&str]| {
+            super::with_maintenance_branches(
+                &branches.iter().map(|b| (*b).to_owned()).collect::<Vec<_>>(),
+            )
+        };
+        assert_eq!(filter(&["trunk"]), ["trunk", "simit/update/**"]);
+        assert_eq!(
+            filter(&["trunk", "simit/update/**"]),
+            ["trunk", "simit/update/**"]
+        );
+        assert_eq!(filter(&["**"]), ["**"]);
+        assert_eq!(
+            filter(&["**", "!simit/**"]),
+            ["**", "!simit/**", "simit/update/**"]
+        );
+        assert!(filter(&[]).is_empty());
     }
 }

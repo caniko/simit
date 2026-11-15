@@ -202,6 +202,20 @@ pub struct FrozenSelection {
     pub completed: bool,
 }
 
+/// Whether a repository has an unfinished transaction. A failure without one
+/// was refused before anything was committed to the receipt or pushed, so it
+/// repeats identically until the repository, generator or policy changes.
+pub fn in_flight(workspace: &Workspace, profile: &str, coordinate: &str) -> bool {
+    let receipt = profile_directory(workspace, profile)
+        .join(format!("repo-{}", digest(coordinate.as_bytes())))
+        .join("receipt.json");
+    // An unreadable receipt is treated as in flight: never drop what cannot be judged.
+    receipt.exists()
+        && crate::review::read_json::<Receipt>(&receipt).map_or(true, |r| {
+            !matches!(r.phase.as_str(), "qualified" | "unchanged")
+        })
+}
+
 pub fn selection_path(root: &Path, key: &str) -> PathBuf {
     root.join(format!("rollout-{key}.json"))
 }
@@ -212,6 +226,44 @@ pub fn profile_directory(workspace: &Workspace, name: &str) -> PathBuf {
         .join(format!("profile-{}", digest(name.as_bytes())))
 }
 
+/// A store path names one build of its inputs, so `/nix/store/<hash>-<name>`
+/// contributes only `<name>`: rebuilding unchanged source keeps the digest.
+fn store_name(path: &str) -> String {
+    const STORE: &str = "/nix/store/";
+    let mut semantic = String::new();
+    let mut rest = path;
+    while let Some(at) = rest.find(STORE) {
+        let (head, tail) = rest.split_at(at + STORE.len());
+        semantic.push_str(head);
+        let hashed = tail.len() > 32
+            && tail.as_bytes()[..32].iter().all(u8::is_ascii_alphanumeric)
+            && tail.as_bytes()[32] == b'-';
+        rest = if hashed { &tail[33..] } else { tail };
+    }
+    semantic + rest
+}
+
+/// Replace the string at `pointer` (or every string of an array there).
+fn semantic_paths(value: &mut serde_json::Value, pointer: &str) {
+    match value.pointer_mut(pointer) {
+        Some(serde_json::Value::String(path)) => *path = store_name(path),
+        Some(serde_json::Value::Array(paths)) => {
+            for path in paths {
+                if let serde_json::Value::String(path) = path {
+                    *path = store_name(path);
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
+/// The policy identity a pending candidate is bound to. It hashes what decides
+/// a candidate's content or qualification, never where a build of it lives:
+/// the generator is its source revision and coordinate, an adapter its
+/// declared command, enrolled digests and forge, and the inventory source is
+/// not policy at all (a frozen selection binds its observations by digest).
+/// A host rebuild therefore keeps an unfinished rollout resumable.
 pub fn policy_digest(
     config: &Config,
     profile: &Profile,
@@ -220,29 +272,37 @@ pub fn policy_digest(
     coordinate: Option<&str>,
     pins: Option<&[PinItem]>,
 ) -> Result<String> {
-    let generator = config
-        .forges
-        .get(&profile.generator.forge)
-        .context("unknown generator forge")?;
+    let forge = |forge: &Forge| -> Result<serde_json::Value> {
+        let mut forge = serde_json::to_value(forge)?;
+        semantic_paths(&mut forge, "/adapter/program");
+        semantic_paths(&mut forge, "/adapter/arguments");
+        Ok(forge)
+    };
+    let generator = forge(
+        config
+            .forges
+            .get(&profile.generator.forge)
+            .context("unknown generator forge")?,
+    )?;
     let consumer = consumer_forge
         .map(|name| {
-            config
-                .forges
-                .get_key_value(name)
-                .context("unknown consumer forge")
+            let consumer = config.forges.get(name).context("unknown consumer forge")?;
+            Ok::<_, anyhow::Error>((name, forge(consumer)?))
         })
         .transpose()?;
+    let workspace = &(&workspace.root, &workspace.state_directory);
+    let mut scoped = serde_json::to_value(profile)?;
+    semantic_paths(&mut scoped, "/generator/executable");
     let Some(coordinate) = coordinate else {
         // A pin run's v1 fallback digest still binds the work list, so an
         // unfinished legacy candidate cannot be resumed for another target.
         return match pins {
-            Some(pins) => canonical_digest(&(profile, workspace, generator, consumer, pins)),
-            None => canonical_digest(&(profile, workspace, generator, consumer)),
+            Some(pins) => canonical_digest(&(scoped, workspace, generator, consumer, pins)),
+            None => canonical_digest(&(scoped, workspace, generator, consumer)),
         };
     };
     // Other repositories' enrollment and overrides are not this transaction's
     // policy, so editing them keeps its pending candidate or pull request.
-    let mut scoped = serde_json::to_value(profile)?;
     let enrolled = serde_json::Value::from(coordinate);
     for list in ["/select/coordinates", "/rollout/canaries"] {
         if let Some(values) = scoped
@@ -395,30 +455,169 @@ fn pull_request(
     request
 }
 
-/// Retires a published maintenance ref under a lease on its candidate. This
-/// is cleanup: a ref that is gone or now belongs to another writer stays.
-fn delete_maintenance_ref(checkout: &Path, branch: &str, candidate: &str) {
+/// Deletes a published maintenance ref under a lease on its candidate. A ref
+/// that is already gone is success; one that moved belongs to another writer.
+fn retire_maintenance_ref(checkout: &Path, branch: &str, candidate: &str) -> Result<()> {
     let reference = format!("refs/heads/{branch}");
-    let result = git(checkout, &["ls-remote", "origin", &reference]).and_then(|existing| {
-        if existing.is_empty() {
-            eprintln!("maintenance ref {branch} is already gone");
-            return Ok(());
-        }
-        git(
-            checkout,
-            &[
-                "push",
-                "--quiet",
-                &format!("--force-with-lease={reference}:{candidate}"),
-                "origin",
-                &format!(":{reference}"),
-            ],
-        )
-        .map(drop)
-    });
-    if let Err(error) = result {
+    if git(checkout, &["ls-remote", "origin", &reference])?.is_empty() {
+        eprintln!("maintenance ref {branch} is already gone");
+        return Ok(());
+    }
+    git(
+        checkout,
+        &[
+            "push",
+            "--quiet",
+            &format!("--force-with-lease={reference}:{candidate}"),
+            "origin",
+            &format!(":{reference}"),
+        ],
+    )
+    .map(drop)
+}
+
+/// Cleanup after a transaction: a ref that cannot be deleted stays.
+fn delete_maintenance_ref(checkout: &Path, branch: &str, candidate: &str) {
+    if let Err(error) = retire_maintenance_ref(checkout, branch, candidate) {
         eprintln!("retained maintenance ref {branch}: {error:#}");
     }
+}
+
+/// Set an unfinished receipt aside. The adopted baseline survives, so the next
+/// run generates a fresh candidate from it.
+fn archive(root: &Path, retained: &Receipt) -> Result<()> {
+    fs::rename(
+        root.join("receipt.json"),
+        root.join(format!("invalidated-{}.json", canonical_digest(retained)?)),
+    )?;
+    File::open(root)?.sync_all()?;
+    Ok(())
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Retirement {
+    pub coordinate: String,
+    /// `retired` when an unfinished receipt was archived, `idle` otherwise.
+    pub phase: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub candidate: Option<String>,
+    /// Maintenance refs deleted from the remote.
+    pub deleted_refs: Vec<String>,
+    /// Frozen rollouts the coordinate was dropped from.
+    pub rollouts: usize,
+}
+
+/// Abandon one repository's unfinished candidate: delete its maintenance ref,
+/// archive its receipt and drop it from every frozen rollout, so the next run
+/// starts over. Repeating it is a no-op. The caller holds the workspace lock.
+pub fn retire(
+    state_directory: &Path,
+    workspace: &Workspace,
+    profile_name: &str,
+    profile: &Profile,
+    target: &str,
+    prune_refs: bool,
+) -> Result<Retirement> {
+    coordinate(target)?;
+    let repository = format!("repo-{}", digest(target.as_bytes()));
+    let root = profile_directory(workspace, profile_name).join(&repository);
+    let checkout = root.join("checkout");
+    let receipt_path = root.join("receipt.json");
+    let receipt: Option<Receipt> = receipt_path
+        .exists()
+        .then(|| crate::review::read_json(&receipt_path))
+        .transpose()?;
+    let retired = root.is_dir()
+        && fs::read_dir(&root)?.filter_map(Result::ok).any(|entry| {
+            entry
+                .file_name()
+                .to_string_lossy()
+                .starts_with("invalidated-")
+        });
+    ensure!(
+        receipt.is_some() || retired || prune_refs,
+        "{target} has no receipt in profile {profile_name}; --prune-refs deletes its orphan maintenance refs"
+    );
+    if let Some(receipt) = &receipt {
+        ensure!(
+            receipt.coordinate == target,
+            "receipt belongs to another repository"
+        );
+    }
+    let mut report = Retirement {
+        coordinate: target.into(),
+        phase: "idle",
+        candidate: None,
+        deleted_refs: vec![],
+        rollouts: 0,
+    };
+    // The ref goes first: a failed deletion keeps the receipt that names it,
+    // and a repeated run finds the ref gone and archives the receipt.
+    if let Some(receipt) =
+        receipt.filter(|receipt| !matches!(receipt.phase.as_str(), "qualified" | "unchanged"))
+    {
+        if !receipt.branch.is_empty() {
+            retire_maintenance_ref(&checkout, &receipt.branch, &receipt.candidate)
+                .context("maintenance ref was not deleted; the receipt is retained")?;
+            report.deleted_refs.push(receipt.branch.clone());
+        }
+        archive(&root, &receipt)?;
+        report.phase = "retired";
+        report.candidate = Some(receipt.candidate);
+    }
+    if prune_refs {
+        // ponytail: the remote is reached through the retained state checkout;
+        // a repository this state never cloned needs a preview run first.
+        ensure!(
+            checkout.join(".git").is_dir(),
+            "{target} has no retained checkout to reach its remote; run a --dry-run update first"
+        );
+        // Another profile's unfinished candidate of this repository keeps its ref.
+        let mut referenced = BTreeSet::new();
+        for entry in fs::read_dir(state_directory)? {
+            let receipt = entry?.path().join(&repository).join("receipt.json");
+            if receipt.is_file() {
+                let receipt: Receipt = crate::review::read_json(&receipt)?;
+                if !matches!(receipt.phase.as_str(), "qualified" | "unchanged") {
+                    referenced.insert(receipt.branch);
+                }
+            }
+        }
+        let prefix = format!("refs/heads/{}", profile.rollout.maintenance_ref_prefix);
+        let listed = git(&checkout, &["ls-remote", "origin", &format!("{prefix}*")])?;
+        for line in listed.lines() {
+            let mut fields = line.split_whitespace();
+            let (Some(revision), Some(reference)) = (fields.next(), fields.next()) else {
+                continue;
+            };
+            let Some(branch) = reference.strip_prefix("refs/heads/") else {
+                continue;
+            };
+            if reference.starts_with(&prefix) && !referenced.contains(branch) {
+                retire_maintenance_ref(&checkout, branch, revision)?;
+                report.deleted_refs.push(branch.into());
+            }
+        }
+    }
+    for entry in fs::read_dir(state_directory)? {
+        let path = entry?.path();
+        let name = path.file_name().unwrap_or_default().to_string_lossy();
+        if !(name.starts_with("rollout-") && name.ends_with(".json")) {
+            continue;
+        }
+        let mut frozen: FrozenSelection = crate::review::read_json(&path)?;
+        let before = frozen.projects.len();
+        frozen
+            .projects
+            .retain(|project| project.coordinate != target);
+        if !frozen.completed && frozen.projects.len() != before {
+            frozen.completed = frozen.projects.is_empty();
+            save(&path, &frozen)?;
+            report.rollouts += 1;
+        }
+    }
+    Ok(report)
 }
 
 fn adapter(forge: &Forge, request: &AdapterRequest, root: &Path) -> Result<AdapterResponse> {
@@ -1127,11 +1326,7 @@ pub fn update(
     let archive = |retained: &Receipt| -> Result<()> {
         // Archive before replacing the checkout, so interruption cannot leave an
         // unfinished receipt referring to a new clone. Adopted baselines survive.
-        fs::rename(
-            &receipt_path,
-            root.join(format!("invalidated-{}.json", canonical_digest(retained)?)),
-        )?;
-        File::open(&root)?.sync_all()?;
+        archive(&root, retained)?;
         if push {
             delete_maintenance_ref(&checkout, &retained.branch, &retained.candidate);
         }
@@ -1372,11 +1567,20 @@ pub fn update(
                 .scopes
                 .iter()
                 .any(|scope| !baseline.scopes.contains(scope));
+            // A committed file carrying the generator's ownership marker is
+            // earlier generator output (a feature enabled out of band), not
+            // project-owned bytes: the same enrollment adopts it.
+            let generated = |path: &str| {
+                profile.enroll_current
+                    && git_raw(&checkout, &["cat-file", "blob", &format!("HEAD:{path}")]).is_ok_and(
+                        |content| crate::render::ci::is_generated_workflow_marker(&content),
+                    )
+            };
             ensure!(
                 (profile.enroll_current && widened)
-                    || before
-                        .keys()
-                        .all(|p| baseline.managed.contains_key(p) || before[p].is_none()),
+                    || before.keys().all(|p| {
+                        baseline.managed.contains_key(p) || before[p].is_none() || generated(p)
+                    }),
                 "newly managed path already exists outside the baseline; enroll it with enrollCurrent"
             );
         } else {
@@ -3173,11 +3377,20 @@ else:
 
     #[test]
     fn namespace_referenced_policy_changes_still_block_pending_candidates() {
-        for field in ["profile", "workspace", "forge"] {
+        for field in ["profile", "workspace", "forge", "generator"] {
             let mut f = Fixture::new();
             f.control(json!({"candidate":"pending"}));
             let pending = f.update(true).unwrap();
             match field {
+                // Another generator source produces other candidate bytes.
+                "generator" => {
+                    f.config
+                        .profiles
+                        .get_mut("fleet")
+                        .unwrap()
+                        .generator
+                        .source_revision = "b".repeat(40)
+                }
                 "profile" => {
                     f.config
                         .profiles
@@ -3186,14 +3399,13 @@ else:
                         .rollout
                         .batch_size = 2
                 }
-                "workspace" => {
-                    f.config
-                        .workspaces
-                        .get_mut("projects")
-                        .unwrap()
-                        .inventory
-                        .max_age_seconds = 600
-                }
+                "workspace" => f
+                    .config
+                    .workspaces
+                    .get_mut("projects")
+                    .unwrap()
+                    .root
+                    .push("moved"),
                 _ => f.config.forges.get_mut("fixture").unwrap().check_authority = "999".into(),
             }
             assert!(
@@ -3293,6 +3505,8 @@ else:
                         push: true,
                         status: false,
                         wait_seconds: 0,
+                        retire: None,
+                        prune_refs: false,
                         limit: None,
                         json: true,
                     })
@@ -3482,6 +3696,8 @@ else:
             push: false,
             status: true,
             wait_seconds: 0,
+            retire: None,
+            prune_refs: false,
             limit: None,
             json: true,
         })
@@ -3882,6 +4098,45 @@ else:
                 .contains("already exists outside the baseline")
         );
         assert_eq!(f.remote_head(), source);
+
+        // Nothing was published, so the refusal is reported without leaving
+        // the repository as a barrier at the front of its frozen rollout.
+        f.write_inventory();
+        let refusal = f.cli("fleet", true).unwrap_err().to_string();
+        assert!(refusal.contains("update incomplete"), "{refusal}");
+        let state = &f.config.workspaces["projects"].state_directory;
+        let rollouts = fs::read_dir(state)
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .filter(|path| {
+                path.file_name()
+                    .is_some_and(|name| name.to_string_lossy().starts_with("rollout-"))
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(rollouts.len(), 1);
+        assert_eq!(
+            crate::review::read_json::<serde_json::Value>(&rollouts[0]).unwrap()["completed"],
+            true
+        );
+        assert_eq!(f.remote_head(), source);
+
+        // The same path committed as earlier generator output is adopted.
+        fs::write(
+            checkout.join(".github/workflows/extra.yaml"),
+            format!(
+                "{}\nname: Old\n",
+                crate::render::ci::GENERATED_WORKFLOW_MARKER
+            ),
+        )
+        .unwrap();
+        f.publish(&checkout, "regenerate out of band");
+        assert_eq!(f.update(true).unwrap().phase, "qualified");
+        let baseline: Baseline = crate::review::read_json(&f.root().join("baseline.json")).unwrap();
+        assert!(
+            baseline
+                .managed
+                .contains_key(".github/workflows/extra.yaml")
+        );
     }
 
     #[test]
@@ -4197,6 +4452,8 @@ else:
                 push,
                 status: false,
                 wait_seconds: 0,
+                retire: None,
+                prune_refs: false,
                 limit: None,
                 json: true,
             })
@@ -4214,6 +4471,8 @@ else:
                 push: true,
                 status: false,
                 wait_seconds: 0,
+                retire: None,
+                prune_refs: false,
                 limit: None,
                 json: true,
             })
@@ -4231,6 +4490,17 @@ else:
                 push,
                 0,
                 pin_item,
+            )
+        }
+        fn retire(&self, coordinate: &str, prune_refs: bool) -> Result<Retirement> {
+            let workspace = &self.config.workspaces["projects"];
+            retire(
+                &self.config.state_directory(workspace)?,
+                workspace,
+                "fleet",
+                &self.config.profiles["fleet"],
+                coordinate,
+                prune_refs,
             )
         }
         fn remote_head(&self) -> String {
@@ -4734,6 +5004,127 @@ else:
         assert_eq!(adopted.landed, None);
         assert_eq!(f.remote_head(), pending.candidate);
         assert!(f.maintenance_refs().is_empty());
+    }
+
+    #[test]
+    fn policy_digest_binds_semantic_identity_not_store_paths() {
+        let config = |build: &str, revision: &str, adapter: &str| -> Config {
+            let simit = format!("/nix/store/{}-simit-0.21.0/bin/simit", build.repeat(32));
+            serde_json::from_value(json!({
+                "schemaVersion":1,
+                "workspaces":{"projects":{"root":"/projects","stateDirectory":"/state","inventory":{"command":{"program":format!("/nix/store/{}-coreutils-9.12/bin/env", build.repeat(32)),"arguments":[simit]}}}},
+                "forges":{"github":{"host":"github.com","apiUrl":"https://api.github.com","credentialFile":"/run/token","adapter":{"program":simit,"arguments":["projects",adapter,format!("--rules=/nix/store/{}-rules.json", build.repeat(32))]},"checkAuthority":"15368"}},
+                "profiles":{"fleet":{"workspace":"projects","scopes":["ci"],"select":{"coordinates":["github.com/team/demo"]},"generator":{"executable":simit,"sourceRevision":revision.repeat(40),"sourceCoordinate":"github.com/team/simit","forge":"github","requiredChecks":[{"name":"test","authority":"15368"}]}}}
+            }))
+            .unwrap()
+        };
+        let digests = |config: &Config| {
+            let profile = &config.profiles["fleet"];
+            let workspace = &config.workspaces["projects"];
+            [None, Some("github.com/team/demo")].map(|coordinate| {
+                policy_digest(config, profile, workspace, Some("github"), coordinate, None).unwrap()
+            })
+        };
+        let enrolled = digests(&config("a", "1", "update-github-adapter"));
+        // A host rebuild moves every store path of the same generator source.
+        assert_eq!(
+            enrolled,
+            digests(&config("b", "1", "update-github-adapter"))
+        );
+        // Another generator source or another adapter is another policy.
+        for changed in [
+            config("a", "2", "update-github-adapter"),
+            config("a", "1", "update-forgejo-adapter"),
+        ] {
+            let changed = digests(&changed);
+            assert!(enrolled[0] != changed[0] && enrolled[1] != changed[1]);
+        }
+        assert_eq!(
+            store_name("--rules=/nix/store/0123456789abcdfghijklmnpqrsvwxyz-rules.json"),
+            "--rules=/nix/store/rules.json"
+        );
+        // Not a hashed store object: left as declared.
+        assert_eq!(store_name("/nix/store/short-name"), "/nix/store/short-name");
+    }
+
+    #[test]
+    fn namespace_retire_abandons_a_candidate_and_releases_its_rollout() {
+        let f = Fixture::new();
+        let source = f.remote_head();
+        let demo = "fixture.example/team/demo";
+        f.write_inventory();
+        f.control(json!({"candidate":"pending"}));
+        assert!(f.cli("fleet", true).is_err());
+        // A ref no receipt names survives an ordinary retirement.
+        git(
+            &f.source,
+            &[
+                "push",
+                "--quiet",
+                f.remote.to_str().unwrap(),
+                "HEAD:refs/heads/maintenance/orphan",
+            ],
+        )
+        .unwrap();
+        assert_eq!(f.maintenance_refs().lines().count(), 2);
+        let retired = f.retire(demo, false).unwrap();
+        assert_eq!((retired.phase, retired.rollouts), ("retired", 1));
+        assert_eq!(retired.deleted_refs.len(), 1);
+        assert!(!f.root().join("receipt.json").exists());
+        assert!(
+            f.maintenance_refs()
+                .ends_with("refs/heads/maintenance/orphan")
+        );
+        assert_eq!(f.remote_head(), source);
+        let state = &f.config.workspaces["projects"].state_directory;
+        for entry in fs::read_dir(state).unwrap() {
+            let path = entry.unwrap().path();
+            if path
+                .file_name()
+                .is_some_and(|name| name.to_string_lossy().starts_with("rollout-"))
+            {
+                let frozen: FrozenSelection = crate::review::read_json(&path).unwrap();
+                assert!(frozen.completed && frozen.projects.is_empty());
+            }
+        }
+        // Repeating it is a no-op; pruning deletes the orphan.
+        let again = f.retire(demo, true).unwrap();
+        assert_eq!((again.phase, again.rollouts), ("idle", 0));
+        assert_eq!(again.deleted_refs, ["maintenance/orphan"]);
+        assert!(f.maintenance_refs().is_empty());
+        // A repository this profile holds no state for is refused.
+        assert!(
+            f.retire("fixture.example/team/next", false)
+                .unwrap_err()
+                .to_string()
+                .contains("has no receipt")
+        );
+        // The next run starts over.
+        f.control(json!({}));
+        let fresh = f.update(true).unwrap();
+        assert_eq!(fresh.phase, "qualified");
+        assert_eq!(f.remote_head(), fresh.candidate);
+        // An adopted receipt is not a candidate: nothing is archived.
+        assert_eq!(f.retire(demo, false).unwrap().phase, "idle");
+        assert!(f.root().join("receipt.json").exists());
+    }
+
+    #[test]
+    fn namespace_inventory_source_changes_keep_pending_candidates() {
+        let mut f = Fixture::new();
+        f.control(json!({"candidate":"pending"}));
+        let pending = f.update(true).unwrap();
+        // A host rebuild moves the inventory command to another store path.
+        let inventory = &mut f.config.workspaces.get_mut("projects").unwrap().inventory;
+        inventory.file = None;
+        inventory.command = Some(
+            serde_json::from_value(json!({"program":"/nix/store/rebuilt-canix/bin/canix"}))
+                .unwrap(),
+        );
+        f.control(json!({}));
+        let adopted = f.update(true).unwrap();
+        assert_eq!(adopted.phase, "qualified");
+        assert_eq!(adopted.candidate, pending.candidate);
     }
 
     #[test]

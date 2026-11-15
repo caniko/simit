@@ -393,7 +393,7 @@ pub(crate) fn files(
     let branches = if config.ci.push_branches.is_empty() {
         vec!["**".to_owned()]
     } else {
-        config.ci.push_branches.clone()
+        crate::render::ci::with_maintenance_branches(&config.ci.push_branches)
     };
     let mut workflow = json!({"name": "Monorepo qualification", "on": {"push": {"branches": branches}, "pull_request": {}, "workflow_dispatch": {}}, "permissions": {"contents": "read"}, "concurrency": {"group": "monorepo-${{ github.event.pull_request.head.repo.full_name || github.repository }}-${{ github.event.pull_request.head.ref || github.ref_name }}", "cancel-in-progress": true}, "jobs": jobs});
     checkout_submodules(config, &mut workflow);
