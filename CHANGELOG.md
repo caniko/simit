@@ -7,6 +7,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Fixed: fleet pin rollouts (`simit projects update --pin-file ... --push`) land
+  without per-repository edits or babysitting.
+  - Generated GitHub workflows with a non-empty `push_branches` filter always
+    admit the updater's `simit/update/**` maintenance refs, as Crow workflows
+    already did. A filter such as `["trunk"]` used to leave every candidate
+    without a qualifying push run. Regenerating adds the pattern.
+  - The GitHub adapter admits more of what the generator emits: both spellings
+    of `always()`, a prebuild without a release entry, and `MEMBER / JOB` jobs
+    of package-scoped workspaces for a required `JOB`. A customised
+    `[ci.nix_build]` matrix without `push_branches`, `separate_events` or
+    `push_tags` now names its concurrency group by the workflow path and adds
+    `tags-ignore: ["**"]`, the form admission proves.
+  - A planned workflow that is already committed with the generator's marker
+    is adopted under `enrollCurrent` instead of refused as project-owned.
+  - A repository refused before anything was pushed is reported as `refused`
+    and leaves the frozen rollout instead of blocking it. Canaries and pushed
+    or parked candidates remain barriers.
+  - Policy digests no longer hash the inventory source or Nix store hashes of
+    the generator and adapter, so rebuilding the host at the same generator
+    revision keeps unfinished rollouts resumable. Every digest moves once with
+    this release: finish or `--retire` in-flight candidates before upgrading.
+- Added: `simit projects update --profile NAME --retire COORDINATE` abandons an
+  unfinished candidate (deletes its maintenance ref, archives the receipt,
+  drops it from this profile's frozen rollouts; canaries stay as barriers and a
+  landed candidate is refused); `--prune-refs` also deletes candidate-shaped
+  maintenance refs no receipt names.
+- Added: `simit::commands::projects_update::admit_candidate_source` runs the
+  GitHub adapter's source-level admission on a generation plan without forge
+  access. A conformance test renders representative configurations and
+  requires each to pass it for the default and a maintenance branch.
+
 - Changed: the GitHub prebuild's Attic publish step sets
   `HARBOR_ATTIC_BUILT_PATHS=1`, so an rs-harbor `mkAtticPush` app that supports
   it also publishes what the runner built (crane deps, toolchains), not only

@@ -211,6 +211,7 @@ simit projects update --profile fleet --plan --json
 simit projects update --profile fleet --dry-run
 simit projects update --profile fleet --push
 simit projects update --profile fleet --status
+simit projects update --profile fleet --retire github.com/example/demo
 ```
 
 `--plan` explains every operator-enrolled coordinate, including missing inventory
@@ -240,6 +241,34 @@ ordinary repositories. A failed or incomplete canary stops that batch even if
 `stopOnFailure = false`. Execution is serial, staying below `maxConcurrent`; larger
 values are ceilings, not a promise of parallelism. Each invocation processes at
 most `batchSize` repositories, and subsequent invocations continue the snapshot.
+
+A repository that fails before its candidate receipt is written was refused:
+nothing was pushed, and the same source, generator and policy fail the same way
+on every retry. With `--push` it is reported with phase `refused` and its error,
+leaves the frozen rollout, and the batch continues with the next repository;
+the command still exits non-zero. A canary is never released this way, and a
+repository with an unfinished receipt (a pushed or parked candidate) stays
+`failed` and keeps its place, subject to `stopOnFailure`. A refused repository
+is selected again when the next rollout freezes a new selection.
+
+`--retire HOST/OWNER/REPO` abandons one repository's unfinished candidate in
+the given profile. It deletes the candidate's maintenance ref under a lease on
+the candidate commit (an open pull request closes with its branch), archives
+the receipt as `invalidated-<digest>.json` beside the adopted baseline, and
+drops the coordinate from this profile's unfinished frozen rollouts, so the
+next run generates a fresh candidate. A canary stays in its rollout and gates
+the rest again; rollouts frozen before the profile was recorded are left alone
+while another profile has an unfinished candidate of the repository. A
+candidate that is already on the default branch (phase `adopting`, or reachable
+from it) is refused: resume it instead, since its baseline would otherwise no
+longer match the branch. An adopted receipt is left alone, and repeating the
+command is a no-op. If the ref cannot be deleted, the receipt is
+kept and the command fails. A coordinate the profile holds no receipt for is
+refused unless `--prune-refs` is given; that flag also deletes refs shaped like simit
+candidates (`maintenanceRefPrefix` followed by the first 16 hex digits of the
+commit they point at) that no unfinished receipt of the repository names, in
+any profile. Other refs under the prefix are never touched. Pruning reaches the remote through the repository's retained state
+checkout, so a repository the updater never cloned needs a `--dry-run` first.
 
 For each repository:
 
@@ -299,10 +328,12 @@ preparation rather than credentialed fetching during generation. Updater executi
 currently requires Linux. SQLite is supplied by the NixOS module; standalone
 users include an immutable `sqlite3` on `PATH` for flake-backed configuration.
 
-Existing workflow branch filters must admit `maintenanceRefPrefix`. Generated
-Crow `build` and `ci` workflows admit only the default prefix
-(`simit/update/**`) beside `${CI_REPO_DEFAULT_BRANCH}` for push pipelines; a
-profile with another prefix gets no push pipelines on its maintenance refs. Missing
+Workflow branch filters must admit `maintenanceRefPrefix`. Generated workflows
+do so for the default prefix: a non-empty GitHub `push_branches` filter that
+does not already match `simit/update/**` gets that pattern appended, and Crow
+`build` and `ci` workflows admit it beside `${CI_REPO_DEFAULT_BRANCH}` for push
+pipelines. A profile with another prefix must list it in `push_branches`, and
+gets no Crow push pipelines on its maintenance refs. Missing
 candidate events, checks or capability support cannot authorize landing. Remote
 movement, changed default branches, protection changes and managed-file edits
 invalidate earlier candidate acceptance. Failed, skipped, cancelled, neutral or
@@ -313,8 +344,17 @@ before that field existed report `null` until their next transaction.
 
 Repository clones, receipts and baselines are isolated under a profile-specific
 directory in `stateDirectory`. `--status` reports only the requested profile.
-Receipt policy hashes include the active profile, its workspace, and its generator
-and consumer forge records. Receipts written by this version (`schemaVersion: 2`)
+Receipt policy hashes include the active profile, its workspace root and state
+directory, and its generator and consumer forge records. They bind what decides
+a candidate's content or qualification, not where a build of it is installed:
+`/nix/store/<hash>-<name>` in `generator.executable`, `adapter.program` and
+adapter arguments contributes only `<name>`, so the generator is identified by
+`sourceRevision`, `sourceCoordinate` and any `executableSha256`, and an adapter
+by its command, `adapterSha256` and `adapterInputs`. The inventory source is not
+hashed at all; a frozen selection binds its observations by `inventoryDigest`.
+Rebuilding the host at the same generator revision therefore keeps unfinished
+candidates and frozen rollouts resumable, while another generator revision,
+adapter, forge record or required check still invalidates them. Receipts written by this version (`schemaVersion: 2`)
 also record `projectPolicyDigest`, the same hash with other coordinates'
 enrollment, canary membership and overrides removed; unfinished v2 receipts
 resume against it, so editing another repository's policy keeps this one's
@@ -412,9 +452,12 @@ Workflow source must expose its jobs and steps directly: `continue-on-error` is
 accepted only when absent or the literal `false`. Expressions and reusable
 workflow calls require an adapter that can establish the underlying outcomes.
 Explicit job `if` conditions and unknown step conditions require a supporting
-adapter and are rejected before publishing a candidate. A single source job may
-use the generated prebuild's exact branch-push predicates: `inputs.release`, its
-non-PR variant, default-branch publication (or release), and `always()`. On an
+adapter and are rejected before publishing a candidate. A step whose condition
+is exactly `always()` (bare or wrapped in `${{ }}`) needs no binding, because
+it runs on every outcome and every unbound step must succeed. A single source
+job may use the generated prebuild's exact branch-push predicates:
+`inputs.release`, its non-PR variant, default-branch publication (with or
+without the release alternative), and `always()`. On an
 original push, release inputs are absent: release-only steps must be skipped,
 maintenance publication must be skipped, and default-branch publication and
 cleanup must succeed. Every conditional result must match the exact candidate
@@ -435,7 +478,10 @@ a forge-accepted candidate signature requires a supporting adapter. Classic
 signature and pull-request requirements also reject matching uncreated maintenance refs.
 Admission carries the merged repository, profile and project required checks.
 Each consumer requirement must match a literal non-matrix job name (or job ID
-when unnamed) in an owned push workflow. Requirements produced only by
+when unnamed) in an owned push workflow. Package-scoped workspace CI names its
+jobs `MEMBER / JOB`; such a job also satisfies a requirement named `JOB`, and
+qualification still needs every owned workflow's original run to succeed in
+full. Requirements produced only by
 hand-maintained workflows or dynamic/matrix contexts require a supporting
 adapter and are rejected before publishing a receipt or maintenance ref.
 Ruleset admission queries each exact maintenance/adoption branch, including a
@@ -467,7 +513,11 @@ forms below, with an absent or literal boolean `cancel-in-progress`:
 
 The generated prebuild form using `github.workflow_ref`, event, source repository,
 source branch and the `-prebuild` suffix is also admitted, including its exact
-`!inputs.release && (push || pull_request)` cancellation expression. This is a
+`!inputs.release && (push || pull_request)` cancellation expression and the
+`push || pull_request` one of a prebuild without a release entry. Generated
+workflows that coalesce push and pull-request runs use a group that starts with
+the workflow's own path, admitted only when the push trigger carries
+`tags-ignore: ["**"]`. This is a
 source-bound proof for push qualification; no general expression evaluation is used.
 Other expressions and job-level concurrency require a supporting adapter.
 Workflow display names do not establish uniqueness. Even with cancellation
@@ -720,6 +770,13 @@ managing files that already exist. Like the initial baseline, adopting them
 requires `enrollCurrent`. Baselines record the scopes they were adopted under,
 so this applies only to the run that adds a scope; later runs again stop when a
 plan claims an existing file outside the baseline.
+
+One case is adopted without widening: a planned workflow whose committed copy
+carries the generator's ownership marker (`# Generated by simit. Manual edits
+will be reported as ci=drift.`). It is earlier generator output, typically a feature such as
+`[prebuild]` enabled and regenerated by hand after the baseline was adopted, so
+a profile with `enrollCurrent` takes it over. A committed file without the
+marker is project-owned and is still refused.
 
 ## Provider migration
 

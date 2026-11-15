@@ -741,10 +741,20 @@ fn qualification_generation_is_complete_and_member_stable() {
 fn monorepo_branch_filters_preserve_order_prs_and_primary_scope() {
     for (literal, branches) in [
         ("[]", vec!["**"]),
-        ("[\"trunk\"]", vec!["trunk"]),
+        // A filter that omits the updater's maintenance refs gains them last.
+        ("[\"trunk\"]", vec!["trunk", "simit/update/**"]),
         (
             "[\"trunk\", \"release/**\", \"!release/archive/**\"]",
-            vec!["trunk", "release/**", "!release/archive/**"],
+            vec![
+                "trunk",
+                "release/**",
+                "!release/archive/**",
+                "simit/update/**",
+            ],
+        ),
+        (
+            "[\"trunk\", \"simit/update/**\"]",
+            vec!["trunk", "simit/update/**"],
         ),
     ] {
         let temp = TempDir::new().unwrap();

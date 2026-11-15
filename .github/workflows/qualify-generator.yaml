@@ -4,7 +4,7 @@ name: Qualify generator and retain regeneration
 
 on:
   push:
-    branches: ["trunk"]
+    branches: ["trunk", "simit/update/**"]
   pull_request:
   workflow_dispatch:
 

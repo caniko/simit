@@ -1297,7 +1297,16 @@ fn nix_matrix_qualifies_branch_pushes_and_pull_requests_without_tag_releases() {
         assert!(events.contains_key("pull_request"));
         assert!(events.contains_key("workflow_dispatch"));
         assert_eq!(value["on"]["push"]["branches"][0], "**");
-        assert!(value["on"]["push"]["tags-ignore"].is_null());
+        // A customised matrix coalesces push and pull-request runs in a
+        // path-keyed group, which must exclude tags explicitly.
+        assert_eq!(
+            value["on"]["push"]["tags-ignore"],
+            if options.is_empty() {
+                Value::Null
+            } else {
+                serde_yaml::to_value(["**"]).unwrap()
+            }
+        );
         assert!(value["on"]["push"]["tags"].is_null());
         assert!(generate(&temp, &["--check", "--diff"]).status.success());
         assert!(generate(&temp, &[]).status.success());
@@ -1371,9 +1380,15 @@ extra_env = { FLAKE_SSH_KEY = "${{ secrets.FLAKE_SSH_KEY }}" }
     let original = fs::read(temp.path().join(".github/workflows/nix-builds.yaml")).unwrap();
     let value = workflow(&temp);
     assert_eq!(value["permissions"]["contents"], "read");
+    // The group is keyed by this workflow's path, the form updater admission
+    // proves, and tags cannot join it.
     assert_eq!(
         value["concurrency"]["group"],
-        "${{ github.workflow }}-${{ github.event.pull_request.head.repo.full_name || github.repository }}-${{ github.event.pull_request.head.ref || github.ref_name }}"
+        ".github/workflows/nix-builds.yaml-${{ github.event.pull_request.head.repo.full_name || github.repository }}-${{ github.event.pull_request.head.ref || github.ref_name }}"
+    );
+    assert_eq!(
+        value["on"]["push"]["tags-ignore"],
+        serde_yaml::to_value(["**"]).unwrap()
     );
     let job = &value["jobs"]["build"];
     assert_eq!(job["timeout-minutes"], 90);

@@ -1764,8 +1764,11 @@ nix_builds = [".#server"]
     assert_yaml_parses(&workflow);
     let yaml: serde_yaml::Value = serde_yaml::from_str(&workflow).unwrap();
     let on = &yaml["on"];
-    assert_eq!(on["push"]["branches"][0].as_str(), Some("trunk"));
-    assert_eq!(on["push"]["branches"].as_sequence().unwrap().len(), 1);
+    // The configured filter plus the updater's maintenance refs, nothing else.
+    assert_eq!(
+        on["push"]["branches"],
+        serde_yaml::to_value(["trunk", "simit/update/**"]).unwrap()
+    );
     assert_eq!(on["push"]["tags-ignore"][0].as_str(), Some("**"));
     assert!(on.get("pull_request").is_some());
     // No release target or release archives: nothing calls a release entry.

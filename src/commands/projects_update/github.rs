@@ -298,6 +298,11 @@ fn is_generated_docs_gate(workflow: &serde_yaml::Value) -> bool {
             })
 }
 
+/// `if:` wraps a bare expression in `${{ }}` itself, so both spellings are one predicate.
+fn always_runs(condition: &str) -> bool {
+    matches!(condition, "always()" | "${{ always() }}")
+}
+
 fn push_step_runs(condition: &str, default_branch: bool) -> Result<bool> {
     // ponytail: prove only these generated branch-push predicates. Inputs are
     // absent on push, hence false; extend with source-aware proofs, not eval.
@@ -305,10 +310,12 @@ fn push_step_runs(condition: &str, default_branch: bool) -> Result<bool> {
     match condition {
         "${{ inputs.release }}"
         | "${{ inputs.release && github.event_name != 'pull_request' }}" => Ok(false),
-        "${{ (github.event_name == 'push' && github.ref == format('refs/heads/{0}', github.event.repository.default_branch)) || (inputs.release && github.event_name != 'pull_request') }}" => {
+        "${{ (github.event_name == 'push' && github.ref == format('refs/heads/{0}', github.event.repository.default_branch)) || (inputs.release && github.event_name != 'pull_request') }}"
+        // The same publication predicate of a prebuild without a release entry.
+        | "${{ github.event_name == 'push' && github.ref == format('refs/heads/{0}', github.event.repository.default_branch) }}" => {
             Ok(default_branch)
         }
-        "${{ always() }}" => Ok(true),
+        condition if always_runs(condition) => Ok(true),
         _ => anyhow::bail!(
             "conditional jobs or steps require an adapter with a proven push predicate"
         ),
@@ -327,9 +334,14 @@ fn push_steps(workflow: &serde_yaml::Value, default_branch: bool) -> Result<Push
     let conditional = jobs
         .iter()
         .filter(|(_, job)| {
-            job["steps"]
-                .as_sequence()
-                .is_some_and(|steps| steps.iter().any(|step| step.get("if").is_some()))
+            // An `always()` step runs on every outcome, and `admit_run` requires
+            // every unbound step to succeed, so it needs no source binding.
+            job["steps"].as_sequence().is_some_and(|steps| {
+                steps.iter().any(|step| {
+                    step.get("if")
+                        .is_some_and(|condition| !condition.as_str().is_some_and(always_runs))
+                })
+            })
         })
         .collect::<Vec<_>>();
     if conditional.is_empty() {
@@ -556,7 +568,7 @@ fn admit_concurrency(
             ))
             && concurrency
                 .get("cancel-in-progress")
-                .is_none_or(|value| value.as_bool().is_some() || (prebuild && value.as_str() == Some("${{ !inputs.release && (github.event_name == 'push' || github.event_name == 'pull_request') }}"))),
+                .is_none_or(|value| value.as_bool().is_some() || (prebuild && matches!(value.as_str(), Some("${{ !inputs.release && (github.event_name == 'push' || github.event_name == 'pull_request') }}" | "${{ github.event_name == 'push' || github.event_name == 'pull_request' }}")))),
         "workflow concurrency is not provably isolated by workflow path and qualification ref"
     );
     Ok(())
@@ -584,7 +596,14 @@ fn requested_workflows(
     Ok(workflows)
 }
 
-fn admit_workflows(request: &AdapterRequest) -> Result<BTreeSet<String>> {
+/// Package-scoped workspace CI names each member's job `MEMBER / JOB`. A
+/// required `JOB` is then produced by every member workflow; qualification
+/// already requires each owned workflow's original run to succeed in full.
+fn unscoped_check(name: &str) -> Option<&str> {
+    name.rsplit_once(" / ").map(|(_, job)| job)
+}
+
+pub(super) fn admit_workflows(request: &AdapterRequest) -> Result<BTreeSet<String>> {
     let plan = request.plan.as_ref().context("missing admission plan")?;
     let paths = requested_workflows(&request.workflows, request.branch.as_deref(), |path| {
         let file = plan
@@ -620,6 +639,7 @@ fn admit_workflows(request: &AdapterRequest) -> Result<BTreeSet<String>> {
             if let Some(name) = job.get("name").unwrap_or(id).as_str()
                 && !name.contains("${{")
             {
+                names.extend(unscoped_check(name).map(str::to_owned));
                 names.insert(name.to_owned());
             }
         }
@@ -1486,14 +1506,17 @@ fn record_checks(
     run_id: u64,
 ) -> Result<()> {
     for job in jobs {
-        response.checks.push(Check {
-            name: text(job, "/name")?,
-            authority: authority.to_string(),
-            revision: response.revision.clone(),
-            run: run_id.to_string(),
-            attempt: 1,
-            status: "success".into(),
-        });
+        let name = text(job, "/name")?;
+        for name in unscoped_check(&name).into_iter().chain([name.as_str()]) {
+            response.checks.push(Check {
+                name: name.to_owned(),
+                authority: authority.to_string(),
+                revision: response.revision.clone(),
+                run: run_id.to_string(),
+                attempt: 1,
+                status: "success".into(),
+            });
+        }
     }
     let mut seen = BTreeSet::new();
     response
@@ -1633,6 +1656,24 @@ mod tests {
 
     fn refuse(method: &str, path: &str, _: &Value) -> Result<Value> {
         anyhow::bail!("unexpected replay write {method} {path}")
+    }
+
+    #[test]
+    fn always_steps_and_member_scoped_checks_need_no_source_binding() {
+        // Generated nix-builds: a templated step name beside an `always()` upload.
+        let workflow: serde_yaml::Value = serde_yaml::from_str(
+            "jobs:\n  build:\n    strategy:\n      matrix:\n        installable: [a, b]\n    steps:\n      - name: Build ${{ matrix.installable }}\n        run: nix build\n      - name: Upload\n        if: always()\n        run: upload\n",
+        )
+        .unwrap();
+        let steps = push_steps(&workflow, false).unwrap();
+        assert!(steps.outcomes.is_empty() && steps.jobs.is_none());
+        // Any other predicate is still bound or refused.
+        let guarded: serde_yaml::Value =
+            serde_yaml::from_str("jobs:\n  build:\n    steps:\n      - name: Test\n        if: ${{ vars.SKIP != '' }}\n        run: test\n")
+                .unwrap();
+        assert!(push_steps(&guarded, false).is_err());
+        assert_eq!(unscoped_check("tartan-ui-core / test"), Some("test"));
+        assert_eq!(unscoped_check("test"), None);
     }
 
     #[test]
