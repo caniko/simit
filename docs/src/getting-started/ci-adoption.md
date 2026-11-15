@@ -532,7 +532,9 @@ cache key `simit-engine-v1-<revision>-<os>-<arch>`, so group jobs evaluate the
 pin instead of compiling Simit each time. Provisioning, the source revision and
 the executable digest evidence are unchanged; a miss or unreadable entry builds
 normally. Like `cache_installables`, entries carry the trust of the
-repository's default-branch runs.
+repository's default-branch runs. The restore, import and export steps run in
+every job and decide inside their scripts; only the cache save keeps a
+condition, because an action cannot be guarded by a script.
 
 The command reads the generated environment lists, or accepts
 `--spec <file> --results <directory>`. The public

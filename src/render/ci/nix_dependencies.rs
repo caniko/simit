@@ -68,7 +68,11 @@ pub(super) fn import(
         "v4.3.0",
     );
     workflow.push_str("\n        with:\n          name: simit-nix-dependencies-${{ github.run_id }}-${{ github.run_attempt }}\n          path: ${{ runner.temp }}/simit-nix-dependencies\n");
-    workflow.push_str("      - name: Explain missing attempt-bound dependencies\n        if: ${{ failure() && steps.simit-dependency-download.outcome == 'failure' }}\n        run: |\n          echo 'Dependency transport requires a producer from this exact run attempt. Use Re-run all jobs; partial reruns cannot reuse a previous-attempt artifact.' >&2\n          exit 1\n");
+    workflow.push_str(&format!(
+        "      - name: Explain missing attempt-bound dependencies\n        if: {}\n",
+        StepCondition::DependencyDownloadFailed.wrapped()
+    ));
+    workflow.push_str("        run: |\n          echo 'Dependency transport requires a producer from this exact run attempt. Use Re-run all jobs; partial reruns cannot reuse a previous-attempt artifact.' >&2\n          exit 1\n");
     provision_python(workflow, runner);
     program(workflow, "import", options, plan)
 }
@@ -120,14 +124,16 @@ pub(super) fn job(
     push_required_env_step(workflow, &options.required_secrets);
     provision_python(workflow, runner);
     if options.kvm {
-        workflow.push_str("      - name: Enable hosted KVM\n        run: |\n          test \"${RUNNER_ENVIRONMENT:-}\" = github-hosted\n          test -c /dev/kvm\n          sudo chmod a+rw /dev/kvm\n          test -r /dev/kvm && test -w /dev/kvm\n");
+        push_hosted_kvm_step(workflow, false);
     }
     push_extra_setup_steps(workflow, extra_setup);
     push_extra_setup_steps(workflow, &options.extra_setup);
     push_required_env_step(workflow, &options.required_env);
     program(workflow, "export", options, plan)?;
-    workflow
-        .push_str("      - name: Upload dependency evidence and closure\n        if: always()\n");
+    workflow.push_str(&format!(
+        "      - name: Upload dependency evidence and closure\n        if: {}\n",
+        StepCondition::Always.expression()
+    ));
     push_action_uses(
         workflow,
         Platform::Github,

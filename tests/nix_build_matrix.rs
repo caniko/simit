@@ -32,6 +32,26 @@ fn generate(temp: &TempDir, extra: &[&str]) -> Output {
         .unwrap()
 }
 
+/// Native KVM setup has no `if:`: the script leaves other systems alone and
+/// still demands a hosted KVM device on x86_64 Linux.
+fn assert_kvm_decides_in_its_script(step: &Value) {
+    assert!(step["if"].is_null());
+    assert_eq!(step["env"]["SIMIT_NIX_SYSTEM"], "${{ matrix.system }}");
+    let run = |system: &str| {
+        Command::new("bash")
+            .args(["-e", "-c", step["run"].as_str().unwrap()])
+            .env_clear()
+            .env("PATH", std::env::var_os("PATH").unwrap_or_default())
+            .env("SIMIT_NIX_SYSTEM", system)
+            .status()
+            .unwrap()
+            .success()
+    };
+    assert!(run("aarch64-linux"));
+    // Not a GitHub-hosted runner, so the x86_64 Linux path fails closed.
+    assert!(!run("x86_64-linux"));
+}
+
 fn workflow(temp: &TempDir) -> Value {
     serde_yaml::from_str(
         &fs::read_to_string(temp.path().join(".github/workflows/nix-builds.yaml")).unwrap(),
@@ -409,10 +429,7 @@ x86 = [".#checks.x86_64-linux.client"]
     assert!(verify < position("Enable hosted KVM"));
     assert!(verify < position("Project setup"));
     assert!(verify < position("Build Nix group"));
-    assert_eq!(
-        steps[position("Enable hosted KVM")]["if"],
-        "${{ matrix.system == 'x86_64-linux' }}"
-    );
+    assert_kvm_decides_in_its_script(&steps[position("Enable hosted KVM")]);
     let build = &steps[position("Build Nix group")];
     assert!(
         build["run"]
@@ -956,9 +973,33 @@ fn committed_engine_revision_is_the_fork_safe_fallback_for_the_repository_variab
     for name in ["Restore grouped-build engine", "Save grouped-build engine"] {
         assert_eq!(step(name)["with"]["key"], key.as_str());
     }
+    // Restore, import and export always run and decide in their scripts, so
+    // their outcome needs no proof; only the save action keeps a condition.
+    let hit = "${{ steps.simit-engine-cache.outputs.cache-hit }}";
+    assert!(step("Restore grouped-build engine")["if"].is_null());
+    for (name, cache_hit) in [
+        ("Import grouped-build engine", ""),
+        ("Export grouped-build engine", "true"),
+    ] {
+        let step = step(name);
+        assert!(step["if"].is_null(), "{name}");
+        assert_eq!(step["env"]["SIMIT_ENGINE_CACHE_HIT"], hit, "{name}");
+        // The guard returns before the script touches Nix or the cache.
+        let output = temp.path().join("github-output");
+        let status = Command::new("bash")
+            .args(["-e", "-c", step["run"].as_str().unwrap()])
+            .env_clear()
+            .env("PATH", std::env::var_os("PATH").unwrap_or_default())
+            .env("SIMIT_ENGINE_CACHE_HIT", cache_hit)
+            .env("GITHUB_OUTPUT", &output)
+            .status()
+            .unwrap();
+        assert!(status.success(), "{name}");
+        assert!(!output.exists(), "{name}");
+    }
     assert_eq!(
-        step("Restore grouped-build engine")["if"],
-        format!("${{{{ {revision} != '' }}}}").as_str()
+        step("Save grouped-build engine")["if"],
+        "${{ steps.simit-engine-cache-save.outputs.save == 'true' }}"
     );
     assert!(generate(&temp, &["--check"]).status.success());
 
@@ -1539,7 +1580,7 @@ capture_results = true
             .position(|step| step["name"] == "Build ${{ matrix.installable }}")
             .unwrap();
         assert!(verify < kvm && kvm < build);
-        assert_eq!(steps[kvm]["if"], "${{ matrix.system == 'x86_64-linux' }}");
+        assert_kvm_decides_in_its_script(&steps[kvm]);
         assert_eq!(
             steps[verify]["env"]["EXPECTED_NIX_SYSTEM"],
             "${{ matrix.system }}"

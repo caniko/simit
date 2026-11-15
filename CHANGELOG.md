@@ -33,6 +33,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   drops it from this profile's frozen rollouts; canaries stay as barriers and a
   landed candidate is refused); `--prune-refs` also deletes candidate-shaped
   maintenance refs no receipt names.
+- Changed: fleet updates admit grouped Nix builds, native KVM and diagnostics
+  steps. Generated step conditions are declared once in
+  `simit::render::ci::step_conditions`; the renderer writes them and the
+  GitHub adapter proves their push outcome from the same values instead of its
+  own string literals. `!cancelled()` is proven like `always()`, a templated
+  matrix job name such as `build (${{ matrix.group }})` is expanded from literal
+  matrix values, several jobs of one workflow may carry conditional steps, and
+  the pinned `actions/cache/save` step is optional (either outcome).
+  Regenerating changes grouped and native-KVM workflows: the engine cache
+  restore, import and export steps and the KVM step lose their `if:` and decide
+  inside their scripts, and an unfiltered grouped workflow names its
+  concurrency group by the workflow path with `tags-ignore: ["**"]`.
 - Added: `simit::commands::projects_update::admit_candidate_source` runs the
   GitHub adapter's source-level admission on a generation plan without forge
   access. A conformance test renders representative configurations and

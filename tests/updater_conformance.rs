@@ -70,8 +70,7 @@ fn plan(root: &Path) -> simit::project::CiUpdatePlan {
 fn every_generated_workflow_shape_passes_updater_source_admission() {
     let ci = |options: &str| format!("[ci]\n{NIX}{options}");
     let trunk = "push_branches = [\"trunk\"]\n";
-    // (name, workspace, simit.toml, refusal expected until the generator and
-    // adapter share one declaration of that shape)
+    // (name, workspace, simit.toml, expected refusal)
     let cases: Vec<(&str, bool, String, Option<&str>)> = vec![
         ("crate, cargo runtime", false, "[ci]\nplatform = \"github\"\nprovider = \"actions\"\nruntime = \"cargo\"\n".into(), None),
         ("crate", false, ci(""), None),
@@ -89,13 +88,16 @@ fn every_generated_workflow_shape_passes_updater_source_admission() {
         // A project whose only workflow is the installable matrix has no
         // `test` job, so a profile that requires `test` cannot enroll it.
         ("nix builds only", false, ci(&format!("{BUILDS}[ci.nix_build]\nonly = true\ncapture_results = true\n")), Some("required check test is not provably produced")),
-        // TODO(optional steps): the grouped-build engine cache steps, native
-        // KVM and diagnostics conditions are not source-provable yet, and an
-        // unfiltered grouped workflow names its concurrency group by a literal.
-        ("nix build groups", false, ci(&format!("{BUILDS}[ci.nix_build]\ncapture_results = true\n{GROUPS}")), Some("concurrency is not provably isolated")),
-        ("nix build groups, branch filter", false, ci(&format!("{BUILDS}[ci.nix_build]\ncapture_results = true\npush_branches = [\"trunk\"]\n{GROUPS}")), Some("conditional")),
-        ("nix builds, native KVM", false, ci(&format!("{BUILDS}[ci.nix_build]\nkvm = true\nsystem_runners = {{ x86_64-linux = \"ubuntu-24.04\" }}\n")), Some("conditional")),
-        ("nix builds, diagnostics", false, ci(&format!("{BUILDS}[ci.nix_build]\ncapture_results = true\npost_build_always = [\"true\"]\n")), Some("conditional")),
+        // Grouped builds: a templated job name, engine-cache steps that decide
+        // in their scripts, and cache saves declared optional.
+        ("nix build groups", false, ci(&format!("{BUILDS}[ci.nix_build]\ncapture_results = true\n{GROUPS}")), None),
+        ("nix build groups, branch filter", false, ci(&format!("{BUILDS}[ci.nix_build]\ncapture_results = true\npush_branches = [\"trunk\"]\n{GROUPS}")), None),
+        ("nix build groups, pinned engine", false, ci(&format!("{BUILDS}[ci.nix_build]\ncapture_results = true\nengine_revision = \"0123456789abcdef0123456789abcdef01234567\"\n{GROUPS}")), None),
+        ("nix build groups, native KVM", false, ci(&format!("{BUILDS}[ci.nix_build]\ncapture_results = true\nkvm = true\nsystem_runners = {{ x86_64-linux = \"ubuntu-24.04\" }}\n{GROUPS}")), None),
+        ("nix build groups, cached inputs and diagnostics", false, ci(&format!("{BUILDS}[ci.nix_build]\ncapture_results = true\ncache_installables = [\".#packages.x86_64-linux.kernel\"]\npost_build_always = [\"true\"]\n{GROUPS}")), None),
+        ("nix build groups, dependency transport", false, ci(&format!("{BUILDS}[ci.nix_build]\ncapture_results = true\ncheck_systems = [\"x86_64-linux\"]\ndependency_installables = [\".#packages.x86_64-linux.deps\"]\n{GROUPS}")), None),
+        ("nix builds, native KVM", false, ci(&format!("{BUILDS}[ci.nix_build]\nkvm = true\nsystem_runners = {{ x86_64-linux = \"ubuntu-24.04\" }}\n")), None),
+        ("nix builds, diagnostics", false, ci(&format!("{BUILDS}[ci.nix_build]\ncapture_results = true\npost_build_always = [\"true\"]\n")), None),
         ("prebuild", false, format!("{}{PREBUILD}", ci("")), None),
         ("prebuild, branch filter", false, format!("{}{PREBUILD}", ci("")).replace("[prebuild]\n", "[prebuild]\npush_branches = [\"trunk\"]\n"), None),
         ("prebuild, package-scoped workspace", true, format!("{}{PREBUILD}", ci("workspace = true\n")), None),

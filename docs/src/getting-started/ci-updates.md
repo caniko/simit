@@ -452,20 +452,35 @@ Workflow source must expose its jobs and steps directly: `continue-on-error` is
 accepted only when absent or the literal `false`. Expressions and reusable
 workflow calls require an adapter that can establish the underlying outcomes.
 Explicit job `if` conditions and unknown step conditions require a supporting
-adapter and are rejected before publishing a candidate. A step whose condition
-is exactly `always()` (bare or wrapped in `${{ }}`) needs no binding, because
-it runs on every outcome and every unbound step must succeed. A single source
-job may use the generated prebuild's exact branch-push predicates:
-`inputs.release`, its non-PR variant, default-branch publication (with or
-without the release alternative), and `always()`. On an
-original push, release inputs are absent: release-only steps must be skipped,
-maintenance publication must be skipped, and default-branch publication and
-cleanup must succeed. Every conditional result must match the exact candidate
-workflow's step ordinal and literal name. Missing, duplicate or unexpected
-outcomes fail closed. Conditional native matrix jobs support only a static,
-include-only system/runner matrix with native job names; every distinct source
-row must be present and successful. A skipped applicable gate never establishes
-acceptance, and the workflow and all jobs must still succeed.
+adapter and are rejected before publishing a candidate. The adapter evaluates
+no expression. Every step condition it accepts is declared once in
+`simit::render::ci::step_conditions`, where the renderer takes the text it
+writes and the adapter takes the push outcome it must observe:
+
+| Condition                                                                 | On an original push                           |
+| ------------------------------------------------------------------------- | --------------------------------------------- |
+| `always()`, `!cancelled()`                                                | runs; needs no binding                        |
+| `inputs.release`, `inputs.release && github.event_name != 'pull_request'` | skipped (inputs are absent)                   |
+| default-branch publication, with or without the release alternative       | runs on the default branch, skipped elsewhere |
+| `failure() && steps.simit-dependency-download.outcome == 'failure'`       | skipped                                       |
+
+Both spellings, bare and wrapped in `${{ }}`, are one condition. A step with
+any other condition is admitted only as a generated optional step: the pinned
+`actions/cache/save` action, which can store a cache entry and nothing else, so
+either outcome is accepted whatever its condition. Grouped builds use it for
+the engine and input cache saves; the restore, import and export steps, and
+native KVM setup, always run and decide inside their scripts.
+
+A job with a step that can be skipped is bound to its source: every step's
+result must match the exact candidate workflow's step ordinal and literal
+name, and missing, duplicate or unexpected outcomes fail closed. Binding needs
+the run's exact job inventory, so every job of such a workflow must prove the
+names it reports: a literal name, or a static include-only matrix whose rows
+either expand natively (`system` and `runner` rows without a `name`) or fill a
+`name` template such as `build (${{ matrix.group }})` from literal row values.
+Every distinct source row must be present and successful. A skipped applicable
+gate never establishes acceptance, and the workflow and all jobs must still
+succeed.
 This source check applies to generator and consumer qualification, and to
 pre-push admission of committed candidate bytes.
 Required checks from other applications, unbound contexts, active rulesets,
