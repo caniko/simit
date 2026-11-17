@@ -1378,14 +1378,10 @@ pub(crate) fn crow_nix_only_files(
         || !cfg.ci.native_tests.is_empty()
         || !cfg.ci.extra_setup.is_empty()
         || !cfg.ci_cache_artifacts().substituters.is_empty()
-        || cfg.ci.nix_build
-            != (NixBuildConfig {
-                only: cfg.ci.nix_build.only,
-                ..NixBuildConfig::default()
-            })
     {
+        // Config loading already rejects every [ci.nix_build] option outside Actions.
         bail!(
-            "Crow Nix-only CI supports [ci].nix_builds, components, runner and [ci.crow]; publish_crates, target_smokes, native_tests, extra_setup, cache substituters and other [ci.nix_build] options require the Actions provider"
+            "Crow Nix-only CI supports [ci].nix_builds, components, runner and [ci.crow]; publish_crates, target_smokes, native_tests, extra_setup and cache substituters require the Actions provider"
         );
     }
     cfg.validate_crow_prebuild_beside(CiProvider::Crow)?;
@@ -1395,7 +1391,6 @@ pub(crate) fn crow_nix_only_files(
         runner,
         &cfg.ci.nix_builds,
         &cfg.ci.components,
-        !cfg.ci.nix_build.only,
     )?];
     files.extend(prebuild_files(cfg, crow.format)?);
     Ok(files)

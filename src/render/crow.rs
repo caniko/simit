@@ -869,7 +869,6 @@ pub fn nix_flake_ci_file(
     runner: &ResolvedRunner,
     nix_builds: &[String],
     components: &[crate::config::CiComponent],
-    flake_check: bool,
 ) -> Result<GeneratedFile> {
     use crate::config::CiComponent;
     let image = nix_image(config)?;
@@ -878,10 +877,9 @@ pub fn nix_flake_ci_file(
     if selected(CiComponent::FlakeWiring) {
         steps.push(step("flake-wiring", &image, super::flake_wiring_check()));
     }
-    if flake_check
-        && (components.is_empty()
-            || selected(CiComponent::FlakeEvaluation)
-            || selected(CiComponent::Checks))
+    if components.is_empty()
+        || selected(CiComponent::FlakeEvaluation)
+        || selected(CiComponent::Checks)
     {
         // Steps do not share a Nix store, so the declared builds replace a
         // second realization of every check.
