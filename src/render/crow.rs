@@ -895,7 +895,10 @@ pub fn nix_flake_ci_file(
         ));
     }
     let installables = nix_builds.iter().map(String::as_str).collect::<Vec<_>>();
-    for (installable, name) in installables.iter().zip(qualify_job_names(&installables)) {
+    for (installable, name) in installables.iter().zip(qualify_job_names(
+        &installables,
+        &["flake-check", "flake-wiring"],
+    )) {
         steps.push(step(
             name,
             &image,
@@ -1153,7 +1156,10 @@ pub fn qualify_files(
         "nix flake check --no-build --no-update-lock-file".to_owned(),
         None,
     )];
-    for (installable, job) in installables.iter().zip(qualify_job_names(&installables)) {
+    for (installable, job) in installables
+        .iter()
+        .zip(qualify_job_names(&installables, &["flake-check"]))
+    {
         jobs.push((
             job,
             format!(
@@ -1314,7 +1320,9 @@ fi
 /// Workflow names for the installables: the final attribute, e.g.
 /// `.#checks.x86_64-linux.clippy` -> `clippy`, or the whole attribute path when
 /// that is ambiguous, then a numeric suffix for repeated installables.
-fn qualify_job_names(installables: &[&str]) -> Vec<String> {
+/// Unique step/job names for `installables`, avoiding the `reserved` names of
+/// the generator's own steps.
+fn qualify_job_names(installables: &[&str], reserved: &[&str]) -> Vec<String> {
     let slug = |text: &str| {
         let name = text
             .chars()
@@ -1346,13 +1354,16 @@ fn qualify_job_names(installables: &[&str]) -> Vec<String> {
             slug(attribute.rsplit('.').next().unwrap_or(&attribute))
         })
         .collect::<Vec<_>>();
-    let mut seen = std::collections::BTreeSet::from(["flake-check".to_owned()]);
+    let mut seen = reserved
+        .iter()
+        .map(|name| (*name).to_owned())
+        .collect::<std::collections::BTreeSet<_>>();
     installables
         .iter()
         .zip(&short)
         .map(|(installable, name)| {
-            let ambiguous =
-                name == "flake-check" || short.iter().filter(|other| *other == name).count() > 1;
+            let ambiguous = reserved.contains(&name.as_str())
+                || short.iter().filter(|other| *other == name).count() > 1;
             let base = if ambiguous {
                 slug(&attribute(installable))
             } else {
@@ -1627,13 +1638,16 @@ mod tests {
 
     #[test]
     fn qualify_job_names_disambiguate_shared_final_attributes() {
-        let names = super::qualify_job_names(&[
-            ".#checks.x86_64-linux.test",
-            ".#checks.aarch64-linux.test",
-            ".#packages.x86_64-linux.server",
-            ".#flake-check",
-            ".#packages.x86_64-linux.server",
-        ]);
+        let names = super::qualify_job_names(
+            &[
+                ".#checks.x86_64-linux.test",
+                ".#checks.aarch64-linux.test",
+                ".#packages.x86_64-linux.server",
+                ".#flake-check",
+                ".#packages.x86_64-linux.server",
+            ],
+            &["flake-check"],
+        );
         assert_eq!(
             names,
             [
@@ -1644,7 +1658,17 @@ mod tests {
                 "packages-x86-64-linux-server-2",
             ]
         );
-        assert_eq!(super::qualify_job_names(&[".#docs"]), ["docs"]);
+        assert_eq!(
+            super::qualify_job_names(&[".#docs"], &["flake-check"]),
+            ["docs"]
+        );
+        assert_eq!(
+            super::qualify_job_names(
+                &[".#checks.x86_64-linux.flake-wiring"],
+                &["flake-check", "flake-wiring"],
+            ),
+            ["checks-x86-64-linux-flake-wiring"]
+        );
     }
 
     #[test]

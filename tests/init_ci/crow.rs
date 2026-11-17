@@ -99,3 +99,30 @@ fn crow_flake_only_ci_keeps_nix_builds_beside_the_crow_prebuild() {
     assert!(ci.contains("checks.x86_64-linux.wardrobe"), "{ci}");
     assert!(root.join(".crow/prebuild.yaml").is_file());
 }
+
+#[test]
+fn crow_flake_only_audit_infers_an_unpersisted_runner() {
+    let temp = tempfile::TempDir::new().unwrap();
+    let root = temp.path();
+    fs::write(root.join("flake.nix"), "{}\n").unwrap();
+    let config = CONFIG.replace("runner = \"codefloe-global\"\n", "");
+    fs::write(root.join("simit.toml"), &config).unwrap();
+    let run = |args: &[&str]| {
+        let output = simit().current_dir(root).args(args).output().unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        output
+    };
+
+    run(&["init", "ci", "--runner", "codefloe-global"]);
+    // Flake-backed configuration cannot persist the override; model that.
+    fs::write(root.join("simit.toml"), &config).unwrap();
+    let ci = fs::read_to_string(root.join(".crow/ci.yaml")).unwrap();
+    assert!(ci.contains("agent: codefloe-global"), "{ci}");
+    let audit = run(&["projects", "audit", "--json", "."]);
+    let audit: serde_json::Value = serde_json::from_slice(&audit.stdout).unwrap();
+    assert_eq!(audit["projects"][0]["ciStatus"], "managed", "{audit}");
+}

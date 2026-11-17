@@ -1150,8 +1150,25 @@ fn infer_expected_primary_ci_files(
         }) {
             crow.format = CrowWorkflowFormat::Jsonnet;
         }
-        let runner =
-            ResolvedRunner::literal(config.ci.runner.as_deref().unwrap_or("crow-default"))?;
+        // A flake-backed configuration cannot persist `--runner`, so fall back
+        // to the agent label the generated workflow carries.
+        let inferred = snapshots
+            .iter()
+            .find(|workflow| {
+                workflow
+                    .relative_path
+                    .file_stem()
+                    .is_some_and(|stem| stem == "ci")
+            })
+            .and_then(|workflow| crow_agent_label(&workflow.content));
+        let runner = ResolvedRunner::literal(
+            config
+                .ci
+                .runner
+                .as_deref()
+                .or(inferred.as_deref())
+                .unwrap_or("crow-default"),
+        )?;
         return crate::commands::init_ci::crow_nix_only_files(&config, &crow, &runner);
     }
     if backend.provider() == CiProvider::Crow {
@@ -1566,6 +1583,18 @@ fn workflow_snapshots(marked: &[WorkflowFile]) -> Vec<WorkflowSnapshot> {
             content: workflow.content.clone(),
         })
         .collect()
+}
+
+/// The `labels.agent` of a generated Crow workflow (YAML, or Jsonnet emitted as
+/// JSON after a `//` marker line).
+fn crow_agent_label(content: &str) -> Option<String> {
+    let body = content
+        .lines()
+        .filter(|line| !line.trim_start().starts_with("//"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let workflow: serde_yaml::Value = serde_yaml::from_str(&body).ok()?;
+    workflow["labels"]["agent"].as_str().map(str::to_owned)
 }
 
 fn resolved_runner_override(label: Option<&str>) -> Option<ResolvedRunner> {
