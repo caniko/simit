@@ -1384,7 +1384,6 @@ pub(crate) fn crow_nix_only_files(
             "Crow Nix-only CI supports [ci].nix_builds, components, runner and [ci.crow]; publish_crates, target_smokes, native_tests, extra_setup and cache substituters require the Actions provider"
         );
     }
-    cfg.validate_crow_prebuild_beside(CiProvider::Crow)?;
     let mut files = vec![crate::render::crow::nix_flake_ci_file(
         crow.format,
         crow,

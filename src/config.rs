@@ -1295,8 +1295,9 @@ impl ProjectConfig {
         artifacts
     }
 
-    /// Crow CI does not qualify `[ci].nix_builds` on pull requests and the Crow
-    /// prebuild only runs on default-branch pushes, so they cannot coexist.
+    /// Crow Rust and Python CI do not qualify `[ci].nix_builds` on pull requests and the
+    /// Crow prebuild only runs on default-branch pushes, so they cannot coexist there.
+    /// Crow Nix-only CI builds them on every PR, so its generator skips this check.
     pub(crate) fn validate_crow_prebuild_beside(&self, provider: CiProvider) -> Result<()> {
         if provider == CiProvider::Crow
             && self
@@ -3428,9 +3429,6 @@ impl ProjectConfig {
                 "simit project config: [prebuild].qualify",
                 &prebuild.qualify,
             )?;
-            if let Some(provider) = self.ci.provider {
-                self.validate_crow_prebuild_beside(provider)?;
-            }
             if prebuild.runs_on_crow() && prebuild.nix_builds.is_empty() {
                 bail!(
                     "simit project config: [prebuild] provider = \"crow\" requires its own [prebuild].nix_builds"

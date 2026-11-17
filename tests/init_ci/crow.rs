@@ -74,3 +74,28 @@ fn crow_flake_only_ci_builds_declared_installables_without_lfs() {
     assert!(!output.status.success());
     assert!(String::from_utf8_lossy(&output.stderr).contains("require the Actions provider"));
 }
+
+#[test]
+fn crow_flake_only_ci_keeps_nix_builds_beside_the_crow_prebuild() {
+    let temp = tempfile::TempDir::new().unwrap();
+    let root = temp.path();
+    fs::write(root.join("flake.nix"), "{}\n").unwrap();
+    fs::write(
+        root.join("simit.toml"),
+        format!("{CONFIG}\n[prebuild]\nprovider = \"crow\"\nnix_builds = [\".#server\"]\n"),
+    )
+    .unwrap();
+    let output = simit()
+        .current_dir(root)
+        .args(["init", "ci"])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let ci = fs::read_to_string(root.join(".crow/ci.yaml")).unwrap();
+    assert!(ci.contains("checks.x86_64-linux.wardrobe"), "{ci}");
+    assert!(root.join(".crow/prebuild.yaml").is_file());
+}
