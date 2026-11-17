@@ -882,10 +882,14 @@ pub fn maturin_publish_file(
     options: &CiOptions,
     pyproject_dir: &str,
 ) -> Result<GeneratedFile> {
-    let prefix = if pyproject_dir == "." {
-        String::new()
-    } else {
-        format!("cd {} && ", shell_quote(pyproject_dir))
+    // Crow joins step commands into one shell script, so each `cd` runs in a
+    // subshell; a bare prefix would compound into `<dir>/<dir>`.
+    let in_dir = |command: &str| {
+        if pyproject_dir == "." {
+            command.to_owned()
+        } else {
+            format!("(cd {} && {command})", shell_quote(pyproject_dir))
+        }
     };
     pypi_publish_file(
         format,
@@ -893,8 +897,8 @@ pub fn maturin_publish_file(
         runner,
         options,
         &[
-            format!("{prefix}nix develop -c maturin build --release --sdist"),
-            format!("{prefix}nix develop -c maturin publish --skip-existing"),
+            in_dir("nix develop -c maturin build --release --sdist"),
+            in_dir("nix develop -c maturin publish --skip-existing"),
         ],
     )
 }
@@ -1451,6 +1455,51 @@ mod tests {
     }
 
     use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn nested_maturin_publish_commands_each_enter_the_directory_once() {
+        use std::os::unix::fs::PermissionsExt;
+        let runner = crate::user_config::ResolvedRunner::literal("crow").unwrap();
+        let file = maturin_publish_file(
+            CrowWorkflowFormat::Yaml,
+            &CrowCiConfig::default(),
+            &runner,
+            &ci::CiOptions::default(),
+            "packages/demo",
+        )
+        .unwrap();
+        let commands: Vec<&str> = file
+            .content
+            .lines()
+            .filter_map(|line| line.trim().strip_prefix("- "))
+            .filter(|line| line.contains("maturin"))
+            .map(|line| line.trim_matches(['\'', '"']))
+            .collect();
+        assert_eq!(commands.len(), 2, "{}", file.content);
+        // Run them as one script, as Crow does, with a stub `nix` that logs $PWD.
+        let temp = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(temp.path().join("packages/demo")).unwrap();
+        let bin = temp.path().join("bin");
+        std::fs::create_dir(&bin).unwrap();
+        std::fs::write(bin.join("nix"), "#!/bin/sh\npwd >> \"$LOG\"\n").unwrap();
+        std::fs::set_permissions(bin.join("nix"), std::fs::Permissions::from_mode(0o755)).unwrap();
+        let log = temp.path().join("log");
+        let status = std::process::Command::new("sh")
+            .args(["-ec", &commands.join("\n")])
+            .current_dir(temp.path())
+            .env("PATH", format!("{}:/usr/bin:/bin", bin.display()))
+            .env("LOG", &log)
+            .status()
+            .unwrap();
+        assert!(status.success(), "{commands:?}");
+        let dirs = std::fs::read_to_string(log).unwrap();
+        assert_eq!(dirs.lines().count(), 2);
+        assert!(
+            dirs.lines().all(|dir| dir.ends_with("/packages/demo")),
+            "{dirs}"
+        );
+    }
 
     #[test]
     fn uses_documented_default_image_for_nix_workflows() {
