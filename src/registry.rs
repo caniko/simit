@@ -1134,6 +1134,26 @@ fn infer_expected_primary_ci_files(
         return crate::monorepo::ci::files(workspace_root, &config, include_publishers, true);
     }
     let snapshots = workflow_snapshots(marked);
+    if backend.provider() == CiProvider::Crow
+        && workspace_root.join("flake.nix").is_file()
+        && (config.ci.nix_build.only
+            || (!workspace_root.join("Cargo.toml").is_file()
+                && !python::is_python_uv_project(workspace_root)))
+    {
+        config.ci.validate_nix_only_language_options()?;
+        let mut crow = config.ci.crow.clone();
+        if marked.iter().any(|workflow| {
+            workflow
+                .relative_path
+                .extension()
+                .is_some_and(|extension| extension == "jsonnet")
+        }) {
+            crow.format = CrowWorkflowFormat::Jsonnet;
+        }
+        let runner =
+            ResolvedRunner::literal(config.ci.runner.as_deref().unwrap_or("crow-default"))?;
+        return crate::commands::init_ci::crow_nix_only_files(&config, &crow, &runner);
+    }
     if backend.provider() == CiProvider::Crow {
         return infer_expected_crow_files(workspace_root, marked, &snapshots);
     }

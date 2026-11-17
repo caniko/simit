@@ -857,6 +857,100 @@ pub fn python_ci_file(
     })
 }
 
+/// Crow's default clone plugin; any tag of this image keeps clone credentials.
+const CROW_CLONE_PLUGIN: &str = "codefloe.com/crow-plugins/clone:1.2.3";
+
+/// Nix-only Crow CI for a flake without Cargo or Python metadata: evaluate the
+/// flake, then realize each `[ci].nix_builds` installable from the locked inputs.
+/// Builds read Git objects, never LFS content, so the clone skips the LFS fetch.
+pub fn nix_flake_ci_file(
+    format: CrowWorkflowFormat,
+    config: &CrowCiConfig,
+    runner: &ResolvedRunner,
+    nix_builds: &[String],
+    components: &[crate::config::CiComponent],
+    flake_check: bool,
+) -> Result<GeneratedFile> {
+    use crate::config::CiComponent;
+    let image = nix_image(config)?;
+    let selected = |component| components.contains(&component);
+    let mut steps = Vec::new();
+    if selected(CiComponent::FlakeWiring) {
+        steps.push(step("flake-wiring", &image, super::flake_wiring_check()));
+    }
+    if flake_check
+        && (components.is_empty()
+            || selected(CiComponent::FlakeEvaluation)
+            || selected(CiComponent::Checks))
+    {
+        // Steps do not share a Nix store, so the declared builds replace a
+        // second realization of every check.
+        let no_build =
+            !nix_builds.is_empty() || (!components.is_empty() && !selected(CiComponent::Checks));
+        steps.push(step(
+            "flake-check",
+            &image,
+            format!(
+                "nix flake check --no-update-lock-file{}",
+                if no_build { " --no-build" } else { "" }
+            ),
+        ));
+    }
+    let installables = nix_builds.iter().map(String::as_str).collect::<Vec<_>>();
+    for (installable, name) in installables.iter().zip(qualify_job_names(&installables)) {
+        steps.push(step(
+            name,
+            &image,
+            format!(
+                "nix build {} --no-link --print-build-logs --no-update-lock-file",
+                shell_quote(installable)
+            ),
+        ));
+    }
+    if steps.is_empty() {
+        bail!("Crow Nix-only CI requires [ci].nix_builds or a flake check");
+    }
+    add_nix_environment(&mut steps);
+    #[derive(Serialize)]
+    struct NixWorkflow {
+        #[serde(flatten)]
+        workflow: Workflow,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        clone: Option<Value>,
+    }
+    let workflow = NixWorkflow {
+        workflow: Workflow {
+            name: "ci".to_owned(),
+            labels: labels(config, runner),
+            platform: config.platform.clone(),
+            when: vec![
+                push_to_maintained_branches(),
+                condition("event", "pull_request"),
+            ],
+            skip_clone: config.skip_clone.then_some(true),
+            variables: config.variables.clone(),
+            workspace: config.workspace_base.as_ref().map(|base| Workspace {
+                base: base.clone(),
+                path: "src/${CI_REPO}".to_owned(),
+            }),
+            steps,
+        },
+        // Full history like the implicit clone (Nix rejects shallow flakes),
+        // without the default LFS fetch.
+        clone: (!config.skip_clone).then(|| {
+            json!([{
+                "name": "clone",
+                "image": CROW_CLONE_PLUGIN,
+                "settings": { "depth": 0, "lfs": false },
+            }])
+        }),
+    };
+    Ok(GeneratedFile {
+        relative_path: crow_path("ci", None, format),
+        content: render_workflow(workflow, format)?,
+    })
+}
+
 pub fn python_publish_file(
     format: CrowWorkflowFormat,
     config: &CrowCiConfig,

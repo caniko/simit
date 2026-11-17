@@ -396,6 +396,14 @@ Generated Crow `build` and `ci` workflows run on every pull request, but push
 pipelines only on `${CI_REPO_DEFAULT_BRANCH}` and the updater's default
 maintenance refs (`simit/update/**`). Pull request pipelines gate other branches,
 so a branch push would only repeat them on metered agents.
+A flake-only project (no `Cargo.toml` or `pyproject.toml`) with
+`provider = "crow"` gets `.crow/ci.yaml`: `nix flake check --no-build`, then
+one `nix build --no-update-lock-file` step per `[ci].nix_builds` installable
+(a full `nix flake check` when the list is empty), on the `[ci].runner` agent.
+Its clone step keeps full history but sets `lfs: false`, since Nix builds read
+Git objects rather than LFS content. Options only the Actions renderer
+implements, such as `extra_setup`, `[ci.cache]` or `[ci.nix_build]` tuning,
+are rejected.
 Projects without a GitHub mirror set `[prebuild].provider = "crow"`. Then
 `simit init ci --prebuild-only` renders `.crow/prebuild.yaml` with the
 `[ci.crow]` image and labels. It runs only on pushes to
