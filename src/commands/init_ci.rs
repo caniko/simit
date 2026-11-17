@@ -543,6 +543,7 @@ pub fn run(command: InitCiCommand) -> Result<()> {
             resolved.runtime,
             &runners.ci,
             &options,
+            &crate::python::maturin_pyproject_dir(workspace_root)?,
         )?);
     }
     let pages = if command.primary_only {
@@ -1693,6 +1694,7 @@ fn run_crow(
             &crow,
             &runners.ci,
             &options,
+            &crate::python::maturin_pyproject_dir(workspace_root)?,
         )?);
     }
     cfg.validate_crow_prebuild_beside(CiProvider::Crow)?;

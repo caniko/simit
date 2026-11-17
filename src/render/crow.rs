@@ -880,15 +880,21 @@ pub fn maturin_publish_file(
     config: &CrowCiConfig,
     runner: &ResolvedRunner,
     options: &CiOptions,
+    pyproject_dir: &str,
 ) -> Result<GeneratedFile> {
+    let prefix = if pyproject_dir == "." {
+        String::new()
+    } else {
+        format!("cd {} && ", shell_quote(pyproject_dir))
+    };
     pypi_publish_file(
         format,
         config,
         runner,
         options,
         &[
-            "nix develop -c maturin build --release --sdist".to_owned(),
-            "nix develop -c maturin publish --skip-existing".to_owned(),
+            format!("{prefix}nix develop -c maturin build --release --sdist"),
+            format!("{prefix}nix develop -c maturin publish --skip-existing"),
         ],
     )
 }

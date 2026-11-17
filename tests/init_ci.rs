@@ -7681,7 +7681,7 @@ fn pypi_publishers_validate_the_configured_tag_prefix_before_version_lookup() {
         for platform in [Platform::Github, Platform::Forgejo] {
             for file in [
                 python_publish_file(platform, Runtime::Nix, &runner, &options).unwrap(),
-                maturin_publish_file(platform, Runtime::Nix, &runner, &options).unwrap(),
+                maturin_publish_file(platform, Runtime::Nix, &runner, &options, ".").unwrap(),
             ] {
                 let workflow: serde_yaml::Value = serde_yaml::from_str(&file.content).unwrap();
                 assert_eq!(
@@ -7732,6 +7732,27 @@ fn pypi_publishers_validate_the_configured_tag_prefix_before_version_lookup() {
             }
         }
     }
+}
+
+#[test]
+fn pypi_maturin_nested_pyproject() {
+    use simit::cli::{Platform, Runtime};
+    use simit::render::ci::{CiOptions, maturin_publish_file};
+    use simit::user_config::ResolvedRunner;
+    let runner = ResolvedRunner {
+        name: None,
+        labels: vec!["ubuntu-24.04".into()],
+    };
+    let file = maturin_publish_file(
+        Platform::Github,
+        Runtime::Nix,
+        &runner,
+        &CiOptions::default(),
+        "packages/demo",
+    )
+    .unwrap();
+    assert!(file.content.contains("./packages/demo/pyproject.toml"));
+    assert!(file.content.contains("working-directory: packages/demo"));
 }
 
 #[test]
