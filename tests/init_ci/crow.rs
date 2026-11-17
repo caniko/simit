@@ -76,6 +76,30 @@ fn crow_flake_only_ci_builds_declared_installables_without_lfs() {
 }
 
 #[test]
+fn crow_flake_only_ci_rejects_the_crow_check_command() {
+    let temp = tempfile::TempDir::new().unwrap();
+    let root = temp.path();
+    fs::write(root.join("flake.nix"), "{}\n").unwrap();
+    fs::write(
+        root.join("simit.toml"),
+        format!("{CONFIG}\n[ci.crow]\ncheck_command = \"just check\"\n"),
+    )
+    .unwrap();
+    let output = simit()
+        .current_dir(root)
+        .args(["init", "ci"])
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("not supported on the Crow Nix-only CI path"),
+        "{stderr}"
+    );
+    assert!(!root.join(".crow").exists());
+}
+
+#[test]
 fn crow_flake_only_ci_keeps_nix_builds_beside_the_crow_prebuild() {
     let temp = tempfile::TempDir::new().unwrap();
     let root = temp.path();

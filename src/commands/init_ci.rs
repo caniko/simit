@@ -1384,6 +1384,14 @@ pub(crate) fn crow_nix_only_files(
             "Crow Nix-only CI supports [ci].nix_builds, components, runner and [ci.crow]; publish_crates, target_smokes, native_tests, extra_setup and cache substituters require the Actions provider"
         );
     }
+    if crow.check_command.is_some()
+        || crow.check_secret.is_some()
+        || crow.check_push_secret.is_some()
+    {
+        bail!(
+            "[ci.crow].check_command/check_secret/check_push_secret are not supported on the Crow Nix-only CI path"
+        );
+    }
     let mut files = vec![crate::render::crow::nix_flake_ci_file(
         crow.format,
         crow,
