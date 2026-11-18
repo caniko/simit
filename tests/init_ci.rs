@@ -5,6 +5,8 @@ use std::process::Command;
 use tempfile::TempDir;
 
 mod common;
+#[path = "init_ci/crow.rs"]
+mod crow;
 
 fn simit() -> Command {
     common::simit()

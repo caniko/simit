@@ -1136,9 +1136,6 @@ fn run_nix_only_at(command: InitCiCommand, workspace_root: &Path) -> Result<()> 
     ci::custody::validate_backend(&cfg.ci, provider, platform)?;
     crate::render::workflow_templates::validate_backend(&cfg.ci, provider, platform)?;
     validate_review_policy_backend(&cfg, platform, provider)?;
-    if provider != CiProvider::Actions {
-        bail!("Nix-only CI currently supports the Actions provider only");
-    }
     let configured_publish_crates = cfg.ci.publish_crates;
     // Resolve CLI overrides before validation and persistence. These options
     // belong to language/release workflows; Nix-only renderers cannot honour
@@ -1226,90 +1223,102 @@ fn run_nix_only_at(command: InitCiCommand, workspace_root: &Path) -> Result<()> 
     } else {
         codeberg_pages_options(&cfg, &command, None)?
     };
-    let generated = match platform {
-        Platform::Gitlab => project::GeneratedFile {
-            relative_path: PathBuf::from(".gitlab-ci.yml"),
-            content: ci::gitlab_nix_flake_workflow(),
-        },
-        _ => ci::nix_flake_ci_file_with_events(
-            platform,
-            &ResolvedRunner::literal(&runner)?,
-            &system_runners,
-            &cfg.ci_cache_artifacts(),
-            &cfg.ci.components,
-            &cfg.ci.push_branches,
-        )?,
-    };
-    let mut files = if cfg.ci.nix_build.only {
-        Vec::new()
-    } else {
-        vec![generated]
-    };
-    if provider == CiProvider::Actions
-        && cfg.ci_owns_nix_build_matrix(platform)
-        && !cfg.ci.nix_builds.is_empty()
-    {
-        files.push(ci::nix_build_matrix_file_with_options(
-            platform,
-            &ResolvedRunner::literal(&runner)?,
-            &cfg.ci.nix_builds,
-            &cfg.ci.extra_setup,
-            &cfg.ci_cache_artifacts().substituters,
-            &cfg.ci_cache_artifacts().trusted_public_keys,
-            &cfg.ci.nix_build,
-        )?);
+    let mut crow = cfg.ci.crow.clone();
+    if let Some(format) = command.crow_format {
+        crow.format = format;
     }
-    if !command.primary_only && cfg.ci.publish_crates {
-        validate_nix_only_publication(
-            &cfg,
-            platform,
-            command.maintainers_gpg.as_ref().map(|path| path.as_str()),
-        )?;
-        files.extend(nix_only_publish_files(
-            workspace_root,
-            &cfg,
-            platform,
-            &ResolvedRunner::literal(&runner)?,
-        )?);
-        let overrides = TrustOverrides {
-            key: command.maintainer_key.clone(),
-            trust_root: command.maintainers_gpg.clone(),
+    let files = if provider == CiProvider::Crow {
+        if pages.is_some() {
+            bail!("Codeberg Pages is not supported for Crow Nix-only CI");
+        }
+        crow_nix_only_files(&cfg, &crow, &ResolvedRunner::literal(&runner)?)?
+    } else {
+        let generated = match platform {
+            Platform::Gitlab => project::GeneratedFile {
+                relative_path: PathBuf::from(".gitlab-ci.yml"),
+                content: ci::gitlab_nix_flake_workflow(),
+            },
+            _ => ci::nix_flake_ci_file_with_events(
+                platform,
+                &ResolvedRunner::literal(&runner)?,
+                &system_runners,
+                &cfg.ci_cache_artifacts(),
+                &cfg.ci.components,
+                &cfg.ci.push_branches,
+            )?,
         };
-        if command.plan_json {
-            release_trust::require_committed(workspace_root, &cfg, &overrides)?;
+        let mut files = if cfg.ci.nix_build.only {
+            Vec::new()
         } else {
-            files.push(release_trust::generated_file(
-                workspace_root,
-                &cfg,
-                &overrides,
-                command.check,
+            vec![generated]
+        };
+        if provider == CiProvider::Actions
+            && cfg.ci_owns_nix_build_matrix(platform)
+            && !cfg.ci.nix_builds.is_empty()
+        {
+            files.push(ci::nix_build_matrix_file_with_options(
+                platform,
+                &ResolvedRunner::literal(&runner)?,
+                &cfg.ci.nix_builds,
+                &cfg.ci.extra_setup,
+                &cfg.ci_cache_artifacts().substituters,
+                &cfg.ci_cache_artifacts().trusted_public_keys,
+                &cfg.ci.nix_build,
             )?);
         }
-    }
-    if !command.primary_only && !cfg.ci.target_smokes.is_empty() {
-        let cache = cfg.ci_cache_artifacts();
-        files.push(ci::target_smokes_file(
-            &ResolvedRunner::literal(&runner)?,
-            &cfg.ci.push_branches,
-            (&cache.substituters, &cache.trusted_public_keys),
-            &cfg.ci.target_smokes,
-        )?);
-    }
-    if !command.primary_only && !cfg.ci.native_tests.is_empty() {
-        files.push(ci::native_tests_file(
-            &cfg.ci.push_branches,
-            ci::rust_toolchain_channel(workspace_root).as_deref(),
-            &cfg.ci.native_tests,
-        )?);
-    }
-    files.extend(prebuild_files(&cfg, cfg.ci.crow.format)?);
-    if let Some(pages) = &pages {
-        files.push(ci::codeberg_pages_file(
-            platform,
-            &ResolvedRunner::literal(&runner)?,
-            pages,
-        )?);
-    }
+        if !command.primary_only && cfg.ci.publish_crates {
+            validate_nix_only_publication(
+                &cfg,
+                platform,
+                command.maintainers_gpg.as_ref().map(|path| path.as_str()),
+            )?;
+            files.extend(nix_only_publish_files(
+                workspace_root,
+                &cfg,
+                platform,
+                &ResolvedRunner::literal(&runner)?,
+            )?);
+            let overrides = TrustOverrides {
+                key: command.maintainer_key.clone(),
+                trust_root: command.maintainers_gpg.clone(),
+            };
+            if command.plan_json {
+                release_trust::require_committed(workspace_root, &cfg, &overrides)?;
+            } else {
+                files.push(release_trust::generated_file(
+                    workspace_root,
+                    &cfg,
+                    &overrides,
+                    command.check,
+                )?);
+            }
+        }
+        if !command.primary_only && !cfg.ci.target_smokes.is_empty() {
+            let cache = cfg.ci_cache_artifacts();
+            files.push(ci::target_smokes_file(
+                &ResolvedRunner::literal(&runner)?,
+                &cfg.ci.push_branches,
+                (&cache.substituters, &cache.trusted_public_keys),
+                &cfg.ci.target_smokes,
+            )?);
+        }
+        if !command.primary_only && !cfg.ci.native_tests.is_empty() {
+            files.push(ci::native_tests_file(
+                &cfg.ci.push_branches,
+                ci::rust_toolchain_channel(workspace_root).as_deref(),
+                &cfg.ci.native_tests,
+            )?);
+        }
+        files.extend(prebuild_files(&cfg, cfg.ci.crow.format)?);
+        if let Some(pages) = &pages {
+            files.push(ci::codeberg_pages_file(
+                platform,
+                &ResolvedRunner::literal(&runner)?,
+                pages,
+            )?);
+        }
+        files
+    };
     let mut remediation = regeneration_base(&command, CiBackend::from_parts(provider, platform)?);
     remediation.push_str(" --runtime nix");
     if system_runners.is_empty() {
@@ -1328,9 +1337,10 @@ fn run_nix_only_at(command: InitCiCommand, workspace_root: &Path) -> Result<()> 
         None
     } else {
         let mut persisted_ci = cfg.ci;
-        persisted_ci.provider = Some(CiProvider::Actions);
+        persisted_ci.provider = Some(provider);
         persisted_ci.platform = Some(platform);
         persisted_ci.runtime = Some(Runtime::Nix);
+        persisted_ci.crow = crow;
         persisted_ci.runner = system_runners.is_empty().then(|| runner.clone());
         if command.reset_step_runners {
             persisted_ci.step_runners.clear();
@@ -1354,6 +1364,43 @@ fn run_nix_only_at(command: InitCiCommand, workspace_root: &Path) -> Result<()> 
         registry::touch_current_project_or_warn([("ci", FeatureStatus::Managed)]);
     }
     Ok(())
+}
+
+/// Crow workflows for a Nix-only flake project, shared by `init ci` and the
+/// CI audit so both expect the same files.
+pub(crate) fn crow_nix_only_files(
+    cfg: &ProjectConfig,
+    crow: &crate::config::CrowCiConfig,
+    runner: &ResolvedRunner,
+) -> Result<Vec<project::GeneratedFile>> {
+    if cfg.ci.publish_crates
+        || !cfg.ci.target_smokes.is_empty()
+        || !cfg.ci.native_tests.is_empty()
+        || !cfg.ci.extra_setup.is_empty()
+        || !cfg.ci_cache_artifacts().substituters.is_empty()
+    {
+        // Config loading already rejects every [ci.nix_build] option outside Actions.
+        bail!(
+            "Crow Nix-only CI supports [ci].nix_builds, components, runner and [ci.crow]; publish_crates, target_smokes, native_tests, extra_setup and cache substituters require the Actions provider"
+        );
+    }
+    if crow.check_command.is_some()
+        || crow.check_secret.is_some()
+        || crow.check_push_secret.is_some()
+    {
+        bail!(
+            "[ci.crow].check_command/check_secret/check_push_secret are not supported on the Crow Nix-only CI path"
+        );
+    }
+    let mut files = vec![crate::render::crow::nix_flake_ci_file(
+        crow.format,
+        crow,
+        runner,
+        &cfg.ci.nix_builds,
+        &cfg.ci.components,
+    )?];
+    files.extend(prebuild_files(cfg, crow.format)?);
+    Ok(files)
 }
 
 /// The `[prebuild]` workflows: GitHub Actions by default, `.crow/prebuild.*` in the
@@ -2732,6 +2779,7 @@ pub(crate) fn is_primary_ci_workflow_name(name: &std::ffi::OsStr) -> bool {
             | "build.jsonnet"
             | "ci.yaml"
             | "ci.yml"
+            | "ci.jsonnet"
             | "nix-builds.yaml"
             | "nix-builds.yml"
             | "prebuild.yaml"
@@ -2826,6 +2874,7 @@ pub(crate) fn is_ci_managed_workflow_name(name: &std::ffi::OsStr) -> bool {
             | "build.jsonnet"
             | "ci.yaml"
             | "ci.yml"
+            | "ci.jsonnet"
             | "publish-crate.yaml"
             | "publish-crate.yml"
             | "publish-workspace.yaml"
