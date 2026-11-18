@@ -881,10 +881,14 @@ pub fn nix_flake_ci_file(
         || selected(CiComponent::FlakeEvaluation)
         || selected(CiComponent::Checks)
     {
-        // Steps do not share a Nix store, so the declared builds replace a
-        // second realization of every check.
-        let no_build =
-            !nix_builds.is_empty() || (!components.is_empty() && !selected(CiComponent::Checks));
+        // Steps do not share a Nix store, so by default the declared builds
+        // replace a second realization of every check; an explicit `checks`
+        // component still builds them.
+        let no_build = if components.is_empty() {
+            !nix_builds.is_empty()
+        } else {
+            !selected(CiComponent::Checks)
+        };
         steps.push(step(
             "flake-check",
             &image,

@@ -399,7 +399,7 @@ so a branch push would only repeat them on metered agents.
 A flake-only project (no `Cargo.toml` or `pyproject.toml`) with
 `provider = "crow"` gets `.crow/ci.yaml`: `nix flake check --no-build`, then
 one `nix build --no-update-lock-file` step per `[ci].nix_builds` installable
-(a full `nix flake check` when the list is empty), on the `[ci].runner` agent.
+(a full `nix flake check` when the list is empty or `components` lists `checks`), on the `[ci].runner` agent.
 Its clone step keeps full history but sets `lfs: false`, since Nix builds read
 Git objects rather than LFS content. Options only the Actions renderer
 implements, such as `extra_setup`, `[ci.cache]` or `[ci.nix_build]` tuning,

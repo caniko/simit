@@ -150,3 +150,38 @@ fn crow_flake_only_audit_infers_an_unpersisted_runner() {
     let audit: serde_json::Value = serde_json::from_slice(&audit.stdout).unwrap();
     assert_eq!(audit["projects"][0]["ciStatus"], "managed", "{audit}");
 }
+
+#[test]
+fn crow_flake_only_ci_builds_checks_when_selected_and_replaces_jsonnet() {
+    let temp = tempfile::TempDir::new().unwrap();
+    let root = temp.path();
+    fs::write(root.join("flake.nix"), "{}\n").unwrap();
+    fs::write(
+        root.join("simit.toml"),
+        format!("{CONFIG}components = [\"checks\"]\n"),
+    )
+    .unwrap();
+    let run = |args: &[&str]| {
+        let output = simit().current_dir(root).args(args).output().unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        output
+    };
+
+    run(&["init", "ci", "--crow-format", "jsonnet"]);
+    assert!(root.join(".crow/ci.jsonnet").is_file());
+    run(&["init", "ci", "--crow-format", "yaml"]);
+    assert!(!root.join(".crow/ci.jsonnet").exists());
+    let ci = fs::read_to_string(root.join(".crow/ci.yaml")).unwrap();
+    assert!(
+        ci.contains("nix flake check --no-update-lock-file\n"),
+        "{ci}"
+    );
+    assert!(!ci.contains("--no-build"), "{ci}");
+    let audit = run(&["projects", "audit", "--json", "."]);
+    let audit: serde_json::Value = serde_json::from_slice(&audit.stdout).unwrap();
+    assert_eq!(audit["projects"][0]["ciStatus"], "managed", "{audit}");
+}
