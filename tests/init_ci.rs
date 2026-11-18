@@ -2827,6 +2827,131 @@ fn assert_crow_push_only_maintained_branches(path: &Path) {
 }
 
 #[test]
+#[cfg(unix)]
+fn crow_audit_provisions_database_in_its_own_step() {
+    use std::os::unix::fs::PermissionsExt;
+
+    for runtime in ["cargo", "nix"] {
+        let temp = init_package(true);
+        let root = temp.path();
+        fs::write(root.join("simit.toml"), format!("[ci]\nprovider = 'crow'\nplatform = 'forgejo'\nrunner = 'codefloe-global'\nruntime = '{runtime}'\nwith_audit = true\n")).unwrap();
+        let output = simit()
+            .current_dir(root)
+            .args(["init", "ci"])
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let workflow = fs::read_to_string(root.join(".crow/build.yaml")).unwrap();
+        let yaml: serde_yaml::Value = serde_yaml::from_str(&workflow).unwrap();
+        let audit = yaml["steps"]
+            .as_sequence()
+            .unwrap()
+            .iter()
+            .find(|step| step["name"] == "cargo-audit")
+            .unwrap();
+        let commands = audit["commands"].as_sequence().unwrap();
+        assert_eq!(commands.len(), 1);
+        let raw_command = commands[0].as_str().unwrap();
+        assert!(!raw_command.replace("$$", "").contains('$'));
+        let command = raw_command.replace("$$", "$");
+
+        let bin = root.join("bin");
+        fs::create_dir(&bin).unwrap();
+        let nix_bin = root.join("nix-bin");
+        fs::create_dir(&nix_bin).unwrap();
+        for (name, script) in [
+            (
+                "git",
+                "#!/bin/sh\n[ -z \"$FAIL_CLONE\" ] || exit 41\n[ \"$1 $2 $3 $4 $5 $6 $7 $8\" = '-c http.lowSpeedLimit=1024 -c http.lowSpeedTime=30 clone --depth 1 https://github.com/RustSec/advisory-db.git' ] || exit 42\nmkdir -p \"$9\"\ntouch \"$9/fixture\"\n",
+            ),
+            (
+                "cargo",
+                "#!/bin/sh\nif [ \"$1\" = install ]; then\n  [ \"$2 $3 $4\" = 'cargo-audit --locked --root' ] && [ -z \"$FAIL_INSTALL\" ] || exit 46\n  mkdir -p \"$5/bin\"\n  cp \"$FIXTURE_AUDIT\" \"$5/bin/cargo-audit\"\n  exit\nfi\n[ \"$1\" = audit ] || exit 43\nexec cargo-audit \"$@\"\n",
+            ),
+            (
+                "nix",
+                "#!/bin/sh\n[ \"$1 $2 $3 $4 $5 $6 $7\" = 'shell --extra-experimental-features nix-command flakes nixpkgs#git nixpkgs#cargo-audit nixpkgs#cargo -c' ] || exit 45\nshift 7\nPATH=\"$NIX_BIN:$PATH\"\nexport PATH\nexec \"$@\"\n",
+            ),
+        ] {
+            let path = if name == "git" && runtime == "nix" {
+                nix_bin.join(name)
+            } else {
+                bin.join(name)
+            };
+            fs::write(&path, script).unwrap();
+            fs::set_permissions(path, fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        let audit_tool = nix_bin.join("cargo-audit");
+        fs::write(&audit_tool, "#!/bin/sh\n[ \"$1\" = audit ] && [ \"$2\" = --db ] && [ -f \"$3/fixture\" ] && [ \"$4\" = --no-fetch ] && [ \"$5\" = --stale ] || exit 43\n[ -z \"$FAIL_AUDIT\" ] || exit 44\n").unwrap();
+        fs::set_permissions(&audit_tool, fs::Permissions::from_mode(0o755)).unwrap();
+        for (failure, expected, cargo_home, existing) in [
+            ("", 0, false, false),
+            ("", 0, true, true),
+            ("FAIL_CLONE", 41, false, true),
+            ("FAIL_AUDIT", 44, false, true),
+            ("FAIL_INSTALL", 46, false, true),
+        ] {
+            if runtime == "nix" && failure == "FAIL_INSTALL" {
+                continue;
+            }
+            let home = root.join(format!("home-{failure}-{cargo_home}"));
+            fs::create_dir(&home).unwrap();
+            let cargo = if cargo_home {
+                home.join("custom cargo")
+            } else {
+                home.join(".cargo")
+            };
+            if existing {
+                fs::create_dir_all(cargo.join("advisory-db")).unwrap();
+                fs::write(cargo.join("advisory-db/keep"), "keep").unwrap();
+            }
+            let tmp = home.join("tmp");
+            fs::create_dir(&tmp).unwrap();
+            let inherited_path = std::env::var_os("PATH").unwrap();
+            let paths: Vec<_> = std::env::split_paths(&inherited_path).collect();
+            let coreutils = paths.iter().find(|p| p.join("mktemp").is_file()).unwrap();
+            let shell = paths.iter().find(|p| p.join("sh").is_file()).unwrap();
+            let path = std::env::join_paths([bin.as_path(), coreutils.as_path(), shell.as_path()])
+                .unwrap();
+            let mut run = Command::new(shell.join("sh"));
+            run.arg("-c")
+                .arg(&command)
+                .current_dir(root)
+                .env("HOME", &home)
+                .env("TMPDIR", &tmp)
+                .env("FIXTURE_AUDIT", &audit_tool)
+                .env("NIX_BIN", &nix_bin)
+                .env_remove("CARGO_HOME")
+                .env("PATH", path);
+            if !failure.is_empty() {
+                run.env(failure, "1");
+            }
+            if cargo_home {
+                run.env("CARGO_HOME", home.join("custom cargo"));
+            }
+            let output = run.output().unwrap();
+            assert_eq!(
+                output.status.code(),
+                Some(expected),
+                "{runtime} {failure}: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            if existing {
+                assert_eq!(
+                    fs::read_to_string(cargo.join("advisory-db/keep")).unwrap(),
+                    "keep"
+                );
+            }
+            assert_eq!(fs::read_dir(tmp).unwrap().count(), 0);
+        }
+    }
+}
+
+#[test]
 fn crow_ci_can_delegate_project_checks_to_a_single_command() {
     let temp = init_package(true);
     fs::write(

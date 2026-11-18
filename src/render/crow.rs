@@ -369,10 +369,22 @@ fn build_workflow(
             ));
         }
         if options.repository_checks && options.with_audit {
+            let tools = if runtime == Runtime::Nix {
+                "nix shell --extra-experimental-features 'nix-command flakes' nixpkgs#git nixpkgs#cargo-audit nixpkgs#cargo -c "
+            } else {
+                ""
+            };
+            let install = if runtime == Runtime::Cargo {
+                "cargo install cargo-audit --locked --root \"$$tmp/tools\" && PATH=\"$$tmp/tools/bin:$$PATH\" && export PATH && "
+            } else {
+                ""
+            };
             steps.push(step(
                 "cargo-audit",
                 image,
-                format!("{prefix}cargo audit --no-fetch --stale"),
+                format!(
+                    "tmp=$$(mktemp -d) && trap 'rm -rf \"$$tmp\"' EXIT && {install}{tools}git -c http.lowSpeedLimit=1024 -c http.lowSpeedTime=30 clone --depth 1 https://github.com/RustSec/advisory-db.git \"$$tmp/advisory-db\" && {tools}cargo audit --db \"$$tmp/advisory-db\" --no-fetch --stale"
+                ),
             ));
         }
         if options.repository_checks && options.with_deny {
