@@ -2767,7 +2767,7 @@ fn python_publish_workflow(
     push_checkout_step(&mut workflow, platform, runner);
     push_required_env_step(&mut workflow, &options.required_env);
     push_install_nix_step(&mut workflow, platform);
-    push_validate_pypi_tag_step(&mut workflow, options.tag_prefix);
+    push_validate_pypi_tag_step(&mut workflow, options.tag_prefix, ".");
     push_extra_setup_steps(&mut workflow, &options.extra_setup);
     workflow.push_str("      - name: Build Nix package\n");
     workflow.push_str("        run: nix build .# --no-link\n\n");
@@ -2795,6 +2795,7 @@ pub fn maturin_publish_file(
     runtime: Runtime,
     runner: &ResolvedRunner,
     options: &CiOptions,
+    pyproject_dir: &str,
 ) -> Result<GeneratedFile> {
     if runtime != Runtime::Nix {
         bail!("PyPI publish generation for PyO3 projects requires --runtime nix");
@@ -2805,7 +2806,7 @@ pub fn maturin_publish_file(
 
     Ok(GeneratedFile {
         relative_path: PathBuf::from(platform.workflow_dir()).join("publish-pypi.yaml"),
-        content: maturin_publish_workflow(platform, runner, options),
+        content: maturin_publish_workflow(platform, runner, options, pyproject_dir),
     })
 }
 
@@ -2813,6 +2814,7 @@ fn maturin_publish_workflow(
     platform: Platform,
     runner: &ResolvedRunner,
     options: &CiOptions,
+    pyproject_dir: &str,
 ) -> String {
     let mut workflow = String::new();
     push_generated_workflow_header(&mut workflow);
@@ -2841,9 +2843,12 @@ fn maturin_publish_workflow(
     push_checkout_step(&mut workflow, platform, runner);
     push_required_env_step(&mut workflow, &options.required_env);
     push_install_nix_step(&mut workflow, platform);
-    push_validate_pypi_tag_step(&mut workflow, options.tag_prefix);
+    push_validate_pypi_tag_step(&mut workflow, options.tag_prefix, pyproject_dir);
     push_extra_setup_steps(&mut workflow, &options.extra_setup);
     workflow.push_str("      - name: Build and publish to PyPI\n");
+    if pyproject_dir != "." {
+        workflow.push_str(&format!("        working-directory: {pyproject_dir}\n"));
+    }
     workflow.push_str("        env:\n");
     workflow.push_str("          MATURIN_PYPI_TOKEN: ${{ secrets.");
     workflow.push_str(&options.pypi_token_secret);
@@ -6253,7 +6258,11 @@ fn runs_on(runner: &ResolvedRunner) -> String {
     format!("[{labels}]")
 }
 
-fn push_validate_pypi_tag_step(workflow: &mut String, prefix: crate::release_identity::TagPrefix) {
+fn push_validate_pypi_tag_step(
+    workflow: &mut String,
+    prefix: crate::release_identity::TagPrefix,
+    pyproject_dir: &str,
+) {
     workflow.push_str(
         r#"      - name: Validate release tag
         run: |
@@ -6265,7 +6274,7 @@ fn push_validate_pypi_tag_step(workflow: &mut String, prefix: crate::release_ide
     if prefix == crate::release_identity::TagPrefix::V {
         workflow.push_str("          case \"$tag\" in v*) release_version=\"${tag#v}\" ;; *) echo 'Tag prefix mismatch' >&2; exit 1 ;; esac\n");
     }
-    workflow.push_str(r#"          if ! printf '%s\n' "$release_version" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$'; then
+    let step = r#"          if ! printf '%s\n' "$release_version" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$'; then
             echo "Tag must be an exact semver version like 0.1.1, got '$tag'" >&2
             exit 1
           fi
@@ -6275,8 +6284,13 @@ fn push_validate_pypi_tag_step(workflow: &mut String, prefix: crate::release_ide
             exit 1
           fi
 
-"#,
-    );
+"#;
+    let path = if pyproject_dir == "." {
+        "./pyproject.toml".to_owned()
+    } else {
+        format!("./{pyproject_dir}/pyproject.toml")
+    };
+    workflow.push_str(&step.replace("./pyproject.toml", &path));
 }
 
 pub(crate) fn authenticated_git_fetch_steps() -> &'static str {

@@ -1491,6 +1491,7 @@ fn infer_expected_primary_ci_files(
             resolved.runtime,
             &runners.ci,
             &options,
+            &crate::python::maturin_pyproject_dir(workspace_root)?,
         )?);
     }
     if let Some(pages) = config_pages_or_inferred(workspace_root, &config, marked)? {
@@ -1790,6 +1791,7 @@ fn infer_expected_crow_files(
             &crow,
             &runners.release,
             &options,
+            &crate::python::maturin_pyproject_dir(workspace_root)?,
         )?);
     }
     push_prebuild_file(&mut files, &config, format)?;

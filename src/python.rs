@@ -1,6 +1,7 @@
 use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::process::Command;
 
 use anyhow::{Context, Result, bail};
 use camino::Utf8PathBuf;
@@ -168,4 +169,121 @@ pub fn load_project(root: &Path) -> Result<Project> {
 
 pub fn is_python_uv_project(root: &Path) -> bool {
     root.join("pyproject.toml").exists() && root.join("uv.lock").exists()
+}
+
+pub fn maturin_pyproject_dir(workspace_root: &Path) -> Result<String> {
+    if workspace_root.join("pyproject.toml").exists() {
+        return Ok(".".into());
+    }
+    let output = match Command::new("git")
+        .arg("-C")
+        .arg(workspace_root)
+        .args(["ls-files", "-z", "--", ":(glob)**/pyproject.toml"])
+        .output()
+    {
+        Ok(output) if output.status.success() => output,
+        _ => return Ok(".".into()),
+    };
+    #[derive(Deserialize)]
+    struct BuildSystem {
+        #[serde(rename = "build-backend")]
+        build_backend: Option<String>,
+    }
+    #[derive(Deserialize)]
+    struct Manifest {
+        #[serde(rename = "build-system")]
+        build_system: Option<BuildSystem>,
+    }
+    let mut dirs = Vec::new();
+    for name in output
+        .stdout
+        .split(|byte| *byte == 0)
+        .filter(|s| !s.is_empty())
+    {
+        let name = std::str::from_utf8(name).context("pyproject path is not UTF-8")?;
+        let path = workspace_root.join(name);
+        let content =
+            fs::read_to_string(&path).with_context(|| format!("reading {}", path.display()))?;
+        let manifest: Manifest = toml_edit::de::from_str(&content)
+            .with_context(|| format!("parsing {}", path.display()))?;
+        if manifest
+            .build_system
+            .and_then(|s| s.build_backend)
+            .as_deref()
+            == Some("maturin")
+        {
+            let dir = name
+                .strip_suffix("/pyproject.toml")
+                .context("invalid pyproject path")?;
+            if !dir
+                .bytes()
+                .all(|c| c.is_ascii_alphanumeric() || b"._/-".contains(&c))
+            {
+                bail!("unsupported maturin pyproject directory: {dir}");
+            }
+            dirs.push(dir.to_owned());
+        }
+    }
+    match dirs.len() {
+        0 => Ok(".".into()),
+        1 => Ok(dirs.remove(0)),
+        _ => bail!(
+            "multiple maturin pyproject directories: {}",
+            dirs.join(", ")
+        ),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn python_finds_nested_maturin_pyproject() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path();
+        assert!(
+            std::process::Command::new("git")
+                .args(["init", "-q"])
+                .current_dir(root)
+                .status()
+                .unwrap()
+                .success()
+        );
+        std::fs::create_dir_all(root.join("packages/demo")).unwrap();
+        std::fs::write(
+            root.join("packages/demo/pyproject.toml"),
+            "[build-system]\nbuild-backend = 'maturin'\n",
+        )
+        .unwrap();
+        assert!(
+            std::process::Command::new("git")
+                .args(["add", "packages/demo/pyproject.toml"])
+                .current_dir(root)
+                .status()
+                .unwrap()
+                .success()
+        );
+        assert_eq!(super::maturin_pyproject_dir(root).unwrap(), "packages/demo");
+        std::fs::create_dir_all(root.join("other")).unwrap();
+        std::fs::write(
+            root.join("other/pyproject.toml"),
+            "[build-system]\nbuild-backend = 'maturin'\n",
+        )
+        .unwrap();
+        assert!(
+            std::process::Command::new("git")
+                .args(["add", "other/pyproject.toml"])
+                .current_dir(root)
+                .status()
+                .unwrap()
+                .success()
+        );
+        assert!(
+            super::maturin_pyproject_dir(root)
+                .unwrap_err()
+                .to_string()
+                .contains("packages/demo")
+        );
+        std::fs::write(root.join("pyproject.toml"), "").unwrap();
+        assert_eq!(super::maturin_pyproject_dir(root).unwrap(), ".");
+    }
 }
