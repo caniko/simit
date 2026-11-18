@@ -522,10 +522,24 @@ fn push_workflow(path: &str, file: &Value, branch: Option<&str>) -> Result<bool>
             .and_then(serde_yaml::Value::as_mapping)
             .context("missing workflow jobs")?;
         ensure!(!jobs.is_empty(), "empty workflow job inventory");
-        let condition = crate::render::ci::docs_gate_condition();
         let mut gated = false;
         for job in jobs.values() {
             if let Some(source) = job.get("if") {
+                let needs = job
+                    .get("needs")
+                    .and_then(serde_yaml::Value::as_sequence)
+                    .context(
+                        "conditional jobs or steps require an adapter with job-outcome admission",
+                    )?;
+                ensure!(
+                    needs.first().and_then(serde_yaml::Value::as_str) == Some("changes"),
+                    "conditional job must first need changes"
+                );
+                let extras = needs[1..]
+                    .iter()
+                    .map(|need| need.as_str().context("invalid conditional job need"))
+                    .collect::<Result<Vec<_>>>()?;
+                let condition = crate::render::ci::docs_gate_condition(&extras);
                 ensure!(
                     source.as_str() == Some(condition.as_str()),
                     "conditional jobs or steps require an adapter with job-outcome admission"

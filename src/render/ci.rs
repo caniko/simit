@@ -4948,8 +4948,14 @@ pub(crate) fn docs_gate_output() -> String {
 
 /// Condition carried by every job that must not run for a docs-only change.
 /// `projects_update` proves this exact literal before pushing a candidate.
-pub(crate) fn docs_gate_condition() -> String {
-    format!("${{{{ needs.{DOCS_GATE_JOB}.outputs.code == 'true' }}}}")
+pub(crate) fn docs_gate_condition(needs: &[&str]) -> String {
+    let mut condition =
+        format!("${{{{ !cancelled() && needs.{DOCS_GATE_JOB}.outputs.code != 'false'");
+    for need in needs {
+        condition.push_str(&format!(" && needs.{need}.result == 'success'"));
+    }
+    condition.push_str(" }}");
+    condition
 }
 
 /// Emit the cheap gate job. It runs no Nix and adds its own read-only scope.
@@ -5011,7 +5017,7 @@ fn push_docs_gate_keys(workflow: &mut String, platform: Platform, needs: &[&str]
         workflow.push_str(need);
     }
     workflow.push_str("]\n    if: ");
-    workflow.push_str(&docs_gate_condition());
+    workflow.push_str(&docs_gate_condition(needs));
     workflow.push('\n');
 }
 
@@ -5064,7 +5070,7 @@ fn docs_gate_script(indent: &str) -> String {
         "  esac",
         "fi",
         "# A missing or unreachable base, or an empty diff, has nothing to classify.",
-        "if [ -n \"$base\" ] && git cat-file -e \"$base^{commit}\" 2>/dev/null && changed=$(git diff --name-only \"$base\" HEAD --) && [ -n \"$changed\" ]; then",
+        "if [ -n \"$base\" ] && git cat-file -e \"$base^{commit}\" 2>/dev/null && changed=$(git diff --no-renames --name-only \"$base\" HEAD --) && [ -n \"$changed\" ]; then",
         "  code=false",
         "  while IFS= read -r path; do",
         "    classify \"$path\" || { code=true; break; }",
@@ -6545,6 +6551,55 @@ fn publish_crate_steps(
 #[cfg(test)]
 mod docs_gate_tests {
     use std::process::Command;
+
+    #[test]
+    fn condition_requires_extra_needs_to_succeed() {
+        assert_eq!(
+            super::docs_gate_condition(&["build"]),
+            "${{ !cancelled() && needs.changes.outputs.code != 'false' && needs.build.result == 'success' }}"
+        );
+    }
+
+    #[test]
+    fn rename_from_code_to_docs_runs_ci() {
+        let dir = tempfile::tempdir().unwrap();
+        let git = |args: &[&str]| {
+            let output = Command::new("git")
+                .args(args)
+                .current_dir(dir.path())
+                .env("GIT_CONFIG_GLOBAL", "/dev/null")
+                .env("GIT_CONFIG_NOSYSTEM", "1")
+                .env("GIT_AUTHOR_NAME", "fixture")
+                .env("GIT_AUTHOR_EMAIL", "fixture@example.invalid")
+                .env("GIT_COMMITTER_NAME", "fixture")
+                .env("GIT_COMMITTER_EMAIL", "fixture@example.invalid")
+                .output()
+                .unwrap();
+            assert!(output.status.success(), "git {args:?}: {output:?}");
+            String::from_utf8(output.stdout).unwrap().trim().to_owned()
+        };
+        git(&["init", "-q", "--template="]);
+        std::fs::create_dir(dir.path().join("src")).unwrap();
+        std::fs::write(dir.path().join("src/lib.rs"), "fn example() {}\n").unwrap();
+        git(&["add", "src/lib.rs"]);
+        git(&["commit", "-qm", "code"]);
+        let base = git(&["rev-parse", "HEAD"]);
+        git(&["mv", "src/lib.rs", "NOTES.md"]);
+        git(&["commit", "-qm", "rename"]);
+        let out = dir.path().join("out");
+        let status = Command::new("bash")
+            .arg("-c")
+            .arg(super::docs_gate_source())
+            .current_dir(dir.path())
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .env("EVENT_NAME", "pull_request")
+            .env("PR_BASE", base)
+            .env("GITHUB_OUTPUT", &out)
+            .status()
+            .unwrap();
+        assert!(status.success());
+        assert_eq!(std::fs::read_to_string(out).unwrap().trim(), "code=true");
+    }
 
     /// The generated shell classifier and the Rust matcher used by monorepo
     /// planning must agree; one definition cannot drift from the other.

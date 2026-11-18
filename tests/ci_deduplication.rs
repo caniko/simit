@@ -329,7 +329,7 @@ fn ordinary_github_jobs_admit_prs_and_default_branch_pushes_without_cross_event_
                 continue;
             }
             assert_eq!(
-                job["if"], "${{ needs.changes.outputs.code == 'true' }}",
+                job["if"], "${{ !cancelled() && needs.changes.outputs.code != 'false' }}",
                 "{path}"
             );
             assert_eq!(job["needs"], serde_yaml::to_value(["changes"]).unwrap());
@@ -372,7 +372,7 @@ fn explicitly_separate_github_events_keep_both_producers() {
     // both producers inside the same workflow.
     assert_eq!(
         yaml["jobs"]["test"]["if"],
-        "${{ needs.changes.outputs.code == 'true' }}"
+        "${{ !cancelled() && needs.changes.outputs.code != 'false' }}"
     );
     assert!(yaml["jobs"]["changes"]["if"].is_null());
     generate(temp.path(), true);
@@ -835,10 +835,16 @@ fn github_ci_gates_every_job_on_a_cheap_root_docs_classification() {
         if id.as_str() == Some("changes") {
             continue;
         }
-        assert_eq!(
-            job["if"], "${{ needs.changes.outputs.code == 'true' }}",
-            "{id:?}"
-        );
+        let needs = job["needs"].as_sequence().unwrap();
+        let mut condition = "${{ !cancelled() && needs.changes.outputs.code != 'false'".to_owned();
+        for need in &needs[1..] {
+            condition.push_str(&format!(
+                " && needs.{}.result == 'success'",
+                need.as_str().unwrap()
+            ));
+        }
+        condition.push_str(" }}");
+        assert_eq!(job["if"], condition, "{id:?}");
         assert!(
             job["needs"]
                 .as_sequence()
