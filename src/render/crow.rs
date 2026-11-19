@@ -24,6 +24,11 @@ use crate::user_config::{ResolvedCiRunners, ResolvedRunner};
 use super::ci;
 
 const DEFAULT_CROW_NIX_IMAGE: &str = "ghcr.io/cachix/devenv:latest";
+const CARGO_AUDIT_VERSION: &str = "0.23.0";
+const CARGO_AUDIT_X86_64_SHA256: &str =
+    "4f01c74ed84b2dffd0b1d37012a62cdf2a92c96e25bdf8eec7fcc0d4d3eb7811";
+const CARGO_AUDIT_AARCH64_SHA256: &str =
+    "00eff3158429b9629abe8748e971f29f99ee53d4cff54a25072cbb15167bdda8";
 
 pub struct FilesRequest<'a> {
     pub format: CrowWorkflowFormat,
@@ -369,10 +374,29 @@ fn build_workflow(
             ));
         }
         if options.repository_checks && options.with_audit {
+            let tools = if runtime == Runtime::Nix {
+                "nix shell --extra-experimental-features 'nix-command flakes' nixpkgs#git nixpkgs#cargo-audit nixpkgs#cargo -c "
+            } else {
+                ""
+            };
+            let install = if runtime == Runtime::Cargo {
+                format!(
+                    "case $$(uname -m) in x86_64) target=x86_64-unknown-linux-musl; sha256={CARGO_AUDIT_X86_64_SHA256} ;; aarch64) target=aarch64-unknown-linux-gnu; sha256={CARGO_AUDIT_AARCH64_SHA256} ;; *) echo 'unsupported cargo-audit architecture' >&2; exit 1 ;; esac && curl -fL -o \"$$tmp/audit.tgz\" \"https://github.com/rustsec/rustsec/releases/download/cargo-audit/v{CARGO_AUDIT_VERSION}/cargo-audit-$$target-v{CARGO_AUDIT_VERSION}.tgz\" && printf '%s  %s\\n' \"$$sha256\" \"$$tmp/audit.tgz\" | sha256sum -c && tar -xzf \"$$tmp/audit.tgz\" -C \"$$tmp\" --strip-components=1 && "
+                )
+            } else {
+                String::new()
+            };
+            let audit = if runtime == Runtime::Cargo {
+                "\"$$tmp/cargo-audit\""
+            } else {
+                "cargo-audit"
+            };
             steps.push(step(
                 "cargo-audit",
                 image,
-                format!("{prefix}cargo audit --no-fetch --stale"),
+                format!(
+                    "tmp=$$(mktemp -d) && trap 'rm -rf \"$$tmp\"' EXIT && {install}{tools}git -c http.lowSpeedLimit=1024 -c http.lowSpeedTime=30 clone --depth 1 https://github.com/RustSec/advisory-db.git \"$$tmp/advisory-db\" && {tools}{audit} audit --db \"$$tmp/advisory-db\" --no-fetch"
+                ),
             ));
         }
         if options.repository_checks && options.with_deny {
