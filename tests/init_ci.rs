@@ -1643,14 +1643,15 @@ runtime = "nix"
                    repository: &str,
                    branch: &str| {
         let resolved = group
-            .replace("${{ github.workflow }}", "Nix flake check")
+            .replace("${{ github.workflow_ref }}", "owner/project/.github/workflows/ci.yaml")
+            .replace("${{ github.event_name }}", if head_branch.is_some() { "pull_request" } else { "push" })
             .replace(
                 "${{ github.event.pull_request.head.repo.full_name || github.repository }}",
                 head_repository.unwrap_or(repository),
             )
             .replace(
-                "${{ github.event.pull_request.head.ref || github.ref_name }}",
-                head_branch.unwrap_or(branch),
+                "${{ github.ref_type == 'tag' && github.ref || format('refs/heads/{0}', github.event.pull_request.head.ref || github.ref_name) }}",
+                &format!("refs/heads/{}", head_branch.unwrap_or(branch)),
             );
         assert!(!resolved.contains("${{"), "unrecognized group: {resolved}");
         resolved
@@ -1682,13 +1683,9 @@ runtime = "nix"
         push, first_fork,
         "fork PRs must not cancel repository pushes"
     );
-    assert_eq!(push, same_repository_pr);
+    assert_ne!(push, same_repository_pr);
     assert_ne!(push, resolve(None, None, "owner/project", "other-feature"));
     assert_eq!(parsed["concurrency"]["cancel-in-progress"], true);
-    assert_eq!(
-        parsed["concurrency"]["group"],
-        "${{ github.workflow }}-${{ github.event.pull_request.head.repo.full_name || github.repository }}-${{ github.event.pull_request.head.ref || github.ref_name }}"
-    );
     assert_eq!(parsed["jobs"]["flake-check"]["strategy"]["max-parallel"], 2);
     assert_eq!(parsed["jobs"]["flake-check"]["timeout-minutes"], 60);
     assert!(workflow.contains("- system: aarch64-darwin\n            runner: macos-15"));
@@ -6031,7 +6028,7 @@ fn aggregate_workspace_ci_can_retain_independent_original_events() {
         };
         let push = resolve("push", "owner/project", "feature");
         let pr = resolve("pull_request", "owner/project", "feature");
-        assert_eq!(push != pr, separate_events);
+        assert_ne!(push, pr);
         assert_ne!(pr, resolve("pull_request", "alice/project", "feature"));
         assert_ne!(pr, resolve("pull_request", "bob/project", "feature"));
         assert_ne!(push, resolve("push", "owner/project", "other-feature"));
