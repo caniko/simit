@@ -67,6 +67,42 @@ fn plan(root: &Path) -> simit::project::CiUpdatePlan {
 }
 
 #[test]
+fn fleetix_matrix_admits_a_lockfile_diff_after_regeneration() {
+    use simit::commands::projects_update::admit_candidate_source;
+
+    let temp = project(
+        false,
+        &format!(
+            "[ci]\n{NIX}nix_builds = [\".#packages.x86_64-linux.fleetixCrate\", \".#checks.x86_64-linux.build-train-module\"]\n[ci.nix_build]\npush_branches = [\"trunk\"]\ncapture_results = true\nkvm = true\n"
+        ),
+    );
+    let mut candidate = plan(temp.path());
+    let admit = |plan: &simit::project::CiUpdatePlan| {
+        admit_candidate_source(
+            plan,
+            "simit/update/0123456789abcdef",
+            &["build (.#checks.x86_64-linux.build-train-module)"],
+            &["flake.lock"],
+        )
+    };
+    admit(&candidate).unwrap();
+
+    let workflow = candidate
+        .files
+        .iter_mut()
+        .find(|file| file.relative_path == Path::new(".github/workflows/nix-builds.yaml"))
+        .unwrap();
+    let legacy = workflow.content.replace(
+        "${{ !cancelled() && needs.changes.outputs.code != 'false' }}",
+        "${{ needs.changes.outputs.code == 'true' }}",
+    );
+    assert_ne!(legacy, workflow.content);
+    workflow.content = legacy;
+    let error = admit(&candidate).unwrap_err();
+    assert!(error.to_string().contains("regenerate"), "{error:#}");
+}
+
+#[test]
 fn every_generated_workflow_shape_passes_updater_source_admission() {
     let ci = |options: &str| format!("[ci]\n{NIX}{options}");
     let trunk = "push_branches = [\"trunk\"]\n";

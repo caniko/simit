@@ -5008,6 +5008,15 @@ fn push_docs_gate_job(
 /// Bind the classifier to the job we emit, including the pinned checkout of
 /// the event ref. Only the display name varies by workspace member.
 pub(crate) fn is_generated_docs_gate(workflow: &serde_yaml::Value) -> bool {
+    // Inherited settings could change how the otherwise identical script runs.
+    if workflow.get("env").is_some()
+        || workflow
+            .get("defaults")
+            .and_then(|defaults| defaults.get("run"))
+            .is_some()
+    {
+        return false;
+    }
     let Some(mut job) = workflow
         .get("jobs")
         .and_then(|jobs| jobs.get(DOCS_GATE_JOB))
@@ -5074,7 +5083,7 @@ fn docs_gate_classifier_lines() -> Vec<String> {
         lines.push(format!("    {path}) return 1 ;;"));
     }
     lines.push(format!(
-        "    *.{}) return 0 ;;",
+        "    ?*.{}) return 0 ;;",
         crate::docs_only::DOCS_ONLY_EXTENSION
     ));
     lines.push("    *) return 1 ;;".into());
@@ -6587,6 +6596,23 @@ mod docs_gate_tests {
     use std::process::Command;
 
     #[test]
+    fn classifier_proof_refuses_workflow_run_settings() {
+        let mut source = String::from("jobs:\n");
+        super::push_docs_gate_job(&mut source, crate::cli::Platform::Github, "v7.0.1", None);
+        let generated = |settings| serde_yaml::from_str(&format!("{settings}{source}")).unwrap();
+        assert!(super::is_generated_docs_gate(&generated("")));
+        for settings in [
+            "env:\n  EXTRA: value\n",
+            "defaults:\n  run:\n    working-directory: src\n",
+        ] {
+            assert!(
+                !super::is_generated_docs_gate(&generated(settings)),
+                "{settings}"
+            );
+        }
+    }
+
+    #[test]
     fn condition_requires_extra_needs_to_succeed() {
         assert_eq!(
             super::docs_gate_condition(&["build"]),
@@ -6651,6 +6677,7 @@ mod docs_gate_tests {
             "crates/demo/README.md",
             "src/main.rs",
             "LICENSE",
+            ".md",
             "",
         ];
         let output = Command::new("bash")

@@ -369,8 +369,8 @@ fn job_names(id: &serde_yaml::Value, job: &serde_yaml::Value) -> Result<BTreeSet
             .map(|value| {
                 let value = value
                     .as_str()
-                    .filter(|value| value.starts_with(".#") && !value.contains("${{"))
-                    .context("Nix build matrix needs literal flake installables")?;
+                    .filter(|value| !value.is_empty() && !value.contains("${{"))
+                    .context("Nix build matrix needs nonempty literal installables")?;
                 Ok(format!("{name} ({value})"))
             })
             .collect::<Result<BTreeSet<_>>>()?;
@@ -516,7 +516,7 @@ fn push_workflow(path: &str, file: &Value, branch: Option<&str>) -> Result<bool>
                 let condition = crate::render::ci::docs_gate_condition(&extras);
                 ensure!(
                     source.as_str() == Some(condition.as_str()),
-                    "conditional jobs or steps require an adapter with job-outcome admission"
+                    "unsupported docs-only job condition in {path}; regenerate the workflow with this simit release"
                 );
                 gated = true;
             }
@@ -2347,6 +2347,26 @@ mod tests {
                 push_workflow(path, &changed, Some("maintenance/candidate")).is_err(),
                 "{from} -> {to}"
             );
+        }
+    }
+
+    #[test]
+    fn installable_matrix_job_names_need_nonempty_literals() {
+        for (value, admitted) in [
+            ("nixpkgs#hello", true),
+            ("", false),
+            ("${{ inputs.target }}", false),
+        ] {
+            let yaml: serde_yaml::Value = serde_yaml::from_str(&format!(
+                "strategy:\n  matrix:\n    installable: ['{value}']\n"
+            ))
+            .unwrap();
+            let names = job_names(&serde_yaml::Value::String("build".into()), &yaml);
+            if admitted {
+                assert_eq!(names.unwrap(), BTreeSet::from([format!("build ({value})")]));
+            } else {
+                assert!(names.is_err(), "{value}");
+            }
         }
     }
 
