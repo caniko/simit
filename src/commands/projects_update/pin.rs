@@ -55,8 +55,22 @@ pub(super) fn generator_input(checkout: &Path, generator: &Generator) -> Result<
         Err(error) => return Err(error.into()),
     }
     let source = fs::read_to_string(path)?;
+    // A `flake = false` input only vendors source; it never runs the generator.
+    let lock_path = checkout.join("flake.lock");
+    let lock: Option<Value> = lock_path
+        .is_file()
+        .then(|| crate::review::read_json(&lock_path))
+        .transpose()?;
+    let source_only = |name: &str| {
+        lock.as_ref().is_some_and(|lock| {
+            let node = &lock["nodes"]["root"]["inputs"][name];
+            node.as_str()
+                .is_some_and(|node| lock["nodes"][node]["flake"] == Value::Bool(false))
+        })
+    };
     let inputs = declarations(&source)
         .into_iter()
+        .filter(|(name, ..)| !source_only(name))
         .filter_map(|(name, url, _, _)| {
             let coordinate = if let Some(repo) = url.strip_prefix("github:") {
                 let mut parts = repo.split(['/', '?', '#']);
@@ -588,6 +602,30 @@ mod tests {
             rewrites(&source, &input).unwrap(),
             source.replace(&old, TARGET)
         );
+    }
+
+    #[test]
+    fn ignores_source_only_generator_inputs() {
+        let root = tempfile::tempdir().unwrap();
+        let generator = Generator {
+            executable: "/generator".into(),
+            source_revision: TARGET.into(),
+            source_coordinate: "github.com/caniko/simit".into(),
+            forge: "github".into(),
+            executable_sha256: None,
+            required_checks: vec![],
+        };
+        fs::write(
+            root.path().join("flake.nix"),
+            r#"{ inputs.templates = { url = "github:caniko/simit"; flake = false; }; }"#,
+        )
+        .unwrap();
+        fs::write(
+            root.path().join("flake.lock"),
+            json!({"nodes": {"root": {"inputs": {"templates": "templates"}}, "templates": {"flake": false}}, "root": "root", "version": 7}).to_string(),
+        )
+        .unwrap();
+        assert_eq!(generator_input(root.path(), &generator).unwrap(), None);
     }
 
     #[test]
