@@ -238,7 +238,10 @@ impl CiInference {
                 && all_content.contains("name: Project checks"))
             .then(|| all_content.contains("nix flake check")),
             with_msrv: Some(all_content.contains("      - name: Check MSRV\n")),
-            with_audit: Some(all_content.contains("cargo audit")),
+            // GitHub runs `cargo audit`; Crow calls the binary in a `cargo-audit` step.
+            with_audit: Some(
+                all_content.contains("cargo audit") || all_content.contains("name: cargo-audit"),
+            ),
             with_deny: Some(all_content.contains("cargo deny check")),
             with_docs: Some(all_content.contains("cargo doc --no-deps --all-features")),
             with_artifacts: Some(marked.iter().any(|workflow| {

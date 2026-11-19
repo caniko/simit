@@ -2845,6 +2845,18 @@ fn crow_audit_provisions_database_in_its_own_step() {
             "{}",
             String::from_utf8_lossy(&output.stderr)
         );
+        // Regeneration without the explicit setting must still infer the audit gate.
+        fs::write(root.join("simit.toml"), format!("[ci]\nprovider = 'crow'\nplatform = 'forgejo'\nrunner = 'codefloe-global'\nruntime = '{runtime}'\n")).unwrap();
+        let check = simit()
+            .current_dir(root)
+            .args(["init", "ci", "--check"])
+            .output()
+            .unwrap();
+        assert!(
+            check.status.success(),
+            "{}",
+            String::from_utf8_lossy(&check.stderr)
+        );
         let workflow = fs::read_to_string(root.join(".crow/build.yaml")).unwrap();
         let yaml: serde_yaml::Value = serde_yaml::from_str(&workflow).unwrap();
         let audit = yaml["steps"]
@@ -2881,6 +2893,8 @@ fn crow_audit_provisions_database_in_its_own_step() {
                 "tar",
                 "#!/bin/sh\n[ \"$1\" = -xzf ] && [ \"$3\" = -C ] && [ \"$5\" = --strip-components=1 ] || exit 49\ncp \"$FIXTURE_AUDIT\" \"$4/cargo-audit\"\n",
             ),
+            // The step picks its download by `uname -m`; pin a supported Linux arch.
+            ("uname", "#!/bin/sh\necho x86_64\n"),
             (
                 "nix",
                 "#!/bin/sh\n[ \"$1 $2 $3 $4 $5 $6\" = 'shell --extra-experimental-features nix-command flakes nixpkgs#git nixpkgs#cargo-audit -c' ] || exit 45\nshift 6\nPATH=\"$NIX_BIN:$PATH\"\nexport PATH\nexec \"$@\"\n",
