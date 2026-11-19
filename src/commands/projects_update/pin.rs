@@ -56,7 +56,6 @@ pub(super) fn generator_input(checkout: &Path, generator: &Generator) -> Result<
         Err(error) => return Err(error.into()),
     }
     let source = fs::read_to_string(path)?;
-    let inputs = root_inputs(&source).map_err(anyhow::Error::msg)?;
     let lock_path = checkout.join("flake.lock");
     let lock: Value = match fs::symlink_metadata(&lock_path) {
         Ok(metadata) if metadata.is_file() => crate::review::read_json(&lock_path)?,
@@ -66,6 +65,25 @@ pub(super) fn generator_input(checkout: &Path, generator: &Generator) -> Result<
     };
     let matches =
         |coordinate: Option<String>| coordinate.as_ref() == Some(&generator.source_coordinate);
+    let inputs = match root_inputs(&source) {
+        Ok(inputs) => inputs,
+        // An unclassifiable flake only matters when it pins the generator:
+        // then skip this repository instead of failing the whole rollout.
+        Err(reason) => {
+            let pins_generator = lock_inputs(&lock)
+                .into_iter()
+                .flat_map(|inputs| inputs.keys())
+                .any(|name| {
+                    root_node(&lock, name)
+                        .is_some_and(|node| matches(original_coordinate(&node["original"])))
+                });
+            return if pins_generator {
+                Err(skip(reason))
+            } else {
+                Ok(None)
+            };
+        }
+    };
     let mut chosen = None;
     let names: BTreeSet<_> = inputs
         .keys()
@@ -191,12 +209,13 @@ fn verify_generator_move(before: &Value, after: &Value, input: &str) -> Result<(
     if previous["locked"]["rev"] != next["locked"]["rev"] {
         let timestamp = |node: &Value| node["locked"]["lastModified"].as_u64();
         // The consumer checkout has no generator Git history to prove ancestry.
-        ensure!(
-            timestamp(previous)
-                .zip(timestamp(next))
-                .is_some_and(|(old, new)| new >= old),
-            "refusing to move generator input {input} backwards or without comparable lock timestamps"
-        );
+        // A consumer pinned ahead of the fleet generator is skipped, not failed.
+        if !timestamp(previous)
+            .zip(timestamp(next))
+            .is_some_and(|(old, new)| new >= old)
+        {
+            return Err(skip("generator-pin-ahead"));
+        }
     }
     Ok(())
 }
@@ -741,6 +760,20 @@ mod tests {
     }
 
     #[test]
+    fn unclassifiable_flakes_skip_only_when_they_pin_the_generator() {
+        let root = tempfile::tempdir().unwrap();
+        fs::write(
+            root.path().join("flake.nix"),
+            r#"rec { inputs.simit.url = "github:caniko/simit"; }"#,
+        )
+        .unwrap();
+        assert_eq!(generator_input(root.path(), &generator()).unwrap(), None);
+        write_lock(root.path(), "simit", json!({"original": github_original()}));
+        let error = generator_input(root.path(), &generator()).unwrap_err();
+        assert!(error.downcast_ref::<PinSkip>().is_some(), "{error:#}");
+    }
+
+    #[test]
     fn generator_moves_require_nondecreasing_lock_timestamps() {
         let lock = |rev: &str, timestamp: Value| {
             json!({"root":"root", "nodes": {
@@ -749,7 +782,11 @@ mod tests {
         };
         let old = lock(&"a".repeat(40), json!(20));
         for timestamp in [json!(19), Value::Null] {
-            assert!(verify_generator_move(&old, &lock(TARGET, timestamp), "simit").is_err());
+            let error = verify_generator_move(&old, &lock(TARGET, timestamp), "simit").unwrap_err();
+            assert_eq!(
+                error.downcast_ref::<PinSkip>().map(PinSkip::reason),
+                Some("generator-pin-ahead")
+            );
         }
         for timestamp in [20, 21] {
             verify_generator_move(&old, &lock(TARGET, json!(timestamp)), "simit").unwrap();

@@ -55,7 +55,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   it also publishes what the runner built (crane deps, toolchains), not only
   runtime closures. Older apps ignore it.
 - Fixed: fleet candidates verify and align self-pinned consumers' root
-  generator input without downgrading it, then apply any separate pin before
+  generator input (refusing revision changes with older or missing lock timestamps), then apply any separate pin before
   rendering. Implicit CI and release scopes only refresh or remove existing
   generated files and cannot add paths or persist policy.
 - Added: `[release.artifacts].platforms` expands `["linux", "macos", "windows"]`
