@@ -747,6 +747,28 @@ resumes that rollout nor reuses its pending candidate, which fails against the
 pin-scoped policy digest. `runtimePackages` therefore needs `nix` when a
 profile accepts pin work items.
 
+## RustSec lockfile repairs
+
+The candidate generator cannot fetch the RustSec database or a registry index:
+it has no network, starts with an empty private home and sees the checkout
+read-only. Adding `cargo` and `cargo-audit` to `runtimePackages` does not change
+that. An offline audit could consume an explicitly provisioned database
+snapshot, but an offline `cargo update` could still miss patched releases that
+are absent from the local registry index.
+
+For now, repair these in a separate lockfile-only PR: use the project's normal
+Rust toolchain to run `cargo update -p NAME@OLD_VERSION --precise FIXED_VERSION`,
+review the `Cargo.lock` diff, and rerun `cargo audit` and the project's locked
+CI. If there is no compatible patched release, leave the repair to a maintainer;
+don't suppress the advisory to qualify a fleet candidate.
+
+An opt-in updater would need a separate, credential-free resolver that
+consumes a pinned advisory database and approved registry metadata and writes
+only to a disposable copy. It should propose a `Cargo.lock` patch only after
+checking that the replacement is compatible, the diff is in scope, and a
+second audit no longer reports the advisory. The exact-candidate CI gate still
+applies. Do not grant network access to the generator to implement this.
+
 ## Scopes
 
 `scopes` lists the generated-file consumptions a profile maintains. It must
