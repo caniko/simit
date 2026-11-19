@@ -34,6 +34,8 @@ pub const INSTALL_NIX_ACTION_URL: &str = "https://github.com/cachix/install-nix-
 /// (NixOS/nix fba3f6e); v31's 2.35.1 can abort `Worker::run` during
 /// qualification, which broke `harbor-ci full` on release jobs.
 pub const INSTALL_NIX_ACTION_VERSION: &str = "v31.11.1";
+const CHECKOUT_VERSION: &str = "v7.0.1";
+const CHECKOUT_COMPAT_VERSION: &str = "v4.3.1";
 pub const SIMIT_SOURCE_URL: &str = "https://simit.rs";
 pub const SIMIT_RELEASE_BUILD_TYPE: &str = "https://simit.rs/release";
 pub const SIMIT_RELEASE_ARTIFACTS_BUILD_TYPE: &str = "https://simit.rs/release-artifacts";
@@ -1095,7 +1097,8 @@ pub(crate) fn nix_flake_ci_file_with_events(
     if system_runners.is_empty() {
         push_checkout_step(&mut workflow, platform, runner);
     } else {
-        let version = github_matrix_action_version(system_runners, "v7.0.1", "v4.3.1");
+        let version =
+            github_matrix_action_version(system_runners, CHECKOUT_VERSION, CHECKOUT_COMPAT_VERSION);
         push_checkout_step_with_version(&mut workflow, platform, version);
     }
     push_install_nix_step_with_cache(
@@ -1141,9 +1144,9 @@ pub(crate) fn nix_flake_ci_file_with_events(
         &mut workflow,
         platform,
         if system_runners.is_empty() {
-            github_action_version(Some(runner), "v7.0.1", "v4.3.1")
+            github_action_version(Some(runner), CHECKOUT_VERSION, CHECKOUT_COMPAT_VERSION)
         } else {
-            github_matrix_action_version(system_runners, "v7.0.1", "v4.3.1")
+            github_matrix_action_version(system_runners, CHECKOUT_VERSION, CHECKOUT_COMPAT_VERSION)
         },
         None,
     );
@@ -1256,7 +1259,8 @@ pub fn github_prebuild_file_with_policy(
         workflow.push('\n');
     }
     workflow.push_str("    runs-on: ${{ matrix.runner }}\n    timeout-minutes: 180\n    steps:\n");
-    let checkout_version = github_matrix_action_version(system_runners, "v7.0.1", "v4.3.1");
+    let checkout_version =
+        github_matrix_action_version(system_runners, CHECKOUT_VERSION, CHECKOUT_COMPAT_VERSION);
     let artifact_version = github_matrix_action_version(system_runners, "v7.0.2", "v4.6.2");
     push_event_checkout_step_with_version(&mut workflow, Platform::Github, checkout_version);
     push_install_nix_step_with_netrc(
@@ -1364,7 +1368,7 @@ pub fn github_prebuild_file_with_policy(
     push_docs_gate_job(
         &mut workflow,
         Platform::Github,
-        github_matrix_action_version(system_runners, "v7.0.1", "v4.3.1"),
+        github_matrix_action_version(system_runners, CHECKOUT_VERSION, CHECKOUT_COMPAT_VERSION),
         None,
     );
     Ok(GeneratedFile {
@@ -1521,7 +1525,8 @@ pub fn nix_build_matrix_file_with_options(
         workflow.push_str(&format!("      {key}: \"{}\"\n", yaml_double_quote(value)));
     }
     workflow.push_str("    steps:\n");
-    let checkout_version = nix_build_action_version(runner, options, "v7.0.1", "v4.3.1");
+    let checkout_version =
+        nix_build_action_version(runner, options, CHECKOUT_VERSION, CHECKOUT_COMPAT_VERSION);
     if options.capture_results {
         push_source_head_checkout_with_version(&mut workflow, checkout_version);
         workflow.push_str("      - name: Prepare Nix build evidence\n        env:\n          INSTALLABLE: ${{ matrix.installable }}\n        run: |\n          SIMIT_NIX_BUILD_RESULTS=\"$RUNNER_TEMP/simit-nix-build-${{ strategy.job-index }}\"\n          printf '%s\\n' \"SIMIT_NIX_BUILD_RESULTS=$SIMIT_NIX_BUILD_RESULTS\" >> \"$GITHUB_ENV\"\n          mkdir -p \"$SIMIT_NIX_BUILD_RESULTS\"\n          git rev-parse HEAD > \"$SIMIT_NIX_BUILD_RESULTS/revision\"\n          printf '%s\\n' \"$INSTALLABLE\" > \"$SIMIT_NIX_BUILD_RESULTS/installable\"\n");
@@ -1599,7 +1604,7 @@ pub fn nix_build_matrix_file_with_options(
     push_docs_gate_job(
         &mut workflow,
         platform,
-        nix_build_action_version(runner, options, "v7.0.1", "v4.3.1"),
+        nix_build_action_version(runner, options, CHECKOUT_VERSION, CHECKOUT_COMPAT_VERSION),
         None,
     );
     Ok(GeneratedFile {
@@ -2704,7 +2709,7 @@ fn python_ci_workflow(
     push_docs_gate_job(
         &mut workflow,
         platform,
-        github_action_version(Some(runner), "v7.0.1", "v4.3.1"),
+        github_action_version(Some(runner), CHECKOUT_VERSION, CHECKOUT_COMPAT_VERSION),
         None,
     );
     workflow
@@ -3025,7 +3030,7 @@ fn ci_workflow_single_job(
     push_docs_gate_job(
         &mut workflow,
         platform,
-        github_action_version(Some(&runners.ci), "v7.0.1", "v4.3.1"),
+        github_action_version(Some(&runners.ci), CHECKOUT_VERSION, CHECKOUT_COMPAT_VERSION),
         options.package_scoped.then_some(package.name.as_str()),
     );
     workflow
@@ -3335,7 +3340,7 @@ fn ci_workflow_multi_job(
     push_docs_gate_job(
         &mut workflow,
         platform,
-        github_action_version(Some(&runners.ci), "v7.0.1", "v4.3.1"),
+        github_action_version(Some(&runners.ci), CHECKOUT_VERSION, CHECKOUT_COMPAT_VERSION),
         options.package_scoped.then_some(package.name.as_str()),
     );
     workflow
@@ -3597,7 +3602,7 @@ pub fn target_smokes_file(
     push_docs_gate_job(
         &mut workflow,
         platform,
-        github_action_version(Some(ci_runner), "v7.0.1", "v4.3.1"),
+        github_action_version(Some(ci_runner), CHECKOUT_VERSION, CHECKOUT_COMPAT_VERSION),
         None,
     );
     Ok(GeneratedFile {
@@ -3709,7 +3714,7 @@ pub fn native_tests_file(
         workflow.push_str(&format!("        run: cargo test {}\n", test.args.trim()));
     }
     trim_trailing_blank_lines(&mut workflow);
-    push_docs_gate_job(&mut workflow, platform, "v7.0.1", None);
+    push_docs_gate_job(&mut workflow, platform, CHECKOUT_VERSION, None);
     Ok(GeneratedFile {
         relative_path: PathBuf::from(Platform::Github.workflow_dir()).join("native-tests.yaml"),
         content: workflow,
@@ -5026,18 +5031,20 @@ pub(crate) fn is_generated_docs_gate(workflow: &serde_yaml::Value) -> bool {
         return false;
     };
     job.remove(serde_yaml::Value::String("name".into()));
-    ["v7.0.1", "v4.3.1"].into_iter().any(|version| {
-        let mut source = String::from("jobs:\n");
-        push_docs_gate_job(&mut source, Platform::Github, version, None);
-        let rendered: serde_yaml::Value =
-            serde_yaml::from_str(&source).expect("rendered classifier YAML");
-        let mut expected = rendered["jobs"][DOCS_GATE_JOB]
-            .as_mapping()
-            .unwrap()
-            .clone();
-        expected.remove(serde_yaml::Value::String("name".into()));
-        job == expected
-    })
+    [CHECKOUT_VERSION, CHECKOUT_COMPAT_VERSION]
+        .into_iter()
+        .any(|version| {
+            let mut source = String::from("jobs:\n");
+            push_docs_gate_job(&mut source, Platform::Github, version, None);
+            let rendered: serde_yaml::Value =
+                serde_yaml::from_str(&source).expect("rendered classifier YAML");
+            let mut expected = rendered["jobs"][DOCS_GATE_JOB]
+                .as_mapping()
+                .unwrap()
+                .clone();
+            expected.remove(serde_yaml::Value::String("name".into()));
+            job == expected
+        })
 }
 
 /// The same path predicate used to emit the generated classifier's shell.
@@ -5243,12 +5250,12 @@ fn yaml_json_scalar(value: &str) -> String {
 }
 
 fn push_checkout_step(workflow: &mut String, platform: Platform, runner: &ResolvedRunner) {
-    let version = github_action_version(Some(runner), "v7.0.1", "v4.3.1");
+    let version = github_action_version(Some(runner), CHECKOUT_VERSION, CHECKOUT_COMPAT_VERSION);
     push_checkout_step_with_version(workflow, platform, version);
 }
 
 fn push_source_head_checkout(workflow: &mut String, runner: &ResolvedRunner) {
-    let version = github_action_version(Some(runner), "v7.0.1", "v4.3.1");
+    let version = github_action_version(Some(runner), CHECKOUT_VERSION, CHECKOUT_COMPAT_VERSION);
     push_source_head_checkout_with_version(workflow, version);
 }
 
@@ -5263,7 +5270,14 @@ fn push_independent_source_concurrency(workflow: &mut String) {
 
 fn push_checkout_step_with_version(workflow: &mut String, platform: Platform, version: &str) {
     workflow.push_str("      - name: Checkout\n");
-    push_action_uses(workflow, platform, None, "checkout", version, "v4.3.1");
+    push_action_uses(
+        workflow,
+        platform,
+        None,
+        "checkout",
+        version,
+        CHECKOUT_COMPAT_VERSION,
+    );
     workflow.push('\n');
 }
 
@@ -5272,13 +5286,20 @@ fn push_event_checkout_step(
     platform: Platform,
     runner: Option<&ResolvedRunner>,
 ) {
-    let version = github_action_version(runner, "v7.0.1", "v4.3.1");
+    let version = github_action_version(runner, CHECKOUT_VERSION, CHECKOUT_COMPAT_VERSION);
     push_event_checkout_step_with_version(workflow, platform, version);
 }
 
 fn push_event_checkout_step_with_version(workflow: &mut String, platform: Platform, version: &str) {
     workflow.push_str("      - name: Checkout\n");
-    push_action_uses(workflow, platform, None, "checkout", version, "v4.3.1");
+    push_action_uses(
+        workflow,
+        platform,
+        None,
+        "checkout",
+        version,
+        CHECKOUT_COMPAT_VERSION,
+    );
     // Tag validation binds its peeled commit to this immutable event identity.
     // Gates and every dependent publisher must use that same commit even if the
     // tag moves after validation; no downstream job resolves the tag again.
@@ -6598,7 +6619,12 @@ mod docs_gate_tests {
     #[test]
     fn classifier_proof_refuses_workflow_run_settings() {
         let mut source = String::from("jobs:\n");
-        super::push_docs_gate_job(&mut source, crate::cli::Platform::Github, "v7.0.1", None);
+        super::push_docs_gate_job(
+            &mut source,
+            crate::cli::Platform::Github,
+            super::CHECKOUT_VERSION,
+            None,
+        );
         let generated = |settings| serde_yaml::from_str(&format!("{settings}{source}")).unwrap();
         assert!(super::is_generated_docs_gate(&generated("")));
         for settings in [
