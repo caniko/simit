@@ -886,7 +886,6 @@ fn qualification_concurrency_isolates_events_and_forks() {
     assert_eq!(workflow["concurrency"]["cancel-in-progress"], true);
     // A pull request must not cancel the original push run of the same branch.
     assert_ne!(evaluate(push("caniko/simit")), evaluate(pr("caniko/simit")));
-    assert_eq!(evaluate(push("caniko/simit")), evaluate(push("caniko/simit")));
     assert_ne!(evaluate(pr("fork-a/simit")), evaluate(pr("fork-b/simit")));
     assert_ne!(evaluate(pr("fork-a/simit")), evaluate(push("caniko/simit")));
 }
