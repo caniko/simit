@@ -711,7 +711,7 @@ fn qualification_generation_is_complete_and_member_stable() {
     );
     assert_eq!(
         yaml["concurrency"]["group"],
-        "monorepo-${{ github.event.pull_request.head.repo.full_name || github.repository }}-${{ github.event.pull_request.head.ref || github.ref_name }}"
+        "monorepo-${{ github.event_name }}-${{ github.event.pull_request.head.repo.full_name || github.repository }}-${{ github.event.pull_request.head.ref || github.ref_name }}"
     );
     for id in [
         "plan",
@@ -844,7 +844,7 @@ fn component_release_plan_keeps_independent_versions_and_dependency_order() {
 }
 
 #[test]
-fn qualification_concurrency_coalesces_repository_events_but_isolates_forks() {
+fn qualification_concurrency_isolates_events_and_forks() {
     let temp = fixture();
     enroll_release_checks(temp.path());
     let output = common::simit()
@@ -881,12 +881,12 @@ fn qualification_concurrency_coalesces_repository_events_but_isolates_forks() {
         result.push_str(remaining);
         result
     };
-    let push =
-        |repo: &str| serde_json::json!({"github": {"repository": repo, "ref_name": "repair"}});
-    let pr = |repo: &str| serde_json::json!({"github": {"repository": "caniko/simit", "ref_name": "64/merge", "event": {"pull_request": {"head": {"ref": "repair", "repo": {"full_name": repo}}}}}});
+    let push = |repo: &str| serde_json::json!({"github": {"event_name": "push", "repository": repo, "ref_name": "repair"}});
+    let pr = |repo: &str| serde_json::json!({"github": {"event_name": "pull_request", "repository": "caniko/simit", "ref_name": "64/merge", "event": {"pull_request": {"head": {"ref": "repair", "repo": {"full_name": repo}}}}}});
     assert_eq!(workflow["concurrency"]["cancel-in-progress"], true);
-    assert_eq!(evaluate(push("caniko/simit")), evaluate(pr("caniko/simit")));
-    assert_eq!(evaluate(push("fork-a/simit")), evaluate(pr("fork-a/simit")));
+    // A pull request must not cancel the original push run of the same branch.
+    assert_ne!(evaluate(push("caniko/simit")), evaluate(pr("caniko/simit")));
+    assert_eq!(evaluate(push("caniko/simit")), evaluate(push("caniko/simit")));
     assert_ne!(evaluate(pr("fork-a/simit")), evaluate(pr("fork-b/simit")));
     assert_ne!(evaluate(pr("fork-a/simit")), evaluate(push("caniko/simit")));
 }

@@ -42,9 +42,7 @@ pub(super) fn render(
     push_required_secrets_header(&mut workflow, &options.required_secrets);
     workflow.push_str("name: Nix installable builds\n\non:\n  push:\n");
     push_ci_branches(&mut workflow, &options.push_branches);
-    // Like the installable matrix: a workflow that coalesces push and
-    // pull-request runs names its group by its own path and excludes tags,
-    // the form updater admission proves.
+    // Branch-only push triggers keep their existing tag exclusion.
     let explicitly_branch_only = !options.separate_events
         && options.push_branches.is_empty()
         && options.push_tags.is_empty();
