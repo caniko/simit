@@ -74,8 +74,9 @@ pub(super) fn generator_input(checkout: &Path, generator: &Generator) -> Result<
                 .into_iter()
                 .flat_map(|inputs| inputs.keys())
                 .any(|name| {
-                    root_node(&lock, name)
-                        .is_some_and(|node| matches(original_coordinate(&node["original"])))
+                    root_node(&lock, name).is_some_and(|node| {
+                        !ignored_lock_node(node) && matches(original_coordinate(&node["original"]))
+                    })
                 });
             return if pins_generator {
                 Err(skip(reason))
@@ -104,11 +105,7 @@ pub(super) fn generator_input(checkout: &Path, generator: &Generator) -> Result<
             .map(|(url, _)| url.as_str());
         if declared.is_some_and(|input| input.flake == Some(false))
             || url.is_some_and(has_subflake_dir)
-            || node.is_some_and(|node| {
-                node["flake"] == Value::Bool(false)
-                    || node["original"].get("dir").is_some()
-                    || node["locked"].get("dir").is_some()
-            })
+            || node.is_some_and(ignored_lock_node)
         {
             continue;
         }
@@ -135,6 +132,13 @@ fn url_coordinate(url: &str) -> Option<String> {
     } else {
         crate::registry::coordinate_from_remote(url.strip_prefix("git+")?)
     }
+}
+
+/// A source-only or subflake lock node never runs the generator.
+fn ignored_lock_node(node: &Value) -> bool {
+    node["flake"] == Value::Bool(false)
+        || node["original"].get("dir").is_some()
+        || node["locked"].get("dir").is_some()
 }
 
 fn original_coordinate(original: &Value) -> Option<String> {

@@ -1154,14 +1154,19 @@ fn restrict_implicit_scope(
             .collect::<BTreeSet<_>>()
     };
     let primary = primary.map(paths).unwrap_or_default();
-    // A workflow can require cargo-deny policy. Refuse rather than silently
-    // dropping a proposed deny.toml and rendering a candidate without it.
+    // Only inferred simit.toml policy may be dropped; any other proposed file
+    // (such as a deny.toml a workflow needs) refuses instead of vanishing.
     ensure!(
-        !plan
-            .patches
+        plan.patches
             .iter()
-            .any(|patch| patch.relative_path == Path::new("deny.toml")),
-        "implicit {scope} cannot create deny.toml"
+            .all(|patch| patch.relative_path == Path::new("simit.toml")),
+        "implicit {scope} cannot create {}",
+        plan.patches
+            .iter()
+            .map(|patch| patch.relative_path.display().to_string())
+            .filter(|path| path != "simit.toml")
+            .collect::<Vec<_>>()
+            .join(", ")
     );
     plan.patches.clear();
     for relative in paths(plan).difference(&primary) {
