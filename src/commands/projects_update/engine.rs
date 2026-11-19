@@ -1140,6 +1140,54 @@ fn generate_scopes(
     merge_scopes(checkout, &profile.scopes, plans)
 }
 
+fn restrict_implicit_scope(
+    checkout: &Path,
+    scope: &str,
+    plan: &mut CiUpdatePlan,
+    primary: Option<&CiUpdatePlan>,
+) -> Result<()> {
+    let paths = |plan: &CiUpdatePlan| {
+        plan.files
+            .iter()
+            .map(|file| file.relative_path.clone())
+            .chain(plan.obsolete.iter().cloned())
+            .collect::<BTreeSet<_>>()
+    };
+    let primary = primary.map(paths).unwrap_or_default();
+    // A workflow can require cargo-deny policy. Refuse rather than silently
+    // dropping a proposed deny.toml and rendering a candidate without it.
+    ensure!(
+        !plan
+            .patches
+            .iter()
+            .any(|patch| patch.relative_path == Path::new("deny.toml")),
+        "implicit {scope} cannot create deny.toml"
+    );
+    plan.patches.clear();
+    for relative in paths(plan).difference(&primary) {
+        let path = managed_path(checkout, relative)?;
+        let metadata = match fs::symlink_metadata(&path) {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                anyhow::bail!(
+                    "implicit {scope} cannot create or remove missing path {}",
+                    relative.display()
+                );
+            }
+            Err(error) => return Err(error.into()),
+        };
+        ensure!(
+            metadata.is_file()
+                && fs::read_to_string(&path).is_ok_and(|content| {
+                    crate::render::ci::is_generated_workflow_marker(&content)
+                }),
+            "implicit {scope} collides with hand-written or non-regular path {}",
+            relative.display()
+        );
+    }
+    Ok(())
+}
+
 fn merge_scopes(
     checkout: &Path,
     enrolled: &[String],
@@ -1169,31 +1217,7 @@ fn merge_scopes(
             "ci and ci-extra generation plans disagree"
         );
         if !enrolled.iter().any(|scope| scope == "ci-extra") {
-            // Implicit full CI may refresh artifacts, not adopt hand-written
-            // paths or persist inferred project policy.
-            extra.patches.clear();
-            let paths = |plan: &CiUpdatePlan| {
-                plan.files
-                    .iter()
-                    .map(|file| file.relative_path.clone())
-                    .chain(plan.obsolete.iter().cloned())
-                    .collect::<BTreeSet<_>>()
-            };
-            for relative in paths(&extra).difference(&paths(&merged)) {
-                let path = managed_path(checkout, relative)?;
-                match fs::symlink_metadata(&path) {
-                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => (),
-                    Err(error) => return Err(error.into()),
-                    Ok(metadata) => ensure!(
-                        metadata.is_file()
-                            && fs::read_to_string(&path).is_ok_and(|content| {
-                                crate::render::ci::is_generated_workflow_marker(&content)
-                            }),
-                        "implicit ci-extra collides with hand-written path {}",
-                        relative.display()
-                    ),
-                }
-            }
+            restrict_implicit_scope(checkout, "ci-extra", &mut extra, Some(&merged))?;
         }
         merged = extra;
     }
@@ -1205,7 +1229,10 @@ fn merge_scopes(
         .map(|file| file.relative_path.clone())
         .chain(merged.obsolete.iter().cloned())
         .collect::<BTreeSet<_>>();
-    for (scope, plan) in plans {
+    for (scope, mut plan) in plans {
+        if !enrolled.iter().any(|configured| configured == scope) {
+            restrict_implicit_scope(checkout, scope, &mut plan, None)?;
+        }
         for path in plan
             .files
             .iter()
