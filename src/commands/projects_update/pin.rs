@@ -55,22 +55,8 @@ pub(super) fn generator_input(checkout: &Path, generator: &Generator) -> Result<
         Err(error) => return Err(error.into()),
     }
     let source = fs::read_to_string(path)?;
-    // A `flake = false` input only vendors source; it never runs the generator.
-    let lock_path = checkout.join("flake.lock");
-    let lock: Option<Value> = lock_path
-        .is_file()
-        .then(|| crate::review::read_json(&lock_path))
-        .transpose()?;
-    let source_only = |name: &str| {
-        lock.as_ref().is_some_and(|lock| {
-            let node = &lock["nodes"]["root"]["inputs"][name];
-            node.as_str()
-                .is_some_and(|node| lock["nodes"][node]["flake"] == Value::Bool(false))
-        })
-    };
-    let inputs = declarations(&source)
+    let mut inputs = declarations(&source)
         .into_iter()
-        .filter(|(name, ..)| !source_only(name))
         .filter_map(|(name, url, _, _)| {
             let coordinate = if let Some(repo) = url.strip_prefix("github:") {
                 let mut parts = repo.split(['/', '?', '#']);
@@ -81,6 +67,22 @@ pub(super) fn generator_input(checkout: &Path, generator: &Generator) -> Result<
             (coordinate == generator.source_coordinate).then_some(name)
         })
         .collect::<Vec<_>>();
+    if inputs.is_empty() {
+        return Ok(None);
+    }
+    // A `flake = false` input only vendors source; it never runs the generator.
+    // The declaration wins over a lock that may predate it.
+    let declared = source_only_inputs(&source);
+    inputs.retain(|name| !declared.contains(name));
+    let lock_path = checkout.join("flake.lock");
+    if !inputs.is_empty() && lock_path.is_file() {
+        let lock: Value = crate::review::read_json(&lock_path)?;
+        inputs.retain(|name| {
+            lock["nodes"]["root"]["inputs"][name]
+                .as_str()
+                .is_none_or(|node| lock["nodes"][node]["flake"] != Value::Bool(false))
+        });
+    }
     match inputs.as_slice() {
         [] => Ok(None),
         [name] => Ok(Some(name.clone())),
@@ -327,8 +329,30 @@ fn resolved(
 /// refused rather than guessed at.
 fn declarations(source: &str) -> Vec<(String, String, usize, usize)> {
     let tokens = tokens(source);
+    root_attributes(&tokens, "url")
+        .into_iter()
+        .filter_map(|(name, value)| {
+            let (url, start, end) = string(tokens.get(value))?;
+            Some((name, url.to_owned(), start, end))
+        })
+        .collect()
+}
+
+/// Root inputs declaring literal `flake = false`: source only, never a generator.
+fn source_only_inputs(source: &str) -> Vec<String> {
+    let tokens = tokens(source);
+    root_attributes(&tokens, "flake")
+        .into_iter()
+        .filter(|(_, value)| ident(tokens.get(*value)) == Some("false"))
+        .map(|(name, _)| name)
+        .collect()
+}
+
+/// Each root input binding `<input>.<attribute> = value` in the supported
+/// literal forms, as (input name, index of the value token).
+fn root_attributes(tokens: &[Token], attribute: &str) -> Vec<(String, usize)> {
     let mut containers = Vec::new();
-    let mut declarations = Vec::new();
+    let mut found = Vec::new();
     for index in 0..tokens.len() {
         match &tokens[index] {
             Token::Punct('{') => {
@@ -355,31 +379,26 @@ fn declarations(source: &str) -> Vec<(String, String, usize, usize)> {
             && punct(tokens.get(index + 1), '.')
             && ident(tokens.get(index + 2)).is_some()
             && punct(tokens.get(index + 3), '.')
-            && ident(tokens.get(index + 4)) == Some("url")
+            && ident(tokens.get(index + 4)) == Some(attribute)
             && punct(tokens.get(index + 5), '=')
-            && let Some((url, start, end)) = string(tokens.get(index + 6))
+            && tokens.get(index + 6).is_some()
             && at_top
             && !punct(previous, '.')
         {
-            declarations.push((
-                ident(tokens.get(index + 2)).unwrap().to_owned(),
-                url.to_owned(),
-                start,
-                end,
-            ));
+            found.push((ident(tokens.get(index + 2)).unwrap().to_owned(), index + 6));
             continue;
         }
         // `<input>.url = "…";`
         if let Some(name) = ident(tokens.get(index))
             && name != "inputs"
             && punct(tokens.get(index + 1), '.')
-            && ident(tokens.get(index + 2)) == Some("url")
+            && ident(tokens.get(index + 2)) == Some(attribute)
             && punct(tokens.get(index + 3), '=')
-            && let Some((url, start, end)) = string(tokens.get(index + 4))
+            && tokens.get(index + 4).is_some()
             && (at_top || in_inputs)
             && !punct(previous, '.')
         {
-            declarations.push((name.to_owned(), url.to_owned(), start, end));
+            found.push((name.to_owned(), index + 4));
             continue;
         }
         // `<input> = { url = "…"; … };`
@@ -396,20 +415,20 @@ fn declarations(source: &str) -> Vec<(String, String, usize, usize)> {
             ] if inputs == "inputs" => Some(name),
             _ => None,
         };
-        if ident(tokens.get(index)) == Some("url")
+        if ident(tokens.get(index)) == Some(attribute)
             && !punct(previous, '.')
             && punct(tokens.get(index + 1), '=')
-            && let Some((url, start, end)) = string(tokens.get(index + 2))
+            && tokens.get(index + 2).is_some()
             && let Some(name) = enclosing_input
             && !matches!(
                 name.as_str(),
                 "inputs" | "outputs" | "description" | "nixConfig"
             )
         {
-            declarations.push((name.clone(), url.to_owned(), start, end));
+            found.push((name.clone(), index + 2));
         }
     }
-    declarations
+    found
 }
 
 fn rewrite(source: &str, input: &str, target: &str) -> Result<String, &'static str> {
@@ -625,6 +644,23 @@ mod tests {
             json!({"nodes": {"root": {"inputs": {"templates": "templates"}}, "templates": {"flake": false}}, "root": "root", "version": 7}).to_string(),
         )
         .unwrap();
+        assert_eq!(generator_input(root.path(), &generator).unwrap(), None);
+        // The declaration wins over a stale lock, and without any lock.
+        fs::write(
+            root.path().join("flake.lock"),
+            json!({"nodes": {"root": {"inputs": {"templates": "templates"}}, "templates": {}}, "root": "root", "version": 7}).to_string(),
+        )
+        .unwrap();
+        assert_eq!(generator_input(root.path(), &generator).unwrap(), None);
+        fs::remove_file(root.path().join("flake.lock")).unwrap();
+        assert_eq!(generator_input(root.path(), &generator).unwrap(), None);
+        // No generator match never reads the lock.
+        fs::write(
+            root.path().join("flake.nix"),
+            r#"{ inputs.x.url = "github:o/r"; }"#,
+        )
+        .unwrap();
+        fs::write(root.path().join("flake.lock"), "not json").unwrap();
         assert_eq!(generator_input(root.path(), &generator).unwrap(), None);
     }
 
