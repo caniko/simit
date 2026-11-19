@@ -3917,7 +3917,6 @@ else:
         let pages = ".github/workflows/pages.yaml";
         let path = checkout.path().join(pages);
         fs::create_dir_all(path.parent().unwrap()).unwrap();
-        fs::write(&path, "name: Custom Pages\n").unwrap();
         let primary = CiUpdatePlan::new(
             vec![serde_json::from_value(primary_ci()).unwrap()],
             vec![],
@@ -3944,6 +3943,12 @@ else:
         };
         let error = merge(&["ci".into()]).unwrap_err().to_string();
         assert!(
+            error.contains("cannot create") && error.contains(pages),
+            "{error}"
+        );
+        fs::write(&path, "name: Custom Pages\n").unwrap();
+        let error = merge(&["ci".into()]).unwrap_err().to_string();
+        assert!(
             error.contains("hand-written") && error.contains(pages),
             "{error}"
         );
@@ -3961,6 +3966,90 @@ else:
         assert_eq!(qualification, [".github/workflows/ci.yaml"]);
         let (plan, _) = merge(&["ci".into(), "ci-extra".into()]).unwrap();
         assert_eq!(plan.patches[0].relative_path, Path::new("simit.toml"));
+
+        extra.push_patch(crate::project::GeneratedFile {
+            relative_path: "deny.toml".into(),
+            content: "[licenses]\n".into(),
+        });
+        let error = merge_scopes(
+            checkout.path(),
+            &["ci".into()],
+            BTreeMap::from([("ci", primary), ("ci-extra", extra)]),
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(
+            error.contains("cannot create") && error.contains("deny.toml"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn implicit_release_only_refreshes_or_removes_existing_marked_files() {
+        let checkout = tempfile::tempdir().unwrap();
+        let release_path = ".github/workflows/release.yml";
+        let obsolete = ".github/workflows/release.yaml";
+        let path = checkout.path().join(release_path);
+        let obsolete_path = checkout.path().join(obsolete);
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let primary = CiUpdatePlan::new(
+            vec![serde_json::from_value(primary_ci()).unwrap()],
+            vec![],
+            vec![],
+        );
+        let marked = format!(
+            "{}\nname: Release\n",
+            crate::render::ci::GENERATED_WORKFLOW_MARKER
+        );
+        fs::write(&obsolete_path, &marked).unwrap();
+        let release = CiUpdatePlan::new(
+            vec![crate::project::GeneratedFile {
+                relative_path: release_path.into(),
+                content: marked.clone(),
+            }],
+            vec![obsolete.into()],
+            vec![crate::project::GeneratedFile {
+                relative_path: "simit.toml".into(),
+                content: "[release]\n".into(),
+            }],
+        );
+        let merge = |enrolled: &[String]| {
+            merge_scopes(
+                checkout.path(),
+                enrolled,
+                BTreeMap::from([("ci", primary.clone()), ("release", release.clone())]),
+            )
+        };
+        let error = merge(&["ci".into()]).unwrap_err().to_string();
+        assert!(
+            error.contains("cannot create") && error.contains(release_path),
+            "{error}"
+        );
+        fs::write(&path, &marked).unwrap();
+        fs::write(&obsolete_path, "name: Custom Release\n").unwrap();
+        let error = merge(&["ci".into()]).unwrap_err().to_string();
+        assert!(
+            error.contains("hand-written") && error.contains(obsolete),
+            "{error}"
+        );
+        fs::remove_file(&obsolete_path).unwrap();
+        std::os::unix::fs::symlink(&path, &obsolete_path).unwrap();
+        assert!(merge(&["ci".into()]).is_err());
+        fs::remove_file(&obsolete_path).unwrap();
+        fs::write(&obsolete_path, &marked).unwrap();
+        let (plan, qualification) = merge(&["ci".into()]).unwrap();
+        assert!(plan.patches.is_empty() && plan.schema_matches());
+        assert_eq!(plan.files[1].relative_path, Path::new(release_path));
+        assert_eq!(plan.obsolete, [PathBuf::from(obsolete)]);
+        assert_eq!(qualification, [".github/workflows/ci.yaml"]);
+        assert_eq!(
+            merge(&["ci".into(), "release".into()])
+                .unwrap()
+                .0
+                .patches
+                .len(),
+            1
+        );
     }
 
     #[test]
@@ -4000,6 +4089,11 @@ else:
         fs::write(
             f.source.join(release),
             format!("{marker}\nname: old release\n"),
+        )
+        .unwrap();
+        fs::write(
+            f.source.join(".github/workflows/pages.yaml"),
+            format!("{marker}\nname: old pages\n"),
         )
         .unwrap();
         let extra = json!({"relative_path":".github/workflows/pages.yaml","content":format!("{marker}\nname: Pages\n")});
