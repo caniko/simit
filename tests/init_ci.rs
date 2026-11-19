@@ -264,9 +264,16 @@ fn full_plan_can_render_flake_config_without_persisting_it() {
     let primary: serde_json::Value = serde_json::from_slice(&primary.stdout).unwrap();
     assert_eq!(full["schema"], "simit.ci-update-plan.v1");
     assert_eq!(full["files"][0], primary["files"][0]);
-    let migration = plan(&["init", "ci", "--platform", "forgejo", "--plan-json"]);
+    // The forgejo migration reads the user runner config; keep it hermetic.
+    let migration = simit_with_user_config(root)
+        .current_dir(root)
+        .env("PATH", &path)
+        .args(["init", "ci", "--platform", "forgejo", "--plan-json"])
+        .output()
+        .unwrap();
     assert!(!migration.status.success());
-    assert!(String::from_utf8_lossy(&migration.stderr).contains("flake outputs.simitConfig"));
+    let stderr = String::from_utf8_lossy(&migration.stderr);
+    assert!(stderr.contains("flake outputs.simitConfig"), "{stderr}");
     assert!(!root.join("simit.toml").exists());
 }
 
