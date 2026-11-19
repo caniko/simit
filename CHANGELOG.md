@@ -17,8 +17,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     of `always()`, a prebuild without a release entry, and `MEMBER / JOB` jobs
     of package-scoped workspaces for a required `JOB`. A customised
     `[ci.nix_build]` matrix without `push_branches`, `separate_events` or
-    `push_tags` now names its concurrency group by the workflow path and adds
-    `tags-ignore: ["**"]`, the form admission proves.
+    `push_tags` uses a workflow-path-scoped concurrency group and adds
+    `tags-ignore: ["**"]`.
   - A planned workflow that is already committed with the generator's marker
     is adopted under `enrollCurrent` instead of refused as project-owned.
   - A repository refused before anything was pushed is reported as `refused`
@@ -28,6 +28,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     the generator and adapter, so rebuilding the host at the same generator
     revision keeps unfinished rollouts resumable. Every digest moves once with
     this release: finish or `--retire` in-flight candidates before upgrading.
+
+- Fixed: generated GitHub Nix CI and aggregate Rust CI no longer let a PR
+  cancel its feature branch's original push run.
 - Added: `simit projects update --profile NAME --retire COORDINATE` abandons an
   unfinished candidate (deletes its maintenance ref, archives the receipt,
   drops it from this profile's frozen rollouts; canaries stay as barriers and a

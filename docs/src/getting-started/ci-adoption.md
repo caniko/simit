@@ -1426,21 +1426,12 @@ scopes are GitHub's: pull requests read default-branch entries and write only
 their own scope. Imports skip signature checks, so declare only inputs whose
 producers you trust as much as the default branch.
 
-Configured matrices normally coalesce a branch push with its pull request. Set
-`[ci.nix_build].separate_events = true` when acceptance requires both original
-producers: the concurrency group then includes the workflow ref and event name,
-so a PR cannot cancel its corresponding push. Newer revisions still supersede
-older runs within each event stream. Retain cancelled predecessors as failures;
-their receipts cannot substitute for either required successful producer.
-
-Aggregate Rust CI also coalesces push and PR events by default. Set
-`[ci].separate_events = true` when both Rust CI originals are required. This
-GitHub Actions opt-in retains workflow, event, source-repository and ref identity
-in the concurrency group, so fork PRs remain isolated and newer runs can
-supersede older runs within each event stream. It is independent of
-`[ci.nix_build].separate_events`; configure both when acceptance requires both
-originals from ordinary Rust CI and the Nix matrix. Nix-only and Python CI reject
-the Rust setting instead of silently ignoring it.
+Generated GitHub Nix matrices and aggregate Rust CI isolate push and PR runs.
+Opening a PR does not cancel its exact-head push run. Newer revisions still
+supersede older runs within each event stream, and unrelated forks remain
+isolated. Retain cancelled predecessors as failures; their receipts cannot
+substitute for either required successful producer. Existing `separate_events`
+settings remain accepted, including for repositories enrolled in custody.
 
 Nix matrices qualify branch pushes by default. Set
 `[ci.nix_build].push_tags = ["**"]` to also qualify every tag push, including when
@@ -1448,8 +1439,8 @@ adopting a workflow that previously used an unfiltered `push:` trigger. More
 selective GitHub tag patterns and ordered exclusions are supported, for example
 `push_tags = ["v*", "!v*-preview"]`. A nonempty list must include at least one
 positive pattern. Tag patterns survive regeneration and drift checks; omitting
-them retains the branch-only default. Tag-enabled coalescing keeps tags separate
-from same-named branches and pull requests while coalescing a branch's push and PR.
+them retains the branch-only default. Tag pushes remain separate from same-named
+branches and pull requests.
 
 ## Required Integration Gates
 
