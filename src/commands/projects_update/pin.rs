@@ -3,7 +3,7 @@
 use anyhow::{Context, Result, ensure};
 use serde_json::Value;
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     fmt, fs,
     path::{Path, PathBuf},
     process::Stdio,
@@ -246,16 +246,20 @@ pub(super) fn verify_lock(before: &Value, after: &Value, input: &str, target: &s
     let after_inputs = after["nodes"]["root"]["inputs"]
         .as_object()
         .context("flake.lock has no root inputs")?;
-    for (name, value) in before["nodes"]["root"]["inputs"]
+    let before_inputs = before["nodes"]["root"]["inputs"]
         .as_object()
-        .context("previous flake.lock has no root inputs")?
-    {
-        if name == input {
-            continue;
-        }
-        let current = after_inputs
-            .get(name)
-            .with_context(|| format!("nix flake lock removed root input {name}"))?;
+        .context("previous flake.lock has no root inputs")?;
+    let before_names: BTreeSet<_> = before_inputs.keys().filter(|name| *name != input).collect();
+    let after_names: BTreeSet<_> = after_inputs.keys().filter(|name| *name != input).collect();
+    ensure!(
+        before_names == after_names,
+        "nix flake lock changed non-target root inputs: added {:?}, removed {:?}",
+        after_names.difference(&before_names),
+        before_names.difference(&after_names)
+    );
+    for name in before_names {
+        let value = &before_inputs[name];
+        let current = &after_inputs[name];
         // Nix renumbers node keys (`treefmt-nix_3` -> `treefmt-nix_5`) when a
         // lock changes, so graphs are compared by content, not by key. A root
         // follows alias (an array path) must stay the same path; what it
@@ -309,25 +313,28 @@ fn resolved(
 /// refused rather than guessed at.
 fn declarations(source: &str) -> Vec<(String, String, usize, usize)> {
     let tokens = tokens(source);
-    let mut containers: Vec<Option<String>> = Vec::new();
+    let mut containers = Vec::new();
     let mut declarations = Vec::new();
     for index in 0..tokens.len() {
         match &tokens[index] {
             Token::Punct('{') => {
-                let label = if index >= 2 && punct(tokens.get(index - 1), '=') {
-                    ident(tokens.get(index - 2)).map(str::to_owned)
-                } else {
-                    None
-                };
-                containers.push(label);
+                // Keep the whole binding path, not just its last segment:
+                // `inputs.tools.inputs` is not the root `inputs` set.
+                let path = tokens[..index]
+                    .strip_suffix(&[Token::Punct('=')])
+                    .and_then(|lhs| {
+                        lhs.rsplit(|token| matches!(token, Token::Punct('{' | ';')))
+                            .next()
+                    });
+                containers.push(path);
             }
             Token::Punct('}') => {
                 containers.pop();
             }
             _ => {}
         }
-        let enclosing = containers.last().cloned().flatten();
-        let at_top = containers.len() == 1 && enclosing.is_none();
+        let at_top = matches!(containers.as_slice(), [None]);
+        let in_inputs = matches!(containers.as_slice(), [None, Some([Token::Ident(inputs)])] if inputs == "inputs");
         let previous = index.checked_sub(1).and_then(|index| tokens.get(index));
         // `inputs.<input>.url = "…";`
         if ident(tokens.get(index)) == Some("inputs")
@@ -355,28 +362,37 @@ fn declarations(source: &str) -> Vec<(String, String, usize, usize)> {
             && ident(tokens.get(index + 2)) == Some("url")
             && punct(tokens.get(index + 3), '=')
             && let Some((url, start, end)) = string(tokens.get(index + 4))
-            && (at_top || containers.len() == 2 && enclosing.as_deref() == Some("inputs"))
+            && (at_top || in_inputs)
             && !punct(previous, '.')
         {
             declarations.push((name.to_owned(), url.to_owned(), start, end));
             continue;
         }
         // `<input> = { url = "…"; … };`
+        let enclosing_input = match containers.as_slice() {
+            [None, Some([Token::Ident(name)])] => Some(name),
+            [
+                None,
+                Some([Token::Ident(inputs), Token::Punct('.'), Token::Ident(name)]),
+            ]
+            | [
+                None,
+                Some([Token::Ident(inputs)]),
+                Some([Token::Ident(name)]),
+            ] if inputs == "inputs" => Some(name),
+            _ => None,
+        };
         if ident(tokens.get(index)) == Some("url")
             && !punct(previous, '.')
             && punct(tokens.get(index + 1), '=')
             && let Some((url, start, end)) = string(tokens.get(index + 2))
-            && let Some(name) = enclosing
+            && let Some(name) = enclosing_input
             && !matches!(
                 name.as_str(),
                 "inputs" | "outputs" | "description" | "nixConfig"
             )
-            && (containers.len() == 2 && containers[0].is_none()
-                || containers.len() == 3
-                    && containers[0].is_none()
-                    && containers[1].as_deref() == Some("inputs"))
         {
-            declarations.push((name, url.to_owned(), start, end));
+            declarations.push((name.clone(), url.to_owned(), start, end));
         }
     }
     declarations
@@ -575,6 +591,23 @@ mod tests {
     }
 
     #[test]
+    fn ignores_nested_generator_overrides() {
+        let source = r#"{
+            inputs.generator.url = "github:caniko/simit";
+            inputs.tools.url = "github:example/tools";
+            inputs.tools.inputs = { other-simit.url = "github:caniko/simit"; };
+            tools.inputs.other-simit = { url = "github:caniko/simit"; };
+        }"#;
+        let matches = declarations(source)
+            .into_iter()
+            .filter(|(_, url, ..)| url == "github:caniko/simit")
+            .map(|(name, ..)| name)
+            .collect::<Vec<_>>();
+        assert_eq!(matches, ["generator"]);
+        assert!(rewrites(source, "other-simit").is_err());
+    }
+
+    #[test]
     fn rewrites_every_declared_url_form_and_keeps_unrelated_inputs() {
         let old = "a".repeat(40);
         let cases = [
@@ -674,6 +707,20 @@ mod tests {
         std::os::unix::fs::symlink(outside.path(), checkout.path().join("flake.nix")).unwrap();
         let error = regular_files(checkout.path()).unwrap_err().to_string();
         assert!(error.contains("flake.nix is not a regular file"), "{error}");
+    }
+
+    #[test]
+    fn lock_verification_rejects_added_unrelated_root_input() {
+        let before = json!({"nodes": {
+            "root": {"inputs": {"simit": "simit"}},
+            "simit": {"locked": {"rev": "a".repeat(40)}},
+        }});
+        let mut after = before.clone();
+        after["nodes"]["simit"]["locked"]["rev"] = json!(TARGET);
+        verify_lock(&before, &after, "simit", TARGET).unwrap();
+        after["nodes"]["root"]["inputs"]["extra"] = json!("extra");
+        after["nodes"]["extra"] = json!({"locked": {"type": "path", "path": "./extra"}});
+        assert!(verify_lock(&before, &after, "simit", TARGET).is_err());
     }
 
     #[test]

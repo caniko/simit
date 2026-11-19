@@ -1130,6 +1130,14 @@ fn generate_scopes(
             generate(executable, checkout, state_directory, &argv)?,
         );
     }
+    merge_scopes(checkout, &profile.scopes, plans)
+}
+
+fn merge_scopes(
+    checkout: &Path,
+    enrolled: &[String],
+    mut plans: BTreeMap<&str, CiUpdatePlan>,
+) -> Result<(CiUpdatePlan, Vec<String>)> {
     let mut merged = plans
         .remove("ci")
         .context("profiles require the ci scope")?;
@@ -1138,7 +1146,7 @@ fn generate_scopes(
         "empty generation plan"
     );
     let qualification = workflows(&merged);
-    if let Some(extra) = plans.remove("ci-extra") {
+    if let Some(mut extra) = plans.remove("ci-extra") {
         // The full plan must contain the primary plan byte for byte, so both
         // generations agree on what the qualification set means.
         ensure!(
@@ -1153,6 +1161,33 @@ fn generate_scopes(
                     .all(|path| extra.obsolete.contains(path)),
             "ci and ci-extra generation plans disagree"
         );
+        if !enrolled.iter().any(|scope| scope == "ci-extra") {
+            // Implicit full CI may refresh artifacts, not adopt hand-written
+            // paths or persist inferred project policy.
+            extra.patches.clear();
+            let paths = |plan: &CiUpdatePlan| {
+                plan.files
+                    .iter()
+                    .map(|file| file.relative_path.clone())
+                    .chain(plan.obsolete.iter().cloned())
+                    .collect::<BTreeSet<_>>()
+            };
+            for relative in paths(&extra).difference(&paths(&merged)) {
+                let path = managed_path(checkout, relative)?;
+                match fs::symlink_metadata(&path) {
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => (),
+                    Err(error) => return Err(error.into()),
+                    Ok(metadata) => ensure!(
+                        metadata.is_file()
+                            && fs::read_to_string(&path).is_ok_and(|content| {
+                                crate::render::ci::is_generated_workflow_marker(&content)
+                            }),
+                        "implicit ci-extra collides with hand-written path {}",
+                        relative.display()
+                    ),
+                }
+            }
+        }
         merged = extra;
     }
     let mut readme_patches = Vec::new();
@@ -1225,6 +1260,25 @@ fn generate_scopes(
     ))
 }
 
+fn managed_path(root: &Path, relative_path: &Path) -> Result<PathBuf> {
+    relative(relative_path)?;
+    let path = root.join(relative_path);
+    // Reject symlink parents as well as symlink outputs before reads/writes.
+    let mut parent = path.as_path();
+    while parent != root {
+        match fs::symlink_metadata(parent) {
+            Ok(meta) => ensure!(
+                !meta.file_type().is_symlink(),
+                "generated path traverses a symlink"
+            ),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => (),
+            Err(e) => return Err(e.into()),
+        }
+        parent = parent.parent().context("invalid managed path")?;
+    }
+    Ok(path)
+}
+
 fn hashes(
     root: &Path,
     paths: impl Iterator<Item = String>,
@@ -1238,21 +1292,7 @@ fn hashes(
         )? == "true";
     paths
         .map(|p| {
-            relative(Path::new(&p))?;
-            let path = root.join(&p);
-            // Reject symlink parents as well as symlink outputs before reads/writes.
-            let mut parent = path.as_path();
-            while parent != root {
-                match fs::symlink_metadata(parent) {
-                    Ok(meta) => ensure!(
-                        !meta.file_type().is_symlink(),
-                        "generated path traverses a symlink"
-                    ),
-                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => (),
-                    Err(e) => return Err(e.into()),
-                }
-                parent = parent.parent().context("invalid managed path")?;
-            }
+            let path = managed_path(root, Path::new(&p))?;
             // Canonical mode/blob identities preserve conversion while detecting chmod.
             let hash = if let Some(tree) = tree {
                 let object = git(
@@ -3835,6 +3875,58 @@ else:
 
     fn primary_ci() -> serde_json::Value {
         json!({"relative_path":".github/workflows/ci.yaml","content":"name: CI\non:\n  push:\njobs:\n  test:\n    steps: []\n"})
+    }
+
+    #[test]
+    fn implicit_ci_extra_refuses_handwritten_outputs_and_drops_policy_patches() {
+        let checkout = tempfile::tempdir().unwrap();
+        let pages = ".github/workflows/pages.yaml";
+        let path = checkout.path().join(pages);
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(&path, "name: Custom Pages\n").unwrap();
+        let primary = CiUpdatePlan::new(
+            vec![serde_json::from_value(primary_ci()).unwrap()],
+            vec![],
+            vec![],
+        );
+        let mut extra = primary.clone();
+        extra.files.push(crate::project::GeneratedFile {
+            relative_path: pages.into(),
+            content: format!(
+                "{}\nname: New Pages\n",
+                crate::render::ci::GENERATED_WORKFLOW_MARKER
+            ),
+        });
+        extra.push_patch(crate::project::GeneratedFile {
+            relative_path: "simit.toml".into(),
+            content: "[ci]\nplatform = \"github\"\n".into(),
+        });
+        let merge = |enrolled: &[String]| {
+            merge_scopes(
+                checkout.path(),
+                enrolled,
+                BTreeMap::from([("ci", primary.clone()), ("ci-extra", extra.clone())]),
+            )
+        };
+        let error = merge(&["ci".into()]).unwrap_err().to_string();
+        assert!(
+            error.contains("hand-written") && error.contains(pages),
+            "{error}"
+        );
+        fs::write(
+            &path,
+            format!(
+                "{}\nname: Old Pages\n",
+                crate::render::ci::GENERATED_WORKFLOW_MARKER
+            ),
+        )
+        .unwrap();
+        let (plan, qualification) = merge(&["ci".into()]).unwrap();
+        assert!(plan.patches.is_empty() && plan.schema_matches());
+        assert_eq!(plan.files[1].content, extra.files[1].content);
+        assert_eq!(qualification, [".github/workflows/ci.yaml"]);
+        let (plan, _) = merge(&["ci".into(), "ci-extra".into()]).unwrap();
+        assert_eq!(plan.patches[0].relative_path, Path::new("simit.toml"));
     }
 
     #[test]
