@@ -2858,6 +2858,7 @@ fn crow_audit_provisions_database_in_its_own_step() {
         let raw_command = commands[0].as_str().unwrap();
         assert!(!raw_command.replace("$$", "").contains('$'));
         let command = raw_command.replace("$$", "$");
+        assert!(!command.contains("cargo audit "));
 
         let bin = root.join("bin");
         fs::create_dir(&bin).unwrap();
@@ -2869,12 +2870,20 @@ fn crow_audit_provisions_database_in_its_own_step() {
                 "#!/bin/sh\n[ -z \"$FAIL_CLONE\" ] || exit 41\n[ \"$1 $2 $3 $4 $5 $6 $7 $8\" = '-c http.lowSpeedLimit=1024 -c http.lowSpeedTime=30 clone --depth 1 https://github.com/RustSec/advisory-db.git' ] || exit 42\nmkdir -p \"$9\"\ntouch \"$9/fixture\"\n",
             ),
             (
-                "cargo",
-                "#!/bin/sh\nif [ \"$1\" = install ]; then\n  [ \"$2 $3 $4\" = 'cargo-audit --locked --root' ] && [ -z \"$FAIL_INSTALL\" ] || exit 46\n  mkdir -p \"$5/bin\"\n  cp \"$FIXTURE_AUDIT\" \"$5/bin/cargo-audit\"\n  exit\nfi\n[ \"$1\" = audit ] || exit 43\nexec cargo-audit \"$@\"\n",
+                "curl",
+                "#!/bin/sh\n[ -z \"$FAIL_DOWNLOAD\" ] || exit 46\n[ \"$1 $2\" = '-fL -o' ] || exit 47\ntouch \"$3\"\n",
+            ),
+            (
+                "sha256sum",
+                "#!/bin/sh\n[ \"$1\" = -c ] && [ -z \"$FAIL_CHECKSUM\" ] || exit 48\ncat >/dev/null\n",
+            ),
+            (
+                "tar",
+                "#!/bin/sh\n[ \"$1\" = -xzf ] && [ \"$3\" = -C ] && [ \"$5\" = --strip-components=1 ] || exit 49\ncp \"$FIXTURE_AUDIT\" \"$4/cargo-audit\"\n",
             ),
             (
                 "nix",
-                "#!/bin/sh\n[ \"$1 $2 $3 $4 $5 $6 $7\" = 'shell --extra-experimental-features nix-command flakes nixpkgs#git nixpkgs#cargo-audit nixpkgs#cargo -c' ] || exit 45\nshift 7\nPATH=\"$NIX_BIN:$PATH\"\nexport PATH\nexec \"$@\"\n",
+                "#!/bin/sh\n[ \"$1 $2 $3 $4 $5 $6\" = 'shell --extra-experimental-features nix-command flakes nixpkgs#git nixpkgs#cargo-audit -c' ] || exit 45\nshift 6\nPATH=\"$NIX_BIN:$PATH\"\nexport PATH\nexec \"$@\"\n",
             ),
         ] {
             let path = if name == "git" && runtime == "nix" {
@@ -2886,16 +2895,17 @@ fn crow_audit_provisions_database_in_its_own_step() {
             fs::set_permissions(path, fs::Permissions::from_mode(0o755)).unwrap();
         }
         let audit_tool = nix_bin.join("cargo-audit");
-        fs::write(&audit_tool, "#!/bin/sh\n[ \"$1\" = audit ] && [ \"$2\" = --db ] && [ -f \"$3/fixture\" ] && [ \"$4\" = --no-fetch ] && [ \"$5\" = --stale ] || exit 43\n[ -z \"$FAIL_AUDIT\" ] || exit 44\n").unwrap();
+        fs::write(&audit_tool, "#!/bin/sh\n[ \"$1\" = audit ] && [ \"$2\" = --db ] && [ -f \"$3/fixture\" ] && [ \"$4\" = --no-fetch ] && [ \"$#\" = 4 ] || exit 43\n[ -z \"$FAIL_AUDIT\" ] || exit 44\n").unwrap();
         fs::set_permissions(&audit_tool, fs::Permissions::from_mode(0o755)).unwrap();
         for (failure, expected, cargo_home, existing) in [
             ("", 0, false, false),
             ("", 0, true, true),
             ("FAIL_CLONE", 41, false, true),
             ("FAIL_AUDIT", 44, false, true),
-            ("FAIL_INSTALL", 46, false, true),
+            ("FAIL_DOWNLOAD", 46, false, true),
+            ("FAIL_CHECKSUM", 48, false, true),
         ] {
-            if runtime == "nix" && failure == "FAIL_INSTALL" {
+            if runtime == "nix" && (failure == "FAIL_DOWNLOAD" || failure == "FAIL_CHECKSUM") {
                 continue;
             }
             let home = root.join(format!("home-{failure}-{cargo_home}"));
