@@ -2827,6 +2827,42 @@ fn assert_crow_push_only_maintained_branches(path: &Path) {
 }
 
 #[test]
+fn crow_jsonnet_audit_gate_is_inferred_on_regeneration() {
+    let temp = init_package(true);
+    let root = temp.path();
+    let ci = "[ci]\nprovider = 'crow'\nplatform = 'forgejo'\nrunner = 'codefloe-global'\nruntime = 'cargo'\n";
+    let crow = "[ci.crow]\nformat = 'jsonnet'\n";
+    fs::write(
+        root.join("simit.toml"),
+        format!("{ci}with_audit = true\n{crow}"),
+    )
+    .unwrap();
+    let output = simit()
+        .current_dir(root)
+        .args(["init", "ci"])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let workflow = fs::read_to_string(root.join(".crow/build.jsonnet")).unwrap();
+    assert!(workflow.contains("\"name\": \"cargo-audit\""), "{workflow}");
+    fs::write(root.join("simit.toml"), format!("{ci}{crow}")).unwrap();
+    let check = simit()
+        .current_dir(root)
+        .args(["init", "ci", "--check"])
+        .output()
+        .unwrap();
+    assert!(
+        check.status.success(),
+        "{}",
+        String::from_utf8_lossy(&check.stderr)
+    );
+}
+
+#[test]
 #[cfg(unix)]
 fn crow_audit_provisions_database_in_its_own_step() {
     use std::os::unix::fs::PermissionsExt;
