@@ -641,6 +641,8 @@ fn crow_preserves_each_members_msrv_including_omnix_replacement() {
             let workflow =
                 fs::read_to_string(temp.path().join(format!(".crow/build-{name}.yaml"))).unwrap();
             let yaml: serde_yaml::Value = serde_yaml::from_str(&workflow).unwrap();
+            // Crow keys statuses by workflow name; members must not share one.
+            assert_eq!(yaml["name"], format!("build-{name}").as_str());
             let step = yaml["steps"]
                 .as_sequence()
                 .unwrap()

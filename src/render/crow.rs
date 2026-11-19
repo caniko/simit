@@ -152,15 +152,19 @@ fn files_for_scope(request: FilesRequest<'_>, primary_only: bool) -> Result<Vec<
         vec![GeneratedFile {
             relative_path: crow_path("build", suffix, request.format),
             content: render_workflow(
-                build_workflow(
-                    request.crow,
-                    request.runtime,
-                    request.package,
-                    &image,
-                    request.self_check,
-                    request.runners,
-                    &request.options,
-                    request.step_runners,
+                named(
+                    build_workflow(
+                        request.crow,
+                        request.runtime,
+                        request.package,
+                        &image,
+                        request.self_check,
+                        request.runners,
+                        &request.options,
+                        request.step_runners,
+                    ),
+                    "build",
+                    suffix,
                 ),
                 request.format,
             )?,
@@ -171,12 +175,16 @@ fn files_for_scope(request: FilesRequest<'_>, primary_only: bool) -> Result<Vec<
         files.push(GeneratedFile {
             relative_path: crow_path("publish-crate", suffix, request.format),
             content: render_workflow(
-                publish_workflow(
-                    request.crow,
-                    request.runtime,
-                    request.package,
-                    &image,
-                    &request.options,
+                named(
+                    publish_workflow(
+                        request.crow,
+                        request.runtime,
+                        request.package,
+                        &image,
+                        &request.options,
+                    ),
+                    "publish-crate",
+                    suffix,
                 ),
                 request.format,
             )?,
@@ -187,13 +195,17 @@ fn files_for_scope(request: FilesRequest<'_>, primary_only: bool) -> Result<Vec<
         files.push(GeneratedFile {
             relative_path: crow_path("release-artifacts", suffix, request.format),
             content: render_workflow(
-                artifacts_workflow(
-                    request.crow,
-                    request.runtime,
-                    request.package,
-                    &image,
-                    request.runners,
-                    &request.options,
+                named(
+                    artifacts_workflow(
+                        request.crow,
+                        request.runtime,
+                        request.package,
+                        &image,
+                        request.runners,
+                        &request.options,
+                    ),
+                    "release-artifacts",
+                    suffix,
                 ),
                 request.format,
             )?,
@@ -668,11 +680,22 @@ fn apply_step_runner_labels(steps: &mut [Step], runners: &BTreeMap<String, Resol
     }
 }
 
-fn crow_path(stem: &str, suffix: Option<&str>, format: CrowWorkflowFormat) -> PathBuf {
-    let name = match suffix {
+/// Crow keys commit statuses by workflow name, so package-scoped workflows
+/// carry the package in their name as well as their file name.
+fn workflow_name(stem: &str, suffix: Option<&str>) -> String {
+    match suffix {
         Some(suffix) => format!("{stem}-{suffix}"),
         None => stem.to_owned(),
-    };
+    }
+}
+
+fn named(mut workflow: Workflow, stem: &str, suffix: Option<&str>) -> Workflow {
+    workflow.name = workflow_name(stem, suffix);
+    workflow
+}
+
+fn crow_path(stem: &str, suffix: Option<&str>, format: CrowWorkflowFormat) -> PathBuf {
+    let name = workflow_name(stem, suffix);
     let extension = match format {
         CrowWorkflowFormat::Yaml => "yaml",
         CrowWorkflowFormat::Jsonnet => "jsonnet",
