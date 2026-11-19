@@ -49,6 +49,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   GitHub adapter's source-level admission on a generation plan without forge
   access. A conformance test renders representative configurations and
   requires each to pass it for the default and a maintenance branch.
+  The GitHub adapter now proves exact job contexts for generated docs-gated
+  workflows when the candidate diff contains code. A skipped job cannot qualify.
 
 - Changed: the GitHub prebuild's Attic publish step sets
   `HARBOR_ATTIC_BUILT_PATHS=1`, so an rs-harbor `mkAtticPush` app that supports

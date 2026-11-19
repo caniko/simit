@@ -438,6 +438,7 @@ fn request(
         workflows,
         required_checks,
         plan: None,
+        changed_paths: None,
         landing: None,
         target: None,
         change: None,
@@ -1929,6 +1930,32 @@ pub fn update(
         "retained workflow ownership differs from the candidate"
     );
     let target_branch = target.unwrap_or(&observed.default_branch);
+    let changed_paths = if forge
+        .adapter
+        .arguments
+        .iter()
+        .any(|arg| arg == "update-github-adapter")
+    {
+        let diff = git_raw(
+            &checkout,
+            &[
+                "diff",
+                "--no-renames",
+                "--name-only",
+                "-z",
+                &receipt.source,
+                &receipt.candidate,
+                "--",
+            ],
+        )?;
+        Some(
+            diff.split_terminator('\0')
+                .map(str::to_owned)
+                .collect::<Vec<_>>(),
+        )
+    } else {
+        None
+    };
     let admit = |branch: &str| -> Result<()> {
         let mut admission = request(
             forge,
@@ -1940,6 +1967,7 @@ pub fn update(
             requirements.clone(),
         );
         admission.plan = Some(admission_plan.clone());
+        admission.changed_paths = changed_paths.clone();
         if landing == "pull-request" && branch == target_branch {
             admission = pull_request(admission, Some(branch), None);
         }

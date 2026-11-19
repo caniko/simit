@@ -4929,7 +4929,7 @@ pub(crate) const DOCS_GATE_JOB: &str = "changes";
 pub(crate) const DOCS_GATE_JOB_NAME: &str = "Classify changed paths";
 
 /// Environment of the classification step; `projects_update` proves it with the script.
-pub(crate) const DOCS_GATE_ENV: [(&str, &str); 3] = [
+const DOCS_GATE_ENV: [(&str, &str); 3] = [
     ("PR_BASE", "${{ github.event.pull_request.base.sha }}"),
     ("EVENT_NAME", "${{ github.event_name }}"),
     (
@@ -4939,10 +4939,10 @@ pub(crate) const DOCS_GATE_ENV: [(&str, &str); 3] = [
 ];
 
 /// Step id that publishes the classification.
-pub(crate) const DOCS_GATE_STEP: &str = "classify";
+const DOCS_GATE_STEP: &str = "classify";
 
 /// Output expression wiring the classification to every gated job.
-pub(crate) fn docs_gate_output() -> String {
+fn docs_gate_output() -> String {
     format!("${{{{ steps.{DOCS_GATE_STEP}.outputs.code }}}}")
 }
 
@@ -5005,6 +5005,39 @@ fn push_docs_gate_job(
     workflow.push_str(&docs_gate_script("          "));
 }
 
+/// Bind the classifier to the job we emit, including the pinned checkout of
+/// the event ref. Only the display name varies by workspace member.
+pub(crate) fn is_generated_docs_gate(workflow: &serde_yaml::Value) -> bool {
+    let Some(mut job) = workflow
+        .get("jobs")
+        .and_then(|jobs| jobs.get(DOCS_GATE_JOB))
+        .and_then(serde_yaml::Value::as_mapping)
+        .cloned()
+    else {
+        return false;
+    };
+    job.remove(serde_yaml::Value::String("name".into()));
+    ["v7.0.1", "v4.3.1"].into_iter().any(|version| {
+        let mut source = String::from("jobs:\n");
+        push_docs_gate_job(&mut source, Platform::Github, version, None);
+        let rendered: serde_yaml::Value =
+            serde_yaml::from_str(&source).expect("rendered classifier YAML");
+        let mut expected = rendered["jobs"][DOCS_GATE_JOB]
+            .as_mapping()
+            .unwrap()
+            .clone();
+        expected.remove(serde_yaml::Value::String("name".into()));
+        job == expected
+    })
+}
+
+/// The same path predicate used to emit the generated classifier's shell.
+pub(crate) fn docs_gate_selects_code(paths: &[String]) -> bool {
+    paths
+        .iter()
+        .any(|path| !crate::docs_only::is_docs_only_path(path))
+}
+
 /// Gate a job on the shared classification, keeping any existing `needs`.
 fn push_docs_gate_keys(workflow: &mut String, platform: Platform, needs: &[&str]) {
     if platform != Platform::Github {
@@ -5024,7 +5057,8 @@ fn push_docs_gate_keys(workflow: &mut String, platform: Platform, needs: &[&str]
 /// The classification script as a YAML block scalar body. Paths come from
 /// [`crate::docs_only`], and every failure mode (missing, all-zero or
 /// unreachable base, failed diff) keeps `code=true` so jobs still run.
-pub(crate) fn docs_gate_source() -> String {
+#[cfg(test)]
+fn docs_gate_source() -> String {
     docs_gate_script("")
 }
 

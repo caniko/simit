@@ -492,12 +492,17 @@ included in the observed policy digest. V1 rejects it before publication; provin
 a forge-accepted candidate signature requires a supporting adapter. Classic
 signature and pull-request requirements also reject matching uncreated maintenance refs.
 Admission carries the merged repository, profile and project required checks.
-Each consumer requirement must match a literal non-matrix job name (or job ID
-when unnamed) in an owned push workflow. Package-scoped workspace CI names its
+Each consumer requirement must match a proved job in an owned push workflow.
+This normally means a literal non-matrix job name (or job ID when unnamed).
+For jobs gated by simit's generated docs classifier, the GitHub adapter also
+proves static matrix contexts if the candidate-vs-base diff contains code
+(including `flake.lock`). Docs-only changes and unknown classifiers are refused;
+the actual original run must still report success for every gated job.
+Package-scoped workspace CI names its
 jobs `MEMBER / JOB`; such a job also satisfies a requirement named `JOB`, and
 qualification still needs every owned workflow's original run to succeed in
 full. Requirements produced only by
-hand-maintained workflows or dynamic/matrix contexts require a supporting
+hand-maintained workflows or unproved dynamic/matrix contexts require a supporting
 adapter and are rejected before publishing a receipt or maintenance ref.
 Ruleset admission queries each exact maintenance/adoption branch, including a
 maintenance ref that has not been created, before publishing a prepared receipt.

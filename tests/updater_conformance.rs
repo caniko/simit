@@ -109,8 +109,12 @@ fn every_generated_workflow_shape_passes_updater_source_admission() {
         let temp = project(workspace, &config);
         let plan = plan(temp.path());
         for branch in ["trunk", "simit/update/0123456789abcdef"] {
-            let admitted =
-                simit::commands::projects_update::admit_candidate_source(&plan, branch, &["test"]);
+            let admitted = simit::commands::projects_update::admit_candidate_source(
+                &plan,
+                branch,
+                &["test"],
+                &["flake.lock"],
+            );
             match (admitted, refusal) {
                 (Ok(()), None) => {}
                 (Err(error), Some(expected)) if format!("{error:#}").contains(expected) => {}

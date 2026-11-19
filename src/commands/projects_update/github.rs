@@ -271,54 +271,6 @@ struct PushSteps {
     jobs: Option<BTreeSet<String>>,
     /// Source-bound step outcomes by API job name.
     bound: BTreeMap<String, StepOutcomes>,
-    /// The workflow carries the generated docs-only gate, so a successful run
-    /// may leave its gated jobs skipped.
-    docs_gate: bool,
-}
-
-/// Prove the docs-only gate is exactly the generated job. A skipped job in a
-/// successful run can then only come from that gate's own classification.
-fn is_generated_docs_gate(workflow: &serde_yaml::Value) -> bool {
-    let Some(job) = workflow["jobs"].as_mapping().and_then(|jobs| {
-        jobs.get(serde_yaml::Value::String(
-            crate::render::ci::DOCS_GATE_JOB.into(),
-        ))
-    }) else {
-        return false;
-    };
-    let output = crate::render::ci::docs_gate_output();
-    let source = crate::render::ci::docs_gate_source();
-    job.get("if").is_none()
-        && job.get("needs").is_none()
-        && job
-            .get("outputs")
-            .and_then(|outputs| outputs.get("code"))
-            .and_then(serde_yaml::Value::as_str)
-            == Some(output.as_str())
-        && job
-            .get("steps")
-            .and_then(serde_yaml::Value::as_sequence)
-            .is_some_and(|steps| {
-                steps.iter().any(|step| {
-                    step.get("id").and_then(serde_yaml::Value::as_str)
-                        == Some(crate::render::ci::DOCS_GATE_STEP)
-                        && step
-                            .get("env")
-                            .and_then(serde_yaml::Value::as_mapping)
-                            .is_some_and(|env| {
-                                env.len() == crate::render::ci::DOCS_GATE_ENV.len()
-                                    && crate::render::ci::DOCS_GATE_ENV.iter().all(
-                                        |(name, value)| {
-                                            env.get(serde_yaml::Value::String((*name).into()))
-                                                .and_then(serde_yaml::Value::as_str)
-                                                == Some(*value)
-                                        },
-                                    )
-                            })
-                        && step.get("run").and_then(serde_yaml::Value::as_str)
-                            == Some(source.as_str())
-                })
-            })
 }
 
 /// Whether a step can be skipped in a job that succeeded, so that its outcome
@@ -405,6 +357,29 @@ fn job_names(id: &serde_yaml::Value, job: &serde_yaml::Value) -> Result<BTreeSet
     let mapping = matrix
         .as_mapping()
         .context("conditional steps need a static include matrix")?;
+    // The generated non-native Nix build matrix has one literal axis. Actions
+    // appends its value to the default build job name.
+    if mapping.len() == 1
+        && job.get("name").is_none()
+        && id.as_str() == Some("build")
+        && let Some(values) = matrix["installable"].as_sequence()
+    {
+        let names = values
+            .iter()
+            .map(|value| {
+                let value = value
+                    .as_str()
+                    .filter(|value| value.starts_with(".#") && !value.contains("${{"))
+                    .context("Nix build matrix needs literal flake installables")?;
+                Ok(format!("{name} ({value})"))
+            })
+            .collect::<Result<BTreeSet<_>>>()?;
+        ensure!(
+            !names.is_empty() && names.len() == values.len(),
+            "empty or colliding Nix build matrix"
+        );
+        return Ok(names);
+    }
     let include = matrix["include"]
         .as_sequence()
         .context("conditional steps need a static include matrix")?;
@@ -451,17 +426,16 @@ fn push_steps(workflow: &serde_yaml::Value, default_branch: bool) -> Result<Push
     let jobs = workflow["jobs"]
         .as_mapping()
         .context("missing workflow jobs")?;
-    let mut expected = PushSteps {
-        docs_gate: is_generated_docs_gate(workflow)
-            && jobs.values().any(|job| job.get("if").is_some()),
-        ..PushSteps::default()
-    };
+    let mut expected = PushSteps::default();
     let conditional = |job: &serde_yaml::Value| {
         job["steps"]
             .as_sequence()
             .is_some_and(|steps| steps.iter().any(needs_binding))
     };
-    if !jobs.values().any(conditional) {
+    if !jobs
+        .values()
+        .any(|job| conditional(job) || job.get("if").is_some())
+    {
         return Ok(expected);
     }
     // Binding one job's steps needs the run's exact job inventory, so every
@@ -568,7 +542,7 @@ fn push_workflow(path: &str, file: &Value, branch: Option<&str>) -> Result<bool>
             }
         }
         ensure!(
-            !gated || is_generated_docs_gate(&yaml),
+            !gated || crate::render::ci::is_generated_docs_gate(&yaml),
             "docs-only gate is not the generated classification job"
         );
         push_steps(&yaml, false)?;
@@ -680,6 +654,20 @@ pub(super) fn admit_workflows(request: &AdapterRequest) -> Result<BTreeSet<Strin
         let yaml: serde_yaml::Value = serde_yaml::from_str(&file.content)?;
         let jobs = yaml["jobs"].as_mapping().context("missing workflow jobs")?;
         for (id, job) in jobs {
+            if job.get("if").is_some() {
+                ensure!(
+                    request
+                        .changed_paths
+                        .as_deref()
+                        .is_some_and(crate::render::ci::docs_gate_selects_code),
+                    "candidate change does not prove the generated docs-only gate selects code"
+                );
+                for name in job_names(id, job)? {
+                    names.extend(unscoped_check(&name).map(str::to_owned));
+                    names.insert(name);
+                }
+                continue;
+            }
             // Matrix expansion and expression-derived names need a source-aware
             // adapter. A literal non-matrix name is the exact Actions context.
             if job.get("strategy").and_then(|s| s.get("matrix")).is_some() {
@@ -1636,24 +1624,10 @@ fn admit_run(
                 && seen.insert(number(job, "/id")?),
             "job is missing, duplicated, rerun or non-success"
         );
-        let skipped = job["conclusion"] == "skipped";
-        // A successful run cannot contain a failed or cancelled job. Only the
-        // generated docs gate may skip one, and a skipped job ran no steps.
         ensure!(
-            job["conclusion"] == "success" || (skipped && expected.docs_gate),
+            job["conclusion"] == "success",
             "job is missing, duplicated, rerun or non-success"
         );
-        if skipped {
-            ensure!(
-                job["steps"]
-                    .as_array()
-                    .is_none_or(|steps| steps.iter().all(|step| {
-                        step["status"] == "completed" && step["conclusion"] == "skipped"
-                    })),
-                "skipped job reports executed steps"
-            );
-            continue;
-        }
         let steps = job["steps"].as_array().context("missing step inventory")?;
         ensure!(!steps.is_empty(), "job has an empty step inventory");
         let bound = job["name"]
@@ -2423,9 +2397,9 @@ mod tests {
         let revision = "a".repeat(40);
         for branch in ["maintenance/candidate", "trunk", "TRUNK"] {
             let mut request: AdapterRequest = serde_json::from_value(json!({
-                "schemaVersion":1,"operation":"admit","coordinate":"forge.example/team/demo",
+                "schemaVersion":2,"operation":"admit","coordinate":"forge.example/team/demo",
                 "apiUrl":"https://forge.example/api","authority":"777","revision":revision,
-                "branch":branch,"workflows":[path],"requiredChecks":[],
+                "branch":branch,"workflows":[path],"requiredChecks":[],"changedPaths":["flake.lock"],
                 "plan":{"schema":"simit.ci-update-plan.v1","files":[{"relative_path":path,"content":file.content}],"obsolete":[]}
             })).unwrap();
             let mut steps = vec![
@@ -2504,7 +2478,13 @@ mod tests {
             assert_eq!(replay(&request, &jobs).unwrap().status, "success");
             request.operation = "qualify".into();
             request.plan = None;
+            request.changed_paths = None;
+            request.schema_version = request.derived_version();
             assert_eq!(replay(&request, &jobs).unwrap().status, "success");
+            let mut skipped = jobs.clone();
+            skipped["jobs"][0]["conclusion"] = json!("skipped");
+            skipped["jobs"][0]["steps"] = json!([]);
+            assert!(replay(&request, &skipped).is_err());
             let release = steps
                 .iter()
                 .position(|step| step["name"] == "Validate tag")
@@ -3086,6 +3066,56 @@ mod tests {
             assert!(push_workflow(&paths[2], &file, Some("trunk")).unwrap());
         }
         assert!(requested_workflows(&paths, None, |_| Ok(Value::Null)).is_err());
+    }
+
+    #[test]
+    fn generated_path_gate_proves_required_installable_jobs_only_for_code() {
+        let installable = ".#checks.x86_64-linux.build-train-module";
+        let file = crate::render::ci::nix_build_matrix_file(
+            crate::cli::Platform::Github,
+            &crate::user_config::ResolvedRunner {
+                name: None,
+                labels: vec!["ubuntu-latest".into()],
+            },
+            &[installable.into(), ".#checks.x86_64-linux.other".into()],
+            &[],
+            &[],
+            &[],
+        )
+        .unwrap();
+        let path = file.relative_path.to_str().unwrap();
+        let context = format!("build ({installable})");
+        let mut request: AdapterRequest = serde_json::from_value(json!({
+            "schemaVersion":2,"operation":"admit","coordinate":"forge.example/team/demo",
+            "apiUrl":"https://forge.example/api","credentialFile":null,"authority":"777",
+            "revision":"a".repeat(40),"branch":"simit/update/candidate","workflows":[path],
+            "requiredChecks":[{"name":context,"authority":"777"}],
+            "changedPaths":["flake.lock"]
+        }))
+        .unwrap();
+        request.plan = Some(crate::project::CiUpdatePlan::new(
+            vec![file.clone()],
+            vec![],
+            vec![],
+        ));
+        request.validate().unwrap();
+        admit_workflows(&request).unwrap();
+        request.changed_paths = Some(vec!["CHANGELOG.md".into()]);
+        assert!(
+            admit_workflows(&request)
+                .unwrap_err()
+                .to_string()
+                .contains("does not prove")
+        );
+        request.changed_paths = Some(vec!["flake.lock".into()]);
+        request.plan.as_mut().unwrap().files[0].content =
+            file.content.replace("fetch-depth: 0", "fetch-depth: 1");
+        assert!(
+            admit_workflows(&request)
+                .unwrap_err()
+                .to_string()
+                .contains("not the generated classification job")
+        );
     }
 
     #[test]
