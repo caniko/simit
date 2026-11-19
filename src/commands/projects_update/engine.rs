@@ -1040,7 +1040,14 @@ fn generate(
     let diff = || {
         git_raw(
             checkout,
-            &["diff", "--binary", "--no-ext-diff", "HEAD", "--"],
+            &[
+                "diff",
+                "--binary",
+                "--no-ext-diff",
+                "--no-textconv",
+                "HEAD",
+                "--",
+            ],
         )
     };
     let before = diff()?;
