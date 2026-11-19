@@ -2897,7 +2897,7 @@ fn crow_audit_provisions_database_in_its_own_step() {
             ("uname", "#!/bin/sh\necho x86_64\n"),
             (
                 "nix",
-                "#!/bin/sh\n[ \"$1 $2 $3 $4 $5 $6\" = 'shell --extra-experimental-features nix-command flakes nixpkgs#git nixpkgs#cargo-audit -c' ] || exit 45\nshift 6\nPATH=\"$NIX_BIN:$PATH\"\nexport PATH\nexec \"$@\"\n",
+                "#!/bin/sh\n[ \"$1 $2 $3 $4 $5 $6 $7\" = 'shell --extra-experimental-features nix-command flakes nixpkgs#git nixpkgs#cargo-audit nixpkgs#cargo -c' ] || exit 45\nshift 7\nPATH=\"$NIX_BIN:$PATH\"\nexport PATH\nexec \"$@\"\n",
             ),
         ] {
             let path = if name == "git" && runtime == "nix" {

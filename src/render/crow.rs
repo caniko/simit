@@ -375,7 +375,7 @@ fn build_workflow(
         }
         if options.repository_checks && options.with_audit {
             let tools = if runtime == Runtime::Nix {
-                "nix shell --extra-experimental-features 'nix-command flakes' nixpkgs#git nixpkgs#cargo-audit -c "
+                "nix shell --extra-experimental-features 'nix-command flakes' nixpkgs#git nixpkgs#cargo-audit nixpkgs#cargo -c "
             } else {
                 ""
             };
