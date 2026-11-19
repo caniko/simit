@@ -3896,10 +3896,11 @@ assert 'ref=trunk&rev={revision}' in Path('flake.nix').read_text()
 assert json.loads(Path('flake.lock').read_text())['nodes']['simit']['locked']['rev'] == '{revision}'
 "#
         ));
-        let nix = tempfile::NamedTempFile::new().unwrap();
+        let tools = tempfile::tempdir().unwrap();
+        let nix = tools.path().join("nix");
         let shell = super::super::sandbox::tool("sh").unwrap();
         fs::write(
-            nix.path(),
+            &nix,
             format!(
                 "#!{}\nsed -i '/\"simit\": {{/,+4 s/{old}/{revision}/' flake.lock\n",
                 shell.display()
@@ -3907,9 +3908,9 @@ assert json.loads(Path('flake.lock').read_text())['nodes']['simit']['locked']['r
         )
         .unwrap();
         use std::os::unix::fs::PermissionsExt;
-        fs::set_permissions(nix.path(), fs::Permissions::from_mode(0o700)).unwrap();
+        fs::set_permissions(&nix, fs::Permissions::from_mode(0o700)).unwrap();
         f.control(json!({"candidate":"pending","expectedWorkflows":[".github/workflows/ci.yaml"]}));
-        super::super::pin::NIX.set(Some(nix.path().into()));
+        super::super::pin::NIX.set(Some(nix));
         let receipt = f.update(true).unwrap();
         super::super::pin::NIX.set(None);
         assert_eq!(receipt.phase, "candidate");

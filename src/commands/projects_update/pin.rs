@@ -39,10 +39,9 @@ fn skip(reason: &'static str) -> anyhow::Error {
     anyhow::Error::new(PinSkip(reason.to_owned()))
 }
 
-/// Tests replace Nix with a deterministic lock rewriter; production resolves
-/// the immutable store tool the updater unit runs.
 #[cfg(test)]
 thread_local! {
+    /// Each test can substitute a deterministic lock rewriter.
     pub(super) static NIX: std::cell::RefCell<Option<PathBuf>> = const { std::cell::RefCell::new(None) };
 }
 
