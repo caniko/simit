@@ -597,6 +597,11 @@ fn admit_concurrency(
     Ok(())
 }
 
+pub(super) fn is_workflow_path(path: &str) -> bool {
+    std::path::Path::new(path).parent() == Some(std::path::Path::new(".github/workflows"))
+        && (path.ends_with(".yaml") || path.ends_with(".yml"))
+}
+
 fn requested_workflows(
     paths: &[String],
     branch: Option<&str>,
@@ -605,10 +610,7 @@ fn requested_workflows(
     let mut workflows = BTreeSet::new();
     let mut identities = BTreeSet::new();
     for path in paths {
-        if std::path::Path::new(path).parent() == Some(std::path::Path::new(".github/workflows"))
-            && (path.ends_with(".yaml") || path.ends_with(".yml"))
-            && push_workflow(path, &source(path)?, branch)?
-        {
+        if is_workflow_path(path) && push_workflow(path, &source(path)?, branch)? {
             ensure!(
                 identities.insert(path.to_ascii_lowercase()),
                 "workflow paths collide in case-insensitive concurrency groups"
