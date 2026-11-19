@@ -1671,16 +1671,14 @@ pub fn update(
     } else {
         let mut scopes = profile.scopes.clone();
         let generator_input = super::pin::generator_input(&checkout, &profile.generator)?;
-        let mut generator_pin = None;
+        let mut pinned = false;
         if let Some(input) = generator_input.as_deref() {
             let revision = &profile.generator.source_revision;
             ensure!(
                 pin_item.is_none_or(|item| item.input != input || item.target == *revision),
                 "explicit pin conflicts with the enrolled generator revision"
             );
-            generator_pin = Some(super::pin::align_generator(
-                &checkout, &root, input, revision,
-            )?);
+            pinned = super::pin::align_generator(&checkout, &root, input, revision)?;
             let has_release = !crate::project::obsolete_generated_workflows(
                 &checkout,
                 &[],
@@ -1696,26 +1694,15 @@ pub fn update(
                 }
             }
         }
-        let (mut plan, workflow_paths) =
-            generate_scopes(&generator, &checkout, &state_directory, profile, &scopes)?;
         if let Some(item) = pin_item.filter(|item| generator_input.as_deref() != Some(&item.input))
         {
-            super::pin::apply(&checkout, &root, &mut plan, item)?;
-        } else if let Some(pin) = generator_pin.filter(|pin| !pin.patches.is_empty()) {
-            ensure!(
-                plan.files
-                    .iter()
-                    .chain(&plan.patches)
-                    .map(|f| &f.relative_path)
-                    .chain(&plan.obsolete)
-                    .all(|path| !super::pin::PIN_FILES
-                        .iter()
-                        .any(|name| path == Path::new(name))),
-                "generator pin conflicts with the enrolled flake scope"
-            );
-            for patch in pin.patches {
-                plan.push_patch(patch);
-            }
+            super::pin::apply(&checkout, &root, item)?;
+            pinned = true;
+        }
+        let (mut plan, workflow_paths) =
+            generate_scopes(&generator, &checkout, &state_directory, profile, &scopes)?;
+        if pinned {
+            super::pin::append_patches(&checkout, &mut plan)?;
         }
         let patch_paths = plan
             .patches
@@ -4054,10 +4041,21 @@ else:
 
     #[test]
     fn namespace_self_pinned_consumer_regenerates_both_drift_checks() {
+        self_pinned_candidate(false);
+    }
+
+    #[test]
+    fn namespace_generator_and_explicit_pins_both_precede_rendering() {
+        self_pinned_candidate(true);
+    }
+
+    fn self_pinned_candidate(explicit_pin: bool) {
         let mut f = Fixture::new();
         let generator = &mut f.config.profiles.get_mut("fleet").unwrap().generator;
         let revision = generator.source_revision.clone();
         let old = "b".repeat(40);
+        let explicit_target = "c".repeat(40);
+        let decoy_revision = if explicit_pin { &explicit_target } else { &old };
         fs::write(
             f.source.join("flake.nix"),
             format!(
@@ -4067,7 +4065,7 @@ else:
       url = "git+https://fixture.example/team/generator.git?ref=trunk&rev={old}";
       inputs.flake-utils.url = "github:numtide/flake-utils";
     }};
-    decoy.url = "github:other/simit";
+    decoy.url = "github:other/simit/{old}";
   }};
   outputs = {{ self, ... }}: {{}};
 }}
@@ -4079,7 +4077,9 @@ else:
             &f.source.join("flake.lock"),
             &json!({"root":"root","version":7,"nodes":{
                 "root":{"inputs":{"simit":"simit","decoy":"decoy"}},
-                "simit":{"locked":{"rev":old}},"decoy":{"locked":{"rev":old}}
+                "simit":{"locked":{"rev":old,"lastModified":10},
+                    "original":{"type":"git","url":"https://fixture.example/team/generator.git","ref":"trunk","rev":old}},
+                "decoy":{"locked":{"rev":old}}
             }}),
         )
         .unwrap();
@@ -4112,8 +4112,12 @@ else:
             r#"
 from pathlib import Path
 import json
-assert 'ref=trunk&rev={revision}' in Path('flake.nix').read_text()
-assert json.loads(Path('flake.lock').read_text())['nodes']['simit']['locked']['rev'] == '{revision}'
+flake = Path('flake.nix').read_text()
+nodes = json.loads(Path('flake.lock').read_text())['nodes']
+assert 'ref=trunk&rev={revision}' in flake
+assert 'github:other/simit/{decoy_revision}' in flake
+assert nodes['simit']['locked']['rev'] == '{revision}'
+assert nodes['decoy']['locked']['rev'] == '{decoy_revision}'
 "#
         ));
         let tools = tempfile::tempdir().unwrap();
@@ -4122,7 +4126,7 @@ assert json.loads(Path('flake.lock').read_text())['nodes']['simit']['locked']['r
         fs::write(
             &nix,
             format!(
-                "#!{}\nsed -i '/\"simit\": {{/,+4 s/{old}/{revision}/' flake.lock\n",
+                "#!{} -e\nsed -i '/\"simit\": {{/,+4 s/{old}/{revision}/' flake.lock\nif grep -q 'github:other/simit/{explicit_target}' flake.nix; then\n  sed -i '/\"decoy\": {{/,+2 s/{old}/{explicit_target}/' flake.lock\nfi\n",
                 shell.display()
             ),
         )
@@ -4131,21 +4135,36 @@ assert json.loads(Path('flake.lock').read_text())['nodes']['simit']['locked']['r
         fs::set_permissions(&nix, fs::Permissions::from_mode(0o700)).unwrap();
         f.control(json!({"candidate":"pending","expectedWorkflows":[".github/workflows/ci.yaml"]}));
         super::super::pin::NIX.set(Some(nix));
-        let receipt = f.update(true).unwrap();
+        let item = explicit_pin.then(|| PinItem {
+            coordinate: f.project.coordinate.clone(),
+            relative_path: f.project.relative_path.clone(),
+            input: "decoy".into(),
+            target: explicit_target.clone(),
+        });
+        let receipt = f.update_pin(true, item.as_ref()).unwrap();
         super::super::pin::NIX.set(None);
         assert_eq!(receipt.phase, "candidate");
         assert!(
             receipt.patches.contains_key("flake.nix") && receipt.patches.contains_key("flake.lock")
         );
-        assert!(receipt.managed.contains_key(".github/workflows/pages.yaml"));
-        assert!(
+        assert_eq!(receipt.patches.len(), 2);
+        let committed = |path| {
             git(
                 &f.remote,
-                &["show", &format!("{}:{release}", receipt.candidate)]
+                &["show", &format!("{}:{path}", receipt.candidate)],
             )
             .unwrap()
-            .contains("name: new release")
+        };
+        assert!(committed("flake.nix").contains(&format!("ref=trunk&rev={revision}")));
+        assert!(committed("flake.nix").contains(&format!("github:other/simit/{decoy_revision}")));
+        let lock: serde_json::Value = serde_json::from_str(&committed("flake.lock")).unwrap();
+        assert_eq!(lock["nodes"]["simit"]["locked"]["rev"], revision);
+        assert_eq!(
+            &lock["nodes"]["decoy"]["locked"]["rev"],
+            decoy_revision.as_str()
         );
+        assert!(receipt.managed.contains_key(".github/workflows/pages.yaml"));
+        assert!(committed(release).contains("name: new release"));
     }
 
     #[test]

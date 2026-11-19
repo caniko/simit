@@ -1,6 +1,7 @@
 //! Explicit supply pin work items: rewrite one enrolled flake input, refreeze
 //! its lock entry and hand both files to the normal candidate transaction.
 use anyhow::{Context, Result, ensure};
+use rnix::ast::{self, Attr, Expr, HasEntry, InterpolPart};
 use serde_json::Value;
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -14,7 +15,7 @@ use crate::project::{CiUpdatePlan, GeneratedFile};
 
 /// Files a pin owns; no other scope may claim either, and a lock refresh may
 /// touch nothing else.
-pub(super) const PIN_FILES: [&str; 2] = ["flake.nix", "flake.lock"];
+const PIN_FILES: [&str; 2] = ["flake.nix", "flake.lock"];
 
 /// An item that cannot be applied at all. The repository transaction is
 /// dropped before anything is written or committed and reported as skipped.
@@ -55,50 +56,109 @@ pub(super) fn generator_input(checkout: &Path, generator: &Generator) -> Result<
         Err(error) => return Err(error.into()),
     }
     let source = fs::read_to_string(path)?;
-    let mut inputs = declarations(&source)
-        .into_iter()
-        .filter_map(|(name, url, _, _)| {
-            let coordinate = if let Some(repo) = url.strip_prefix("github:") {
-                let mut parts = repo.split(['/', '?', '#']);
-                format!("github.com/{}/{}", parts.next()?, parts.next()?).to_ascii_lowercase()
-            } else {
-                crate::registry::coordinate_from_remote(url.strip_prefix("git+")?)?
-            };
-            (coordinate == generator.source_coordinate).then_some(name)
-        })
-        .collect::<Vec<_>>();
-    if inputs.is_empty() {
-        return Ok(None);
-    }
-    // A `flake = false` input only vendors source; it never runs the generator.
-    // The declaration wins over a lock that may predate it.
-    let declared = source_only_inputs(&source);
-    inputs.retain(|name| !declared.contains(name));
+    let inputs = root_inputs(&source).map_err(anyhow::Error::msg)?;
     let lock_path = checkout.join("flake.lock");
-    if !inputs.is_empty() && lock_path.is_file() {
-        let lock: Value = crate::review::read_json(&lock_path)?;
-        inputs.retain(|name| {
-            lock["nodes"]["root"]["inputs"][name]
-                .as_str()
-                .is_none_or(|node| lock["nodes"][node]["flake"] != Value::Bool(false))
-        });
+    let lock: Value = match fs::symlink_metadata(&lock_path) {
+        Ok(metadata) if metadata.is_file() => crate::review::read_json(&lock_path)?,
+        Ok(_) => anyhow::bail!("flake.lock is not a regular file"),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Value::Null,
+        Err(error) => return Err(error.into()),
+    };
+    let matches =
+        |coordinate: Option<String>| coordinate.as_ref() == Some(&generator.source_coordinate);
+    let mut chosen = None;
+    let names: BTreeSet<_> = inputs
+        .keys()
+        .chain(
+            lock_inputs(&lock)
+                .into_iter()
+                .flat_map(|inputs| inputs.keys()),
+        )
+        .collect();
+    for name in names {
+        let declared = inputs.get(name);
+        let node = root_node(&lock, name);
+        // A source-only input or subflake is not the enrolled generator, even
+        // if it points at the same repository. Check the declaration as well
+        // as the lock, which may be stale.
+        let url = declared
+            .and_then(|input| input.url.as_ref())
+            .map(|(url, _)| url.as_str());
+        if declared.is_some_and(|input| input.flake == Some(false))
+            || url.is_some_and(has_subflake_dir)
+            || node.is_some_and(|node| {
+                node["flake"] == Value::Bool(false)
+                    || node["original"].get("dir").is_some()
+                    || node["locked"].get("dir").is_some()
+            })
+        {
+            continue;
+        }
+        let source_matches = matches(url.and_then(url_coordinate));
+        let lock_matches = matches(node.and_then(|node| original_coordinate(&node["original"])));
+        if source_matches || lock_matches {
+            ensure!(
+                source_matches && lock_matches,
+                "generator input {name} lacks a matching literal declaration and root lock entry"
+            );
+            ensure!(
+                chosen.replace(name.clone()).is_none(),
+                "multiple flake inputs refer to the enrolled generator coordinate"
+            );
+        }
     }
-    match inputs.as_slice() {
-        [] => Ok(None),
-        [name] => Ok(Some(name.clone())),
-        _ => anyhow::bail!("multiple flake inputs refer to the enrolled generator coordinate"),
+    Ok(chosen)
+}
+
+fn url_coordinate(url: &str) -> Option<String> {
+    if let Some(repo) = url.strip_prefix("github:") {
+        let mut parts = repo.split(['/', '?', '#']);
+        Some(format!("github.com/{}/{}", parts.next()?, parts.next()?).to_ascii_lowercase())
+    } else {
+        crate::registry::coordinate_from_remote(url.strip_prefix("git+")?)
     }
 }
 
+fn original_coordinate(original: &Value) -> Option<String> {
+    match original["type"].as_str()? {
+        "github" => Some(
+            format!(
+                "{}/{}/{}",
+                original
+                    .get("host")
+                    .map_or(Some("github.com"), Value::as_str)?,
+                original["owner"].as_str()?,
+                original["repo"].as_str()?
+            )
+            .to_ascii_lowercase(),
+        ),
+        "git" => crate::registry::coordinate_from_remote(original["url"].as_str()?),
+        _ => None,
+    }
+}
+
+fn has_subflake_dir(url: &str) -> bool {
+    url.split_once('?')
+        .is_some_and(|(_, query)| query.split(['&', '#']).any(|part| part.starts_with("dir=")))
+}
+
+fn lock_inputs(lock: &Value) -> Option<&serde_json::Map<String, Value>> {
+    let root = lock["root"].as_str()?;
+    lock["nodes"][root]["inputs"].as_object()
+}
+
+fn root_node<'a>(lock: &'a Value, input: &str) -> Option<&'a Value> {
+    lock["nodes"].get(lock_inputs(lock)?.get(input)?.as_str()?)
+}
+
 /// Refresh the enrolled generator before the read-only renderer sees the flake.
-/// Return the patches separately so the caller can check other scopes' ownership.
+/// Report whether the flake files need to be included in the candidate.
 pub(super) fn align_generator(
     checkout: &Path,
     state: &Path,
     input: &str,
     target: &str,
-) -> Result<CiUpdatePlan> {
-    let mut plan = CiUpdatePlan::new(vec![], vec![], vec![]);
+) -> Result<bool> {
     let item = PinItem {
         coordinate: String::new(),
         relative_path: String::new(),
@@ -110,19 +170,40 @@ pub(super) fn align_generator(
     let rewritten = rewrite(&source, input, target).map_err(anyhow::Error::msg)?;
     let locked: Value = crate::review::read_json(&checkout.join("flake.lock"))?;
     if source != rewritten || verify_lock(&locked, &locked, input, target).is_err() {
-        apply(checkout, state, &mut plan, &item).context("align generator flake input")?;
+        apply(checkout, state, &item).context("align generator flake input")?;
+        let after: Value = crate::review::read_json(&checkout.join("flake.lock"))?;
+        verify_generator_move(&locked, &after, input)?;
+        return Ok(true);
     }
-    Ok(plan)
+    Ok(false)
 }
 
-/// Pin one input on the disposable checkout and append both flake files to the
-/// candidate plan. Nothing is written when the declaration is unrecognised.
-pub(super) fn apply(
-    checkout: &Path,
-    state: &Path,
-    plan: &mut CiUpdatePlan,
-    item: &PinItem,
-) -> Result<()> {
+fn verify_generator_move(before: &Value, after: &Value, input: &str) -> Result<()> {
+    let previous = root_node(before, input).context("missing previous generator lock entry")?;
+    let next = root_node(after, input).context("missing new generator lock entry")?;
+    ensure!(
+        next["flake"] != Value::Bool(false)
+            && next["original"].get("dir").is_none()
+            && next["locked"].get("dir").is_none()
+            && original_coordinate(&next["original"]) == original_coordinate(&previous["original"]),
+        "locking changed the generator input source"
+    );
+    if previous["locked"]["rev"] != next["locked"]["rev"] {
+        let timestamp = |node: &Value| node["locked"]["lastModified"].as_u64();
+        // The consumer checkout has no generator Git history to prove ancestry.
+        ensure!(
+            timestamp(previous)
+                .zip(timestamp(next))
+                .is_some_and(|(old, new)| new >= old),
+            "refusing to move generator input {input} backwards or without comparable lock timestamps"
+        );
+    }
+    Ok(())
+}
+
+/// Carry the final flake and lock into the plan, without taking ownership from
+/// an explicitly enrolled generation scope.
+pub(super) fn append_patches(checkout: &Path, plan: &mut CiUpdatePlan) -> Result<()> {
     for path in plan
         .files
         .iter()
@@ -138,6 +219,18 @@ pub(super) fn apply(
             path.display()
         );
     }
+    for name in PIN_FILES {
+        plan.push_patch(GeneratedFile {
+            relative_path: name.into(),
+            content: fs::read_to_string(checkout.join(name))?,
+        });
+    }
+    Ok(())
+}
+
+/// Pin one input on the disposable checkout. Nothing is written when the
+/// declaration is unrecognised.
+pub(super) fn apply(checkout: &Path, state: &Path, item: &PinItem) -> Result<()> {
     regular_files(checkout)?;
     let flake = checkout.join("flake.nix");
     let source = match fs::read_to_string(&flake) {
@@ -162,18 +255,7 @@ pub(super) fn apply(
     }
     let after: Value = crate::review::read_json(&lock_path)?;
     verify_lock(&before, &after, &item.input, &item.target)?;
-    verify_status(checkout)?;
-    // README badges derive from the pre-pin checkout; the next run regenerates
-    // them from the landed flake, like any other badge-input move.
-    plan.patches
-        .retain(|patch| patch.relative_path != Path::new("README.md"));
-    for name in PIN_FILES {
-        plan.push_patch(GeneratedFile {
-            relative_path: name.into(),
-            content: fs::read_to_string(checkout.join(name))?,
-        });
-    }
-    Ok(())
+    verify_status(checkout)
 }
 
 /// A repository-controlled symlink would redirect the pin's writes outside the
@@ -252,19 +334,14 @@ fn verify_status(checkout: &Path) -> Result<()> {
 /// The pinned node must carry the target, and every other root input must keep
 /// its exact locked node graph.
 pub(super) fn verify_lock(before: &Value, after: &Value, input: &str, target: &str) -> Result<()> {
-    let node = after["nodes"]["root"]["inputs"][input]
-        .as_str()
+    let node = root_node(after, input)
         .with_context(|| format!("flake.lock root does not declare input {input}"))?;
     ensure!(
-        after["nodes"][node]["locked"]["rev"].as_str() == Some(target),
+        node["locked"]["rev"].as_str() == Some(target),
         "flake.lock did not pin {input} to {target}"
     );
-    let after_inputs = after["nodes"]["root"]["inputs"]
-        .as_object()
-        .context("flake.lock has no root inputs")?;
-    let before_inputs = before["nodes"]["root"]["inputs"]
-        .as_object()
-        .context("previous flake.lock has no root inputs")?;
+    let after_inputs = lock_inputs(after).context("flake.lock has no root inputs")?;
+    let before_inputs = lock_inputs(before).context("previous flake.lock has no root inputs")?;
     let before_names: BTreeSet<_> = before_inputs.keys().filter(|name| *name != input).collect();
     let after_names: BTreeSet<_> = after_inputs.keys().filter(|name| *name != input).collect();
     ensure!(
@@ -324,132 +401,140 @@ fn resolved(
     Ok(value)
 }
 
-/// Rewrite the one URL literal that declares `input`. The three accepted
-/// declaration forms are the ones enrolled consumers use; anything else is
-/// refused rather than guessed at.
-fn declarations(source: &str) -> Vec<(String, String, usize, usize)> {
-    let tokens = tokens(source);
-    root_attributes(&tokens, "url")
-        .into_iter()
-        .filter_map(|(name, value)| {
-            let (url, start, end) = string(tokens.get(value))?;
-            Some((name, url.to_owned(), start, end))
-        })
-        .collect()
+const UNKNOWN: &str = "unrecognised-input-declaration";
+
+#[derive(Default)]
+struct Input {
+    url: Option<(String, rnix::TextRange)>,
+    flake: Option<bool>,
 }
 
-/// Root inputs declaring literal `flake = false`: source only, never a generator.
-fn source_only_inputs(source: &str) -> Vec<String> {
-    let tokens = tokens(source);
-    root_attributes(&tokens, "flake")
-        .into_iter()
-        .filter(|(_, value)| ident(tokens.get(*value)) == Some("false"))
-        .map(|(name, _)| name)
-        .collect()
+fn literal(value: &ast::Str) -> Option<String> {
+    let [InterpolPart::Literal(text)] = <[_; 1]>::try_from(value.normalized_parts()).ok()? else {
+        return None;
+    };
+    Some(text)
 }
 
-/// Each root input binding `<input>.<attribute> = value` in the supported
-/// literal forms, as (input name, index of the value token).
-fn root_attributes(tokens: &[Token], attribute: &str) -> Vec<(String, usize)> {
-    let mut containers = Vec::new();
-    let mut found = Vec::new();
-    for index in 0..tokens.len() {
-        match &tokens[index] {
-            Token::Punct('{') => {
-                // Keep the whole binding path, not just its last segment:
-                // `inputs.tools.inputs` is not the root `inputs` set.
-                let path = tokens[..index]
-                    .strip_suffix(&[Token::Punct('=')])
-                    .and_then(|lhs| {
-                        lhs.rsplit(|token| matches!(token, Token::Punct('{' | ';')))
-                            .next()
-                    });
-                containers.push(path);
+fn attr_name(attr: Attr) -> Option<String> {
+    match attr {
+        Attr::Ident(name) => Some(name.to_string()),
+        Attr::Str(value) => literal(&value),
+        Attr::Dynamic(_) => None,
+    }
+}
+
+fn root_inputs(source: &str) -> Result<BTreeMap<String, Input>, &'static str> {
+    let parsed = rnix::Root::parse(source);
+    if !parsed.errors().is_empty() {
+        return Err(UNKNOWN);
+    }
+    let Some(Expr::AttrSet(root)) = parsed.tree().expr() else {
+        return Err(UNKNOWN);
+    };
+    let mut inputs = BTreeMap::new();
+    read_inputs(root, &[], source, &mut inputs)?;
+    Ok(inputs)
+}
+
+// Descend only through literal containers on `inputs.<name>.{url,flake}`.
+// Never search expressions (notably `outputs`) or nested input overrides.
+fn read_inputs(
+    set: ast::AttrSet,
+    prefix: &[String],
+    source: &str,
+    inputs: &mut BTreeMap<String, Input>,
+) -> Result<(), &'static str> {
+    if set.rec_token().is_some() {
+        return Err(UNKNOWN);
+    }
+    for inherit in set.inherits() {
+        for attr in inherit.attrs() {
+            let name = attr_name(attr).ok_or(UNKNOWN)?;
+            if match prefix.len() {
+                0 => name == "inputs",
+                1 => true,
+                _ => matches!(name.as_str(), "url" | "flake"),
+            } {
+                return Err(UNKNOWN);
             }
-            Token::Punct('}') => {
-                containers.pop();
-            }
-            _ => {}
-        }
-        let at_top = matches!(containers.as_slice(), [None]);
-        let in_inputs = matches!(containers.as_slice(), [None, Some([Token::Ident(inputs)])] if inputs == "inputs");
-        let previous = index.checked_sub(1).and_then(|index| tokens.get(index));
-        // `inputs.<input>.url = "…";`
-        if ident(tokens.get(index)) == Some("inputs")
-            && punct(tokens.get(index + 1), '.')
-            && ident(tokens.get(index + 2)).is_some()
-            && punct(tokens.get(index + 3), '.')
-            && ident(tokens.get(index + 4)) == Some(attribute)
-            && punct(tokens.get(index + 5), '=')
-            && tokens.get(index + 6).is_some()
-            && at_top
-            && !punct(previous, '.')
-        {
-            found.push((ident(tokens.get(index + 2)).unwrap().to_owned(), index + 6));
-            continue;
-        }
-        // `<input>.url = "…";`
-        if let Some(name) = ident(tokens.get(index))
-            && name != "inputs"
-            && punct(tokens.get(index + 1), '.')
-            && ident(tokens.get(index + 2)) == Some(attribute)
-            && punct(tokens.get(index + 3), '=')
-            && tokens.get(index + 4).is_some()
-            && (at_top || in_inputs)
-            && !punct(previous, '.')
-        {
-            found.push((name.to_owned(), index + 4));
-            continue;
-        }
-        // `<input> = { url = "…"; … };`
-        let enclosing_input = match containers.as_slice() {
-            [None, Some([Token::Ident(name)])] => Some(name),
-            [
-                None,
-                Some([Token::Ident(inputs), Token::Punct('.'), Token::Ident(name)]),
-            ]
-            | [
-                None,
-                Some([Token::Ident(inputs)]),
-                Some([Token::Ident(name)]),
-            ] if inputs == "inputs" => Some(name),
-            _ => None,
-        };
-        if ident(tokens.get(index)) == Some(attribute)
-            && !punct(previous, '.')
-            && punct(tokens.get(index + 1), '=')
-            && tokens.get(index + 2).is_some()
-            && let Some(name) = enclosing_input
-            && !matches!(
-                name.as_str(),
-                "inputs" | "outputs" | "description" | "nixConfig"
-            )
-        {
-            found.push((name.clone(), index + 2));
         }
     }
-    found
+    for binding in set.attrpath_values() {
+        let mut path = prefix.to_vec();
+        let attrpath = binding.attrpath().ok_or(UNKNOWN)?;
+        let mut attrs = attrpath.attrs();
+        while path.len() < 3
+            && let Some(attr) = attrs.next()
+        {
+            path.push(attr_name(attr).ok_or(UNKNOWN)?);
+            if path[0] != "inputs" {
+                break;
+            }
+        }
+        if path.first().is_none_or(|name| name != "inputs") {
+            continue;
+        }
+        if path.len() < 3 {
+            let Some(Expr::AttrSet(child)) = binding.value() else {
+                return Err(UNKNOWN);
+            };
+            read_inputs(child, &path, source, inputs)?;
+        } else {
+            let input = inputs.entry(path[1].clone()).or_default();
+            match (path[2].as_str(), binding.value()) {
+                ("url", Some(Expr::Str(value)))
+                    if input.url.is_none() && attrs.next().is_none() =>
+                {
+                    fn range(node: &impl ast::AstNode) -> rnix::TextRange {
+                        node.syntax().text_range()
+                    }
+                    let range = range(&value);
+                    let url = literal(&value).ok_or(UNKNOWN)?;
+                    // Only plain double-quoted URLs; replacing an escaped or
+                    // indented literal would require re-encoding its contents.
+                    if source[usize::from(range.start())..usize::from(range.end())]
+                        .strip_prefix('"')
+                        .and_then(|s| s.strip_suffix('"'))
+                        != Some(&url)
+                    {
+                        return Err(UNKNOWN);
+                    }
+                    input.url = Some((url, range));
+                }
+                ("flake", Some(Expr::Ident(value)))
+                    if input.flake.is_none() && attrs.next().is_none() =>
+                {
+                    input.flake = Some(value.to_string().parse().map_err(|_| UNKNOWN)?);
+                }
+                ("url" | "flake", _) => return Err(UNKNOWN),
+                _ => {}
+            }
+        }
+    }
+    Ok(())
 }
 
 fn rewrite(source: &str, input: &str, target: &str) -> Result<String, &'static str> {
-    let matching = declarations(source)
-        .into_iter()
-        .filter(|(name, _, _, _)| name == input)
-        .collect::<Vec<_>>();
-    let [(_, url, start, end)] = matching.as_slice() else {
-        return Err("unrecognised-input-declaration");
-    };
+    let inputs = root_inputs(source)?;
+    let (url, range) = inputs
+        .get(input)
+        .and_then(|input| input.url.as_ref())
+        .ok_or(UNKNOWN)?;
     let rewritten = pin_url(url, target)?;
     Ok(format!(
         "{}{}{}",
-        &source[..*start],
+        &source[..usize::from(range.start()) + 1],
         rewritten,
-        &source[*end..]
+        &source[usize::from(range.end()) - 1..]
     ))
 }
 
 fn pin_url(url: &str, target: &str) -> Result<String, &'static str> {
     if let Some(rest) = url.strip_prefix("github:") {
+        if rest.contains(['?', '#']) {
+            return Err(UNKNOWN);
+        }
         let parts = rest.split('/').collect::<Vec<_>>();
         return match parts.as_slice() {
             [owner, repository] if !owner.is_empty() && !repository.is_empty() => {
@@ -499,92 +584,6 @@ fn is_revision(value: &str) -> bool {
     value.len() == 40 && value.bytes().all(|byte| byte.is_ascii_hexdigit())
 }
 
-#[derive(Debug, PartialEq, Eq)]
-enum Token {
-    Ident(String),
-    String {
-        value: String,
-        start: usize,
-        end: usize,
-    },
-    Punct(char),
-}
-
-/// Tokenize just enough Nix to find input URL assignments without matching
-/// comments, plain strings or indented strings.
-fn tokens(source: &str) -> Vec<Token> {
-    let bytes = source.as_bytes();
-    let mut tokens = Vec::new();
-    let mut index = 0;
-    while index < bytes.len() {
-        let byte = bytes[index];
-        if byte.is_ascii_whitespace() {
-            index += 1;
-        } else if byte == b'#' {
-            while index < bytes.len() && bytes[index] != b'\n' {
-                index += 1;
-            }
-        } else if byte == b'/' && bytes.get(index + 1) == Some(&b'*') {
-            index += 2;
-            while index + 1 < bytes.len() && !(bytes[index] == b'*' && bytes[index + 1] == b'/') {
-                index += 1;
-            }
-            index = (index + 2).min(bytes.len());
-        } else if byte == b'"' {
-            let start = index + 1;
-            let mut end = start;
-            while end < bytes.len() && bytes[end] != b'"' {
-                end += if bytes[end] == b'\\' { 2 } else { 1 };
-            }
-            let end = end.min(bytes.len());
-            tokens.push(Token::String {
-                value: source[start..end].to_owned(),
-                start,
-                end,
-            });
-            index = (end + 1).min(bytes.len());
-        } else if byte == b'\'' && bytes.get(index + 1) == Some(&b'\'') {
-            index += 2;
-            while index + 1 < bytes.len() && !(bytes[index] == b'\'' && bytes[index + 1] == b'\'') {
-                index += 1;
-            }
-            index = (index + 2).min(bytes.len());
-        } else if byte.is_ascii_alphabetic() || byte == b'_' {
-            let start = index;
-            index += 1;
-            while index < bytes.len()
-                && (bytes[index].is_ascii_alphanumeric()
-                    || matches!(bytes[index], b'_' | b'-' | b'\''))
-            {
-                index += 1;
-            }
-            tokens.push(Token::Ident(source[start..index].to_owned()));
-        } else {
-            tokens.push(Token::Punct(byte as char));
-            index += 1;
-        }
-    }
-    tokens
-}
-
-fn ident(token: Option<&Token>) -> Option<&str> {
-    match token {
-        Some(Token::Ident(name)) => Some(name),
-        _ => None,
-    }
-}
-
-fn punct(token: Option<&Token>, expected: char) -> bool {
-    matches!(token, Some(Token::Punct(actual)) if *actual == expected)
-}
-
-fn string(token: Option<&Token>) -> Option<(&str, usize, usize)> {
-    match token {
-        Some(Token::String { value, start, end }) => Some((value, *start, *end)),
-        _ => None,
-    }
-}
-
 #[cfg(all(test, target_os = "linux"))]
 mod tests {
     use super::*;
@@ -592,21 +591,175 @@ mod tests {
 
     const TARGET: &str = "1111111111111111111111111111111111111111";
 
-    fn rewrites(source: &str, input: &str) -> Result<String, &'static str> {
-        rewrite(source, input, TARGET)
-    }
-
-    #[test]
-    fn matches_generator_coordinate_not_input_name() {
-        let root = tempfile::tempdir().unwrap();
-        let generator = Generator {
+    fn generator() -> Generator {
+        Generator {
             executable: "/generator".into(),
             source_revision: TARGET.into(),
             source_coordinate: "github.com/caniko/simit".into(),
             forge: "github".into(),
             executable_sha256: None,
             required_checks: vec![],
+        }
+    }
+
+    fn github_original() -> Value {
+        json!({"type":"github", "owner":"caniko", "repo":"simit"})
+    }
+
+    fn write_lock(root: &Path, name: &str, node: Value) {
+        fs::write(
+            root.join("flake.lock"),
+            json!({"root":"actual_root", "nodes": {
+                "actual_root":{"inputs":{(name):"node"}}, "node":node
+            }})
+            .to_string(),
+        )
+        .unwrap();
+    }
+
+    fn rewrites(source: &str, input: &str) -> Result<String, &'static str> {
+        rewrite(source, input, TARGET)
+    }
+
+    #[test]
+    fn never_rewrites_outputs_let_bindings() {
+        let unsupported = format!(
+            r#"{{
+                inputs.tool = {{ type = "github"; owner = "caniko"; repo = "simit"; rev = "{TARGET}"; }};
+                outputs = {{ self, tool }}: let tool.url = "github:caniko/simit"; in {{}};
+            }}"#
+        );
+        assert!(rewrites(&unsupported, "tool").is_err());
+        let root = tempfile::tempdir().unwrap();
+        let lock = json!({"original":github_original(),"locked":{"rev":TARGET}});
+        write_lock(root.path(), "tool", lock.clone());
+        fs::write(root.path().join("flake.nix"), &unsupported).unwrap();
+        assert!(generator_input(root.path(), &generator()).is_err());
+        let quoted = r#"{
+            inputs."simit".url = "github:caniko/simit";
+            outputs = { self, simit }: let simit = { url = "github:caniko/simit"; };
+                inputs.simit.flake = false; in {};
+        }"#;
+        write_lock(root.path(), "simit", lock);
+        for source in [quoted.to_owned(), quoted.replace("\"simit\"", "simit")] {
+            fs::write(root.path().join("flake.nix"), source).unwrap();
+            assert_eq!(
+                generator_input(root.path(), &generator())
+                    .unwrap()
+                    .as_deref(),
+                Some("simit")
+            );
+        }
+        assert_eq!(
+            rewrites(quoted, "simit").unwrap(),
+            quoted.replacen(
+                "github:caniko/simit",
+                &format!("github:caniko/simit/{TARGET}"),
+                1
+            )
+        );
+    }
+
+    #[test]
+    fn refuses_nonliteral_pin_bindings() {
+        for source in [
+            r#"{ inputs.foo.url = "github:o/${name}"; }"#,
+            r#"{ inputs.foo.url = "github:o/r" + suffix; }"#,
+            r#"{ inputs.foo.url = "github:o/r"; inputs.foo.flake = isFlake; }"#,
+            r#"{ inputs.foo.url = "github:o/r"; inputs.${name}.flake = false; }"#,
+            r#"{ inputs.foo.url = "github:o/r"; inputs.foo = { inherit flake; }; }"#,
+            r#"{ inputs.foo.url = "github:o/r"; outputs = ; }"#,
+        ] {
+            assert!(rewrites(source, "foo").is_err(), "{source}");
+        }
+    }
+
+    #[test]
+    fn refuses_github_queries_and_fragments() {
+        for url in [
+            "github:o/r?rev=main",
+            "github:o/r#fragment",
+            "github:o?h/r",
+            "github:o/r/main#fragment",
+        ] {
+            assert!(pin_url(url, TARGET).is_err(), "{url}");
+        }
+    }
+
+    #[test]
+    fn generator_discovery_requires_a_matching_regular_root_lock() {
+        let root = tempfile::tempdir().unwrap();
+        let flake = root.path().join("flake.nix");
+        let lock = root.path().join("flake.lock");
+        let source = r#"{ inputs.simit.url = "github:caniko/simit"; }"#;
+        fs::write(&flake, source).unwrap();
+        assert!(generator_input(root.path(), &generator()).is_err());
+        write_lock(
+            root.path(),
+            "simit",
+            json!({"original":{"type":"github","owner":"other","repo":"simit"}}),
+        );
+        assert!(generator_input(root.path(), &generator()).is_err());
+        write_lock(root.path(), "other", json!({"original":github_original()}));
+        assert!(generator_input(root.path(), &generator()).is_err());
+        write_lock(
+            root.path(),
+            "simit",
+            json!({"original":github_original(), "flake":false}),
+        );
+        assert_eq!(generator_input(root.path(), &generator()).unwrap(), None);
+        write_lock(root.path(), "simit", json!({"original":github_original()}));
+        let outside = tempfile::tempdir().unwrap();
+        let target = outside.path().join("lock");
+        fs::rename(&lock, &target).unwrap();
+        std::os::unix::fs::symlink(&target, &lock).unwrap();
+        assert!(
+            generator_input(root.path(), &generator())
+                .unwrap_err()
+                .to_string()
+                .contains("flake.lock is not a regular file")
+        );
+    }
+
+    #[test]
+    fn ignores_generator_subflakes() {
+        let root = tempfile::tempdir().unwrap();
+        let flake = root.path().join("flake.nix");
+        write_lock(root.path(), "simit", json!({"original":github_original()}));
+        for url in [
+            "github:caniko/simit?dir=child",
+            "git+https://github.com/caniko/simit?ref=main&dir=child",
+        ] {
+            fs::write(&flake, format!(r#"{{ inputs.simit.url = "{url}"; }}"#)).unwrap();
+            assert_eq!(generator_input(root.path(), &generator()).unwrap(), None);
+        }
+        fs::write(&flake, r#"{ inputs.simit.url = "github:caniko/simit"; }"#).unwrap();
+        let mut original = github_original();
+        original["dir"] = json!("child");
+        write_lock(root.path(), "simit", json!({"original":original}));
+        assert_eq!(generator_input(root.path(), &generator()).unwrap(), None);
+    }
+
+    #[test]
+    fn generator_moves_require_nondecreasing_lock_timestamps() {
+        let lock = |rev: &str, timestamp: Value| {
+            json!({"root":"root", "nodes": {
+                "root":{"inputs":{"simit":"node"}}, "node":{"original":github_original(),"locked":{"rev":rev,"lastModified":timestamp}}
+            }})
         };
+        let old = lock(&"a".repeat(40), json!(20));
+        for timestamp in [json!(19), Value::Null] {
+            assert!(verify_generator_move(&old, &lock(TARGET, timestamp), "simit").is_err());
+        }
+        for timestamp in [20, 21] {
+            verify_generator_move(&old, &lock(TARGET, json!(timestamp)), "simit").unwrap();
+        }
+    }
+
+    #[test]
+    fn matches_generator_coordinate_not_input_name() {
+        let root = tempfile::tempdir().unwrap();
+        let generator = generator();
         let old = "a".repeat(40);
         let source = format!(
             r#"{{ inputs = {{
@@ -615,6 +768,11 @@ mod tests {
         }}; }}"#
         );
         fs::write(root.path().join("flake.nix"), &source).unwrap();
+        write_lock(
+            root.path(),
+            "tool",
+            json!({"original":{"type":"git","url":"https://github.com/Caniko/Simit.git"}}),
+        );
         let input = generator_input(root.path(), &generator).unwrap().unwrap();
         assert_eq!(input, "tool");
         assert_eq!(
@@ -626,14 +784,7 @@ mod tests {
     #[test]
     fn ignores_source_only_generator_inputs() {
         let root = tempfile::tempdir().unwrap();
-        let generator = Generator {
-            executable: "/generator".into(),
-            source_revision: TARGET.into(),
-            source_coordinate: "github.com/caniko/simit".into(),
-            forge: "github".into(),
-            executable_sha256: None,
-            required_checks: vec![],
-        };
+        let generator = generator();
         fs::write(
             root.path().join("flake.nix"),
             r#"{ inputs.templates = { url = "github:caniko/simit"; flake = false; }; }"#,
@@ -654,13 +805,17 @@ mod tests {
         assert_eq!(generator_input(root.path(), &generator).unwrap(), None);
         fs::remove_file(root.path().join("flake.lock")).unwrap();
         assert_eq!(generator_input(root.path(), &generator).unwrap(), None);
-        // No generator match never reads the lock.
+        // An unrelated root input is not the generator.
         fs::write(
             root.path().join("flake.nix"),
             r#"{ inputs.x.url = "github:o/r"; }"#,
         )
         .unwrap();
-        fs::write(root.path().join("flake.lock"), "not json").unwrap();
+        write_lock(
+            root.path(),
+            "x",
+            json!({"original":{"type":"github","owner":"o","repo":"r"}}),
+        );
         assert_eq!(generator_input(root.path(), &generator).unwrap(), None);
     }
 
@@ -670,12 +825,12 @@ mod tests {
             inputs.generator.url = "github:caniko/simit";
             inputs.tools.url = "github:example/tools";
             inputs.tools.inputs = { other-simit.url = "github:caniko/simit"; };
-            tools.inputs.other-simit = { url = "github:caniko/simit"; };
+            inputs.tools.inputs.another-simit = { url = "github:caniko/simit"; };
         }"#;
-        let matches = declarations(source)
+        let matches = root_inputs(source)
+            .unwrap()
             .into_iter()
-            .filter(|(_, url, ..)| url == "github:caniko/simit")
-            .map(|(name, ..)| name)
+            .filter_map(|(name, input)| (input.url?.0 == "github:caniko/simit").then_some(name))
             .collect::<Vec<_>>();
         assert_eq!(matches, ["generator"]);
         assert!(rewrites(source, "other-simit").is_err());
@@ -694,13 +849,14 @@ mod tests {
                 ),
             ),
             (
-                "{ foo.url = \"github:o/r/".to_owned() + &old + "\"; }",
-                format!("{{ foo.url = \"github:o/r/{TARGET}\"; }}"),
+                "{ inputs = { foo.url = \"github:o/r/".to_owned() + &old + "\"; }; }",
+                format!("{{ inputs = {{ foo.url = \"github:o/r/{TARGET}\"; }}; }}"),
             ),
             (
-                "{ foo = { url = \"git+https://github.com/o/r.git?ref=trunk\"; }; }".to_owned(),
+                "{ inputs = { foo = { url = \"git+https://github.com/o/r.git?ref=trunk\"; }; }; }"
+                    .to_owned(),
                 format!(
-                    "{{ foo = {{ url = \"git+https://github.com/o/r.git?ref=trunk&rev={TARGET}\"; }}; }}"
+                    "{{ inputs = {{ foo = {{ url = \"git+https://github.com/o/r.git?ref=trunk&rev={TARGET}\"; }}; }}; }}"
                 ),
             ),
             (
@@ -716,10 +872,10 @@ mod tests {
             ),
             (
                 format!(
-                    "{{ foo = {{ url = \"git+https://github.com/o/r?rev={old}\"; }}; bar.url = \"github:o/b\"; }}"
+                    "{{ inputs.foo = {{ url = \"git+https://github.com/o/r?rev={old}\"; flake = false; }}; inputs.bar.url = \"github:o/b\"; }}"
                 ),
                 format!(
-                    "{{ foo = {{ url = \"git+https://github.com/o/r?rev={TARGET}\"; }}; bar.url = \"github:o/b\"; }}"
+                    "{{ inputs.foo = {{ url = \"git+https://github.com/o/r?rev={TARGET}\"; flake = false; }}; inputs.bar.url = \"github:o/b\"; }}"
                 ),
             ),
         ];
@@ -747,11 +903,11 @@ mod tests {
         let old = "a".repeat(40);
         for (source, reason) in [
             (
-                "{ bar.url = \"github:o/r\"; }",
+                "{ inputs.bar.url = \"github:o/r\"; }",
                 "unrecognised-input-declaration",
             ),
             (
-                "{ foo.url = \"github:o/r\"; inputs.foo.url = \"github:o/r\"; }",
+                "{ inputs.foo.url = \"github:o/r\"; inputs.foo = { url = \"github:o/r\"; }; }",
                 "unrecognised-input-declaration",
             ),
             (
@@ -759,13 +915,13 @@ mod tests {
                 "branch-ref-github-url",
             ),
             (
-                "{ foo = { url = \"https://example.com/flake.tar.gz\"; }; }",
+                "{ inputs.foo = { url = \"https://example.com/flake.tar.gz\"; }; }",
                 "unrecognised-input-declaration",
             ),
         ] {
             assert_eq!(rewrites(source, "foo").unwrap_err(), reason, "{source}");
         }
-        let nested = format!("{{ foo = {{ inputs.bar.url = \"github:o/r/{old}\"; }}; }}");
+        let nested = format!("{{ inputs.foo.inputs.bar.url = \"github:o/r/{old}\"; }}");
         assert_eq!(
             rewrites(&nested, "bar").unwrap_err(),
             "unrecognised-input-declaration",
@@ -785,7 +941,7 @@ mod tests {
 
     #[test]
     fn lock_verification_rejects_added_unrelated_root_input() {
-        let before = json!({"nodes": {
+        let before = json!({"root": "root", "nodes": {
             "root": {"inputs": {"simit": "simit"}},
             "simit": {"locked": {"rev": "a".repeat(40)}},
         }});
