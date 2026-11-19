@@ -42,13 +42,11 @@ pub(super) fn render(
     push_required_secrets_header(&mut workflow, &options.required_secrets);
     workflow.push_str("name: Nix installable builds\n\non:\n  push:\n");
     push_ci_branches(&mut workflow, &options.push_branches);
-    // Like the installable matrix: a workflow that coalesces push and
-    // pull-request runs names its group by its own path and excludes tags,
-    // the form updater admission proves.
-    let coalesced = !options.separate_events
+    // Branch-only push triggers keep their existing tag exclusion.
+    let explicitly_branch_only = !options.separate_events
         && options.push_branches.is_empty()
         && options.push_tags.is_empty();
-    if coalesced {
+    if explicitly_branch_only {
         workflow.push_str("    tags-ignore: [\"**\"]\n");
     }
     if !options.push_tags.is_empty() {
@@ -59,13 +57,7 @@ pub(super) fn render(
     }
     workflow
         .push_str("  pull_request:\n  workflow_dispatch:\n\npermissions:\n  contents: read\n\n");
-    if options.separate_events || !options.push_branches.is_empty() {
-        push_independent_source_concurrency(&mut workflow);
-    } else if coalesced {
-        workflow.push_str("concurrency:\n  group: .github/workflows/nix-builds.yaml-${{ github.event.pull_request.head.repo.full_name || github.repository }}-${{ github.event.pull_request.head.ref || github.ref_name }}\n  cancel-in-progress: true\n\n");
-    } else {
-        workflow.push_str("concurrency:\n  group: nix-groups-${{ github.event.pull_request.head.repo.full_name || github.repository }}-${{ github.ref_type == 'tag' && github.ref || format('refs/heads/{0}', github.event.pull_request.head.ref || github.ref_name) }}\n  cancel-in-progress: true\n\n");
-    }
+    push_independent_source_concurrency(&mut workflow);
     workflow.push_str(&format!(
         "jobs:\n  build:\n    name: build (${{{{ matrix.group }}}})\n    runs-on: {}\n",
         if native_runners {

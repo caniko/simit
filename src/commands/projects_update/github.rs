@@ -2636,14 +2636,13 @@ mod tests {
                 if workspace_strategy == WorkspaceStrategy::Aggregate && !separate_events {
                     for (from, to) in [
                         (
-                            "group: .github/workflows/ci.yaml-",
-                            "group: .github/workflows/other.yaml-",
+                            "group: ${{ github.workflow_ref }}-",
+                            "group: ${{ github.workflow }}-",
                         ),
                         (
                             "github.event.pull_request.head.repo.full_name || github.repository",
                             "github.repository",
                         ),
-                        ("tags-ignore: [\"**\"]", "tags: [\"**\"]"),
                         (
                             "cancel-in-progress: true",
                             "cancel-in-progress: '${{ inputs.cancel }}'",

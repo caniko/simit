@@ -1338,8 +1338,7 @@ fn nix_matrix_qualifies_branch_pushes_and_pull_requests_without_tag_releases() {
         assert!(events.contains_key("pull_request"));
         assert!(events.contains_key("workflow_dispatch"));
         assert_eq!(value["on"]["push"]["branches"][0], "**");
-        // A customised matrix coalesces push and pull-request runs in a
-        // path-keyed group, which must exclude tags explicitly.
+        // A customised branch-only matrix keeps its explicit tag exclusion.
         assert_eq!(
             value["on"]["push"]["tags-ignore"],
             if options.is_empty() {
@@ -1421,11 +1420,11 @@ extra_env = { FLAKE_SSH_KEY = "${{ secrets.FLAKE_SSH_KEY }}" }
     let original = fs::read(temp.path().join(".github/workflows/nix-builds.yaml")).unwrap();
     let value = workflow(&temp);
     assert_eq!(value["permissions"]["contents"], "read");
-    // The group is keyed by this workflow's path, the form updater admission
-    // proves, and tags cannot join it.
-    assert_eq!(
-        value["concurrency"]["group"],
-        ".github/workflows/nix-builds.yaml-${{ github.event.pull_request.head.repo.full_name || github.repository }}-${{ github.event.pull_request.head.ref || github.ref_name }}"
+    assert!(
+        value["concurrency"]["group"]
+            .as_str()
+            .unwrap()
+            .contains("${{ github.event_name }}")
     );
     assert_eq!(
         value["on"]["push"]["tags-ignore"],
@@ -1989,7 +1988,7 @@ NIX_CONFIG = "eval-system = aarch64-linux"
 }
 
 #[test]
-fn scoped_nix_matrix_isolates_forks_and_coalesces_same_repository_push_and_pr() {
+fn scoped_nix_matrix_isolates_forks_and_same_repository_push_and_pr() {
     for options in [
         "[ci.nix_build]\nonly = true",
         "[ci.nix_build]\ncapture_results = true",
@@ -2006,7 +2005,8 @@ fn scoped_nix_matrix_isolates_forks_and_coalesces_same_repository_push_and_pr() 
                        branch: &str,
                        ref_type: &str| {
             let value = group
-                .replace("${{ github.workflow }}", "Nix installable builds")
+                .replace("${{ github.workflow_ref }}", "owner/project/.github/workflows/nix-builds.yaml")
+                .replace("${{ github.event_name }}", if head_branch.is_some() { "pull_request" } else { "push" })
                 .replace(
                     "${{ github.event.pull_request.head.repo.full_name || github.repository }}",
                     head_repository.unwrap_or(repository),
@@ -2051,7 +2051,7 @@ fn scoped_nix_matrix_isolates_forks_and_coalesces_same_repository_push_and_pr() 
             "3/merge",
             "branch",
         );
-        assert_eq!(push, same_repository_pr);
+        assert_ne!(push, same_repository_pr);
         assert_ne!(first_fork, second_fork);
         assert_ne!(push, first_fork);
         assert_ne!(

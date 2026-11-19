@@ -1064,9 +1064,7 @@ pub(crate) fn nix_flake_ci_file_with_events(
     if platform == Platform::Github && !push_branches.is_empty() {
         push_github_concurrency(&mut workflow);
     } else if platform == Platform::Github && !system_runners.is_empty() {
-        // Coalesce one repository's push/PR branch while isolating same-named
-        // branches from unrelated forks.
-        workflow.push_str("concurrency:\n  group: ${{ github.workflow }}-${{ github.event.pull_request.head.repo.full_name || github.repository }}-${{ github.event.pull_request.head.ref || github.ref_name }}\n  cancel-in-progress: true\n\n");
+        push_independent_source_concurrency(&mut workflow);
     } else {
         push_platform_concurrency(&mut workflow, platform);
     }
@@ -1442,13 +1440,11 @@ pub fn nix_build_matrix_file_with_options(
     push_required_secrets_header(&mut workflow, &options.required_secrets);
     workflow.push_str("name: Nix installable builds\n\non:\n  push:\n");
     push_ci_branches(&mut workflow, &options.push_branches);
-    // A workflow that coalesces push and pull-request runs names its group by
-    // its own path and excludes tags, the form updater admission proves.
-    let coalesced = platform == Platform::Github
+    let explicitly_branch_only = platform == Platform::Github
         && !(options.separate_events || !options.push_branches.is_empty())
         && *options != crate::config::NixBuildConfig::default()
         && options.push_tags.is_empty();
-    if coalesced {
+    if explicitly_branch_only {
         workflow.push_str("    tags-ignore: [\"**\"]\n");
     }
     if !options.push_tags.is_empty() {
@@ -1465,19 +1461,8 @@ pub fn nix_build_matrix_file_with_options(
         && (options.separate_events || !options.push_branches.is_empty())
     {
         push_github_concurrency(&mut workflow);
-    } else if coalesced {
-        workflow.push_str("concurrency:\n  group: .github/workflows/nix-builds.yaml-${{ github.event.pull_request.head.repo.full_name || github.repository }}-${{ github.event.pull_request.head.ref || github.ref_name }}\n  cancel-in-progress: true\n\n");
     } else if platform == Platform::Github && *options != crate::config::NixBuildConfig::default() {
-        // Coalesce one repository's push/PR branch without canceling unrelated
-        // forks or a tag that happens to use the same branch name.
-        let ref_group = if options.push_tags.is_empty() {
-            "${{ github.event.pull_request.head.ref || github.ref_name }}"
-        } else {
-            "${{ github.ref_type == 'tag' && github.ref || format('refs/heads/{0}', github.event.pull_request.head.ref || github.ref_name) }}"
-        };
-        workflow.push_str("concurrency:\n  group: ${{ github.workflow }}-${{ github.event.pull_request.head.repo.full_name || github.repository }}-");
-        workflow.push_str(ref_group);
-        workflow.push_str("\n  cancel-in-progress: true\n\n");
+        push_independent_source_concurrency(&mut workflow);
     } else {
         push_platform_concurrency(&mut workflow, platform);
     }
@@ -4855,16 +4840,11 @@ fn push_github_concurrency(workflow: &mut String) {
 
 fn push_rust_ci_concurrency(workflow: &mut String, platform: Platform, options: &CiOptions) {
     if platform == Platform::Github
-        && (options.separate_events || !options.push_branches.is_empty())
+        && (options.separate_events
+            || !options.push_branches.is_empty()
+            || options.workspace_strategy == WorkspaceStrategy::Aggregate)
     {
         push_independent_source_concurrency(workflow);
-    } else if platform == Platform::Github
-        && options.workspace_strategy == WorkspaceStrategy::Aggregate
-    {
-        // workflow_ref contains the event ref, so it cannot coalesce a branch
-        // push with its PR merge ref. Aggregate CI has one stable workflow path.
-        // Include the source repository so a fork's same-named branch is distinct.
-        workflow.push_str("concurrency:\n  group: .github/workflows/ci.yaml-${{ github.event.pull_request.head.repo.full_name || github.repository }}-${{ github.event.pull_request.head.ref || github.ref_name }}\n  cancel-in-progress: true\n\n");
     } else {
         push_provider_concurrency(workflow, platform);
     }
