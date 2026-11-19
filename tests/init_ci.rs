@@ -215,7 +215,7 @@ fn provider_migration_plan_resets_persisted_step_runners() {
 }
 
 #[test]
-fn full_plan_rejects_flake_config_it_cannot_persist() {
+fn full_plan_can_render_flake_config_without_persisting_it() {
     let temp = init_package(false);
     let root = temp.path();
     fs::write(
@@ -255,12 +255,18 @@ fn full_plan_rejects_flake_config_it_cannot_persist() {
         String::from_utf8_lossy(&primary.stderr)
     );
     let full = plan(&["init", "ci", "--plan-json"]);
-    assert!(!full.status.success());
     assert!(
-        String::from_utf8_lossy(&full.stderr).contains("flake outputs.simitConfig"),
+        full.status.success(),
         "{}",
         String::from_utf8_lossy(&full.stderr)
     );
+    let full: serde_json::Value = serde_json::from_slice(&full.stdout).unwrap();
+    let primary: serde_json::Value = serde_json::from_slice(&primary.stdout).unwrap();
+    assert_eq!(full["schema"], "simit.ci-update-plan.v1");
+    assert_eq!(full["files"][0], primary["files"][0]);
+    let migration = plan(&["init", "ci", "--platform", "forgejo", "--plan-json"]);
+    assert!(!migration.status.success());
+    assert!(String::from_utf8_lossy(&migration.stderr).contains("flake outputs.simitConfig"));
     assert!(!root.join("simit.toml").exists());
 }
 

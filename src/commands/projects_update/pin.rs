@@ -9,7 +9,7 @@ use std::{
     process::Stdio,
 };
 
-use super::schema::PinItem;
+use super::schema::{Generator, PinItem};
 use crate::project::{CiUpdatePlan, GeneratedFile};
 
 /// Files a pin owns; no other scope may claim either, and a lock refresh may
@@ -42,7 +42,63 @@ fn skip(reason: &'static str) -> anyhow::Error {
 /// Tests replace Nix with a deterministic lock rewriter; production resolves
 /// the immutable store tool the updater unit runs.
 #[cfg(test)]
-pub(super) static NIX: std::sync::Mutex<Option<PathBuf>> = std::sync::Mutex::new(None);
+thread_local! {
+    pub(super) static NIX: std::cell::RefCell<Option<PathBuf>> = const { std::cell::RefCell::new(None) };
+}
+
+/// Identify the generator by source, not by the consumer's local input name.
+pub(super) fn generator_input(checkout: &Path, generator: &Generator) -> Result<Option<String>> {
+    let path = checkout.join("flake.nix");
+    match fs::symlink_metadata(&path) {
+        Ok(metadata) if metadata.is_file() => {}
+        Ok(_) => return Ok(None),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error.into()),
+    }
+    let source = fs::read_to_string(path)?;
+    let inputs = declarations(&source)
+        .into_iter()
+        .filter_map(|(name, url, _, _)| {
+            let coordinate = if let Some(repo) = url.strip_prefix("github:") {
+                let mut parts = repo.split(['/', '?', '#']);
+                format!("github.com/{}/{}", parts.next()?, parts.next()?).to_ascii_lowercase()
+            } else {
+                crate::registry::coordinate_from_remote(url.strip_prefix("git+")?)?
+            };
+            (coordinate == generator.source_coordinate).then_some(name)
+        })
+        .collect::<Vec<_>>();
+    match inputs.as_slice() {
+        [] => Ok(None),
+        [name] => Ok(Some(name.clone())),
+        _ => anyhow::bail!("multiple flake inputs refer to the enrolled generator coordinate"),
+    }
+}
+
+/// Refresh the enrolled generator before the read-only renderer sees the flake.
+/// Return the patches separately so the caller can check other scopes' ownership.
+pub(super) fn align_generator(
+    checkout: &Path,
+    state: &Path,
+    input: &str,
+    target: &str,
+) -> Result<CiUpdatePlan> {
+    let mut plan = CiUpdatePlan::new(vec![], vec![], vec![]);
+    let item = PinItem {
+        coordinate: String::new(),
+        relative_path: String::new(),
+        input: input.into(),
+        target: target.into(),
+    };
+    regular_files(checkout)?;
+    let source = fs::read_to_string(checkout.join("flake.nix"))?;
+    let rewritten = rewrite(&source, input, target).map_err(anyhow::Error::msg)?;
+    let locked: Value = crate::review::read_json(&checkout.join("flake.lock"))?;
+    if source != rewritten || verify_lock(&locked, &locked, input, target).is_err() {
+        apply(checkout, state, &mut plan, &item).context("align generator flake input")?;
+    }
+    Ok(plan)
+}
 
 /// Pin one input on the disposable checkout and append both flake files to the
 /// candidate plan. Nothing is written when the declaration is unrecognised.
@@ -156,11 +212,7 @@ fn lock(checkout: &Path, temporary: &Path) -> Result<()> {
 
 fn nix_tool() -> Result<PathBuf> {
     #[cfg(test)]
-    if let Some(path) = NIX
-        .lock()
-        .map(|value| value.clone())
-        .unwrap_or_else(|poisoned| poisoned.into_inner().clone())
-    {
+    if let Some(path) = NIX.with(|fixture| fixture.borrow().clone()) {
         return Ok(path);
     }
     super::sandbox::tool("nix")
@@ -256,7 +308,7 @@ fn resolved(
 /// Rewrite the one URL literal that declares `input`. The three accepted
 /// declaration forms are the ones enrolled consumers use; anything else is
 /// refused rather than guessed at.
-fn rewrite(source: &str, input: &str, target: &str) -> Result<String, &'static str> {
+fn declarations(source: &str) -> Vec<(String, String, usize, usize)> {
     let tokens = tokens(source);
     let mut containers: Vec<Option<String>> = Vec::new();
     let mut declarations = Vec::new();
@@ -304,7 +356,7 @@ fn rewrite(source: &str, input: &str, target: &str) -> Result<String, &'static s
             && ident(tokens.get(index + 2)) == Some("url")
             && punct(tokens.get(index + 3), '=')
             && let Some((url, start, end)) = string(tokens.get(index + 4))
-            && (at_top || enclosing.as_deref() == Some("inputs"))
+            && (at_top || containers.len() == 2 && enclosing.as_deref() == Some("inputs"))
             && !punct(previous, '.')
         {
             declarations.push((name.to_owned(), url.to_owned(), start, end));
@@ -328,7 +380,11 @@ fn rewrite(source: &str, input: &str, target: &str) -> Result<String, &'static s
             declarations.push((name, url.to_owned(), start, end));
         }
     }
-    let matching = declarations
+    declarations
+}
+
+fn rewrite(source: &str, input: &str, target: &str) -> Result<String, &'static str> {
+    let matching = declarations(source)
         .into_iter()
         .filter(|(name, _, _, _)| name == input)
         .collect::<Vec<_>>();
@@ -490,6 +546,33 @@ mod tests {
 
     fn rewrites(source: &str, input: &str) -> Result<String, &'static str> {
         rewrite(source, input, TARGET)
+    }
+
+    #[test]
+    fn matches_generator_coordinate_not_input_name() {
+        let root = tempfile::tempdir().unwrap();
+        let generator = Generator {
+            executable: "/generator".into(),
+            source_revision: TARGET.into(),
+            source_coordinate: "github.com/caniko/simit".into(),
+            forge: "github".into(),
+            executable_sha256: None,
+            required_checks: vec![],
+        };
+        let old = "a".repeat(40);
+        let source = format!(
+            r#"{{ inputs = {{
+          simit.url = "github:someone-else/simit";
+          tool.url = "git+https://github.com/Caniko/Simit.git?ref=trunk&rev={old}";
+        }}; }}"#
+        );
+        fs::write(root.path().join("flake.nix"), &source).unwrap();
+        let input = generator_input(root.path(), &generator).unwrap().unwrap();
+        assert_eq!(input, "tool");
+        assert_eq!(
+            rewrites(&source, &input).unwrap(),
+            source.replace(&old, TARGET)
+        );
     }
 
     #[test]
