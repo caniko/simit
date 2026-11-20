@@ -85,7 +85,7 @@ pub(super) fn render(
     push_docs_gate_job(
         &mut workflow,
         platform,
-        github_action_version(Some(&runners.ci), "v7.0.1", "v4.3.1"),
+        github_action_version(Some(&runners.ci), CHECKOUT_VERSION, CHECKOUT_COMPAT_VERSION),
         options.package_scoped.then_some(package.name.as_str()),
     );
     workflow

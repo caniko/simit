@@ -827,7 +827,7 @@ fn github_ci_gates_every_job_on_a_cheap_root_docs_classification() {
     assert_eq!(gate["steps"][0]["with"]["persist-credentials"], false);
     let script = gate["steps"][1]["run"].as_str().unwrap();
     assert!(script.contains("    README.md) return 1 ;;"));
-    assert!(script.contains("    *.md) return 0 ;;"));
+    assert!(script.contains("    ?*.md) return 0 ;;"));
     assert!(script.contains("git merge-base \"origin/$DEFAULT_BRANCH\" HEAD"));
     assert_eq!(
         gate["steps"][1]["env"]["PR_BASE"],

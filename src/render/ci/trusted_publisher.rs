@@ -344,9 +344,23 @@ pub(super) fn source_workflow_with_namespace(
 pub(crate) fn bootstrap(w: &mut String) {
     w.push_str("      - name: Require independently qualified publisher engine\n        env:\n          PUBLISHER_REVISION: ${{ vars.SIMIT_PUBLISHER_REVISION }}\n        run: |\n          set -euo pipefail\n          [[ \"$PUBLISHER_REVISION\" =~ ^[0-9a-f]{40}$ ]] || { echo 'Enroll a qualified immutable Simit publisher revision' >&2; exit 1; }\n");
     w.push_str("      - name: Checkout independent publisher source\n");
-    push_action_uses(w, Platform::Github, None, "checkout", "v7.0.1", "v4.3.1");
+    push_action_uses(
+        w,
+        Platform::Github,
+        None,
+        "checkout",
+        CHECKOUT_VERSION,
+        CHECKOUT_COMPAT_VERSION,
+    );
     w.push_str("        with:\n          ref: ${{ github.workflow_sha }}\n          persist-credentials: false\n      - name: Checkout qualified publisher engine\n");
-    push_action_uses(w, Platform::Github, None, "checkout", "v7.0.1", "v4.3.1");
+    push_action_uses(
+        w,
+        Platform::Github,
+        None,
+        "checkout",
+        CHECKOUT_VERSION,
+        CHECKOUT_COMPAT_VERSION,
+    );
     w.push_str("        with:\n          repository: caniko/simit\n          ref: ${{ vars.SIMIT_PUBLISHER_REVISION }}\n          path: .simit-publisher-engine\n          persist-credentials: false\n");
     push_rust_setup_step(w, Platform::Github);
     w.push_str("      - name: Build trusted publisher engine\n        working-directory: /\n        run: cargo build --release --locked --manifest-path \"$GITHUB_WORKSPACE/.simit-publisher-engine/Cargo.toml\" --target-dir \"$GITHUB_WORKSPACE/.simit-publisher-engine/target\"\n");
@@ -461,8 +475,8 @@ pub(super) fn publisher_file_with_namespace(
             Platform::Github,
             None,
             "checkout",
-            "v7.0.1",
-            "v4.3.1",
+            CHECKOUT_VERSION,
+            CHECKOUT_COMPAT_VERSION,
         );
         w.push_str("        with:\n          ref: ${{ github.event.workflow_run.head_sha }}\n          path: .simit-release-source\n          persist-credentials: false\n");
         if options.source_submodules {

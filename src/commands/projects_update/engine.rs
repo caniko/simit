@@ -438,6 +438,7 @@ fn request(
         workflows,
         required_checks,
         plan: None,
+        changed_paths: None,
         landing: None,
         target: None,
         change: None,
@@ -2028,25 +2029,60 @@ pub fn update(
     // Only the primary CI set qualifies; other owned files are carried.
     let workflow_paths: Vec<String> = crate::review::read_json(&root.join("workflows.json"))?;
     // The saved set is bound to the receipt, so it cannot be silently narrowed.
-    let expected: BTreeSet<&String> = if receipt.qualification.is_empty() {
+    let expected: BTreeSet<&str> = if receipt.qualification.is_empty() {
         receipt
             .managed
             .iter()
             .filter(|(_, hash)| hash.is_some())
-            .map(|(path, _)| path)
+            .map(|(path, _)| path.as_str())
             .collect()
     } else {
-        receipt.qualification.iter().collect()
+        receipt.qualification.iter().map(String::as_str).collect()
     };
     ensure!(
         !workflow_paths.is_empty()
-            && workflow_paths.iter().collect::<BTreeSet<_>>() == expected
+            && workflow_paths
+                .iter()
+                .map(String::as_str)
+                .collect::<BTreeSet<_>>()
+                == expected
             && workflow_paths
                 .iter()
                 .all(|path| receipt.managed.get(path).is_some_and(Option::is_some)),
         "retained workflow ownership differs from the candidate"
     );
     let target_branch = target.unwrap_or(&observed.default_branch);
+    // Only a generated docs gate needs path evidence. Keep the v1 wire format
+    // for ordinary plans regardless of how the adapter is invoked.
+    let needs_changed_paths = admission_plan.files.iter().any(|file| {
+        file.relative_path.to_str().is_some_and(|path| {
+            expected.contains(path)
+                && super::github::is_workflow_path(path)
+                && serde_yaml::from_str(&file.content)
+                    .is_ok_and(|workflow| crate::render::ci::is_generated_docs_gate(&workflow))
+        })
+    });
+    let changed_paths = if needs_changed_paths {
+        let diff = git_raw(
+            &checkout,
+            &[
+                "diff",
+                "--no-renames",
+                "--name-only",
+                "-z",
+                &receipt.source,
+                &receipt.candidate,
+                "--",
+            ],
+        )?;
+        Some(
+            diff.split_terminator('\0')
+                .map(str::to_owned)
+                .collect::<Vec<_>>(),
+        )
+    } else {
+        None
+    };
     let admit = |branch: &str| -> Result<()> {
         let mut admission = request(
             forge,
@@ -2058,6 +2094,7 @@ pub fn update(
             requirements.clone(),
         );
         admission.plan = Some(admission_plan.clone());
+        admission.changed_paths = changed_paths.clone();
         if landing == "pull-request" && branch == target_branch {
             admission = pull_request(admission, Some(branch), None);
         }
@@ -5201,6 +5238,60 @@ assert nodes['decoy']['locked']['rev'] == '{decoy_revision}'
             {"name":"override-check","authority":"777"}
         ]}));
         assert_eq!(f.update(true).unwrap().phase, "qualified");
+    }
+
+    #[test]
+    fn namespace_admission_wire_format_stays_v1_without_a_docs_gate() {
+        let mut f = Fixture::new();
+        f.config
+            .forges
+            .get_mut("fixture")
+            .unwrap()
+            .adapter
+            .arguments = vec!["update-github-adapter".into()];
+        f.control(json!({"admission": "pending"}));
+        let error = f.update(true).unwrap_err();
+        assert!(
+            error.to_string().contains("admission is incomplete"),
+            "{error:#}"
+        );
+        let request: serde_json::Value =
+            crate::review::read_json(&f.root().join("request.json")).unwrap();
+        assert_eq!(request["operation"], "admit");
+        assert_eq!(request["schemaVersion"], 1);
+        assert!(request.get("changedPaths").is_none());
+    }
+
+    #[test]
+    fn namespace_admission_wire_format_sends_paths_for_a_wrapped_docs_gate() {
+        let f = Fixture::new();
+        let workflow = crate::render::ci::nix_build_matrix_file(
+            crate::cli::Platform::Github,
+            &crate::user_config::ResolvedRunner::literal("ubuntu-24.04").unwrap(),
+            &[".#demo".into()],
+            &[],
+            &[],
+            &[],
+        )
+        .unwrap();
+        let path = workflow.relative_path.clone();
+        save(
+            &f.source.join("fixture-plan.json"),
+            &CiUpdatePlan::new(vec![workflow], vec![], vec![]),
+        )
+        .unwrap();
+        f.publish(&f.source, "generate a docs-gated workflow");
+        f.control(json!({"admission": "pending"}));
+        let error = f.update(true).unwrap_err();
+        assert!(
+            error.to_string().contains("admission is incomplete"),
+            "{error:#}"
+        );
+        let request: serde_json::Value =
+            crate::review::read_json(&f.root().join("request.json")).unwrap();
+        assert_eq!(request["operation"], "admit");
+        assert_eq!(request["schemaVersion"], 2);
+        assert_eq!(request["changedPaths"], json!([path]));
     }
 
     #[test]

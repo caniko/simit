@@ -72,6 +72,7 @@ pub fn admit_candidate_source(
     plan: &crate::project::CiUpdatePlan,
     branch: &str,
     required_checks: &[&str],
+    changed_paths: &[&str],
 ) -> Result<()> {
     let authority = "0".to_owned();
     let request = AdapterRequest {
@@ -97,6 +98,7 @@ pub fn admit_candidate_source(
             })
             .collect(),
         plan: Some(plan.clone()),
+        changed_paths: Some(changed_paths.iter().map(|path| (*path).into()).collect()),
         landing: None,
         target: None,
         change: None,
