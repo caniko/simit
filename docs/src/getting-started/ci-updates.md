@@ -752,6 +752,15 @@ resumes that rollout nor reuses its pending candidate, which fails against the
 pin-scoped policy digest. `runtimePackages` therefore needs `nix` when a
 profile accepts pin work items.
 
+When an enrolled consumer declares a literal flake input for the generator's
+source coordinate, the updater aligns that input and `flake.lock` to the
+enrolled generator revision before rendering. Such consumers also get the full
+CI plan and any existing simit-generated release workflow, so the generator
+their drift checks execute sees the same artifacts. A matching URL with an
+unsupported pin spelling is refused. Flake edits remain patches, and new
+managed artifacts still go through enrollment. Only primary CI qualifies the
+candidate; carrying a release workflow does not run a release.
+
 ## Scopes
 
 `scopes` lists the generated-file consumptions a profile maintains. It must
@@ -773,8 +782,9 @@ qualification requests carry only the `ci` files. Files from the other scopes ar
 committed and admitted with the candidate, but land without their own
 qualification; their first run happens after landing. The full `init ci` plan
 never resolves the local release trust root; a plan with publishing workflows
-instead requires the committed trust root they fetch. It fails for a flake
-`simitConfig` source because that `[ci]` table cannot be persisted.
+instead requires the committed trust root they fetch. For a flake `simitConfig`
+source, the full plan can render files from existing policy but cannot persist
+changes to the flake's `[ci]` table or select a new backend for it.
 
 A patch is a whole-file edit of a project-owned file. The plan lists it under
 `patches`, which makes the plan schema `simit.ci-update-plan.v2`; a plan without

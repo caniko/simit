@@ -375,14 +375,16 @@ pub fn run(args: Args) -> Result<()> {
             Err(error) => {
                 // An unrewritable declaration drops this item without failing
                 // the rollout; the report carries the reason.
-                if let Some(item) = item
-                    && let Some(skip) = error.downcast_ref::<pin::PinSkip>()
-                {
-                    reports.push(serde_json::json!({
+                if let Some(skip) = error.downcast_ref::<pin::PinSkip>() {
+                    let mut report = serde_json::json!({
                         "coordinate": project.coordinate,
-                        "input": item.input, "target": item.target,
                         "phase": "skipped", "reason": skip.reason(),
-                    }));
+                    });
+                    if let Some(item) = item {
+                        report["input"] = item.input.clone().into();
+                        report["target"] = item.target.clone().into();
+                    }
+                    reports.push(report);
                     continue;
                 }
                 // A repository refused before publication has nothing to resume
