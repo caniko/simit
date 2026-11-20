@@ -1036,6 +1036,21 @@ fn generate(
 ) -> Result<CiUpdatePlan> {
     let metadata = git_metadata(checkout)?;
     let configuration = git(checkout, &["config", "--null", "--list", "--show-origin"])?;
+    let status = git_raw(checkout, &["status", "--porcelain", "-z"])?;
+    let diff = || {
+        git_raw(
+            checkout,
+            &[
+                "diff",
+                "--binary",
+                "--no-ext-diff",
+                "--no-textconv",
+                "HEAD",
+                "--",
+            ],
+        )
+    };
+    let before = diff()?;
     let nix_state = tempfile::tempdir()?;
     let output = super::checkpoint::protect(state_directory, checkout, || {
         run_tool(
@@ -1055,7 +1070,7 @@ fn generate(
         "read-only generator modified effective Git configuration"
     );
     ensure!(
-        git(checkout, &["status", "--porcelain"])?.is_empty(),
+        git_raw(checkout, &["status", "--porcelain", "-z"])? == status && diff()? == before,
         "read-only generator plan modified candidate sources"
     );
     ensure!(
@@ -1086,9 +1101,10 @@ fn generate_scopes(
     checkout: &Path,
     state_directory: &Path,
     profile: &Profile,
+    scopes: &[String],
 ) -> Result<(CiUpdatePlan, Vec<String>)> {
     let mut plans = BTreeMap::new();
-    for scope in &profile.scopes {
+    for scope in scopes {
         let argv: &[&str] = match scope.as_str() {
             "ci" => &["init", "ci", "--primary-only", "--plan-json"],
             "ci-extra" => &["init", "ci", "--plan-json"],
@@ -1121,6 +1137,67 @@ fn generate_scopes(
             generate(executable, checkout, state_directory, &argv)?,
         );
     }
+    merge_scopes(checkout, &profile.scopes, plans)
+}
+
+fn restrict_implicit_scope(
+    checkout: &Path,
+    scope: &str,
+    plan: &mut CiUpdatePlan,
+    primary: Option<&CiUpdatePlan>,
+) -> Result<()> {
+    let paths = |plan: &CiUpdatePlan| {
+        plan.files
+            .iter()
+            .map(|file| file.relative_path.clone())
+            .chain(plan.obsolete.iter().cloned())
+            .collect::<BTreeSet<_>>()
+    };
+    let primary = primary.map(paths).unwrap_or_default();
+    // Only inferred simit.toml policy may be dropped; any other proposed file
+    // (such as a deny.toml a workflow needs) refuses instead of vanishing.
+    ensure!(
+        plan.patches
+            .iter()
+            .all(|patch| patch.relative_path == Path::new("simit.toml")),
+        "implicit {scope} cannot create {}",
+        plan.patches
+            .iter()
+            .map(|patch| patch.relative_path.display().to_string())
+            .filter(|path| path != "simit.toml")
+            .collect::<Vec<_>>()
+            .join(", ")
+    );
+    plan.patches.clear();
+    for relative in paths(plan).difference(&primary) {
+        let path = managed_path(checkout, relative)?;
+        let metadata = match fs::symlink_metadata(&path) {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                anyhow::bail!(
+                    "implicit {scope} cannot create or remove missing path {}",
+                    relative.display()
+                );
+            }
+            Err(error) => return Err(error.into()),
+        };
+        ensure!(
+            metadata.is_file()
+                && fs::read_to_string(&path).is_ok_and(|content| {
+                    crate::render::ci::is_generated_workflow_marker(&content)
+                }),
+            "implicit {scope} collides with hand-written or non-regular path {}",
+            relative.display()
+        );
+    }
+    Ok(())
+}
+
+fn merge_scopes(
+    checkout: &Path,
+    enrolled: &[String],
+    mut plans: BTreeMap<&str, CiUpdatePlan>,
+) -> Result<(CiUpdatePlan, Vec<String>)> {
     let mut merged = plans
         .remove("ci")
         .context("profiles require the ci scope")?;
@@ -1129,7 +1206,7 @@ fn generate_scopes(
         "empty generation plan"
     );
     let qualification = workflows(&merged);
-    if let Some(extra) = plans.remove("ci-extra") {
+    if let Some(mut extra) = plans.remove("ci-extra") {
         // The full plan must contain the primary plan byte for byte, so both
         // generations agree on what the qualification set means.
         ensure!(
@@ -1144,6 +1221,9 @@ fn generate_scopes(
                     .all(|path| extra.obsolete.contains(path)),
             "ci and ci-extra generation plans disagree"
         );
+        if !enrolled.iter().any(|scope| scope == "ci-extra") {
+            restrict_implicit_scope(checkout, "ci-extra", &mut extra, Some(&merged))?;
+        }
         merged = extra;
     }
     let mut readme_patches = Vec::new();
@@ -1154,7 +1234,10 @@ fn generate_scopes(
         .map(|file| file.relative_path.clone())
         .chain(merged.obsolete.iter().cloned())
         .collect::<BTreeSet<_>>();
-    for (scope, plan) in plans {
+    for (scope, mut plan) in plans {
+        if !enrolled.iter().any(|configured| configured == scope) {
+            restrict_implicit_scope(checkout, scope, &mut plan, None)?;
+        }
         for path in plan
             .files
             .iter()
@@ -1216,6 +1299,25 @@ fn generate_scopes(
     ))
 }
 
+fn managed_path(root: &Path, relative_path: &Path) -> Result<PathBuf> {
+    relative(relative_path)?;
+    let path = root.join(relative_path);
+    // Reject symlink parents as well as symlink outputs before reads/writes.
+    let mut parent = path.as_path();
+    while parent != root {
+        match fs::symlink_metadata(parent) {
+            Ok(meta) => ensure!(
+                !meta.file_type().is_symlink(),
+                "generated path traverses a symlink"
+            ),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => (),
+            Err(e) => return Err(e.into()),
+        }
+        parent = parent.parent().context("invalid managed path")?;
+    }
+    Ok(path)
+}
+
 fn hashes(
     root: &Path,
     paths: impl Iterator<Item = String>,
@@ -1229,21 +1331,7 @@ fn hashes(
         )? == "true";
     paths
         .map(|p| {
-            relative(Path::new(&p))?;
-            let path = root.join(&p);
-            // Reject symlink parents as well as symlink outputs before reads/writes.
-            let mut parent = path.as_path();
-            while parent != root {
-                match fs::symlink_metadata(parent) {
-                    Ok(meta) => ensure!(
-                        !meta.file_type().is_symlink(),
-                        "generated path traverses a symlink"
-                    ),
-                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => (),
-                    Err(e) => return Err(e.into()),
-                }
-                parent = parent.parent().context("invalid managed path")?;
-            }
+            let path = managed_path(root, Path::new(&p))?;
             // Canonical mode/blob identities preserve conversion while detecting chmod.
             let hash = if let Some(tree) = tree {
                 let object = git(
@@ -1586,10 +1674,40 @@ pub fn update(
             ..previous
         }
     } else {
+        let mut scopes = profile.scopes.clone();
+        let generator_input = super::pin::generator_input(&checkout, &profile.generator)?;
+        let mut pinned = false;
+        if let Some(input) = generator_input.as_deref() {
+            let revision = &profile.generator.source_revision;
+            ensure!(
+                pin_item.is_none_or(|item| item.input != input || item.target == *revision),
+                "explicit pin conflicts with the enrolled generator revision"
+            );
+            pinned = super::pin::align_generator(&checkout, &root, input, revision)?;
+            let has_release = !crate::project::obsolete_generated_workflows(
+                &checkout,
+                &[],
+                crate::commands::init_release::is_release_workflow_name,
+            )?
+            .is_empty();
+            for scope in ["ci-extra"]
+                .into_iter()
+                .chain(has_release.then_some("release"))
+            {
+                if !scopes.iter().any(|configured| configured == scope) {
+                    scopes.push(scope.into());
+                }
+            }
+        }
+        if let Some(item) = pin_item.filter(|item| generator_input.as_deref() != Some(&item.input))
+        {
+            super::pin::apply(&checkout, &root, item)?;
+            pinned = true;
+        }
         let (mut plan, workflow_paths) =
-            generate_scopes(&generator, &checkout, &state_directory, profile)?;
-        if let Some(item) = pin_item {
-            super::pin::apply(&checkout, &root, &mut plan, item)?;
+            generate_scopes(&generator, &checkout, &state_directory, profile, &scopes)?;
+        if pinned {
+            super::pin::append_patches(&checkout, &mut plan)?;
         }
         let patch_paths = plan
             .patches
@@ -3786,6 +3904,275 @@ else:
     }
 
     #[test]
+    fn implicit_ci_extra_refuses_handwritten_outputs_and_drops_policy_patches() {
+        let checkout = tempfile::tempdir().unwrap();
+        let pages = ".github/workflows/pages.yaml";
+        let path = checkout.path().join(pages);
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let primary = CiUpdatePlan::new(
+            vec![serde_json::from_value(primary_ci()).unwrap()],
+            vec![],
+            vec![],
+        );
+        let mut extra = primary.clone();
+        extra.files.push(crate::project::GeneratedFile {
+            relative_path: pages.into(),
+            content: format!(
+                "{}\nname: New Pages\n",
+                crate::render::ci::GENERATED_WORKFLOW_MARKER
+            ),
+        });
+        extra.push_patch(crate::project::GeneratedFile {
+            relative_path: "simit.toml".into(),
+            content: "[ci]\nplatform = \"github\"\n".into(),
+        });
+        let merge = |enrolled: &[String]| {
+            merge_scopes(
+                checkout.path(),
+                enrolled,
+                BTreeMap::from([("ci", primary.clone()), ("ci-extra", extra.clone())]),
+            )
+        };
+        let error = merge(&["ci".into()]).unwrap_err().to_string();
+        assert!(
+            error.contains("cannot create") && error.contains(pages),
+            "{error}"
+        );
+        fs::write(&path, "name: Custom Pages\n").unwrap();
+        let error = merge(&["ci".into()]).unwrap_err().to_string();
+        assert!(
+            error.contains("hand-written") && error.contains(pages),
+            "{error}"
+        );
+        fs::write(
+            &path,
+            format!(
+                "{}\nname: Old Pages\n",
+                crate::render::ci::GENERATED_WORKFLOW_MARKER
+            ),
+        )
+        .unwrap();
+        let (plan, qualification) = merge(&["ci".into()]).unwrap();
+        assert!(plan.patches.is_empty() && plan.schema_matches());
+        assert_eq!(plan.files[1].content, extra.files[1].content);
+        assert_eq!(qualification, [".github/workflows/ci.yaml"]);
+        let (plan, _) = merge(&["ci".into(), "ci-extra".into()]).unwrap();
+        assert_eq!(plan.patches[0].relative_path, Path::new("simit.toml"));
+
+        extra.push_patch(crate::project::GeneratedFile {
+            relative_path: "deny.toml".into(),
+            content: "[licenses]\n".into(),
+        });
+        let error = merge_scopes(
+            checkout.path(),
+            &["ci".into()],
+            BTreeMap::from([("ci", primary), ("ci-extra", extra)]),
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(
+            error.contains("cannot create") && error.contains("deny.toml"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn implicit_release_only_refreshes_or_removes_existing_marked_files() {
+        let checkout = tempfile::tempdir().unwrap();
+        let release_path = ".github/workflows/release.yml";
+        let obsolete = ".github/workflows/release.yaml";
+        let path = checkout.path().join(release_path);
+        let obsolete_path = checkout.path().join(obsolete);
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let primary = CiUpdatePlan::new(
+            vec![serde_json::from_value(primary_ci()).unwrap()],
+            vec![],
+            vec![],
+        );
+        let marked = format!(
+            "{}\nname: Release\n",
+            crate::render::ci::GENERATED_WORKFLOW_MARKER
+        );
+        fs::write(&obsolete_path, &marked).unwrap();
+        let release = CiUpdatePlan::new(
+            vec![crate::project::GeneratedFile {
+                relative_path: release_path.into(),
+                content: marked.clone(),
+            }],
+            vec![obsolete.into()],
+            vec![crate::project::GeneratedFile {
+                relative_path: "simit.toml".into(),
+                content: "[release]\n".into(),
+            }],
+        );
+        let merge = |enrolled: &[String]| {
+            merge_scopes(
+                checkout.path(),
+                enrolled,
+                BTreeMap::from([("ci", primary.clone()), ("release", release.clone())]),
+            )
+        };
+        let error = merge(&["ci".into()]).unwrap_err().to_string();
+        assert!(
+            error.contains("cannot create") && error.contains(release_path),
+            "{error}"
+        );
+        fs::write(&path, &marked).unwrap();
+        fs::write(&obsolete_path, "name: Custom Release\n").unwrap();
+        let error = merge(&["ci".into()]).unwrap_err().to_string();
+        assert!(
+            error.contains("hand-written") && error.contains(obsolete),
+            "{error}"
+        );
+        fs::remove_file(&obsolete_path).unwrap();
+        std::os::unix::fs::symlink(&path, &obsolete_path).unwrap();
+        assert!(merge(&["ci".into()]).is_err());
+        fs::remove_file(&obsolete_path).unwrap();
+        fs::write(&obsolete_path, &marked).unwrap();
+        let (plan, qualification) = merge(&["ci".into()]).unwrap();
+        assert!(plan.patches.is_empty() && plan.schema_matches());
+        assert_eq!(plan.files[1].relative_path, Path::new(release_path));
+        assert_eq!(plan.obsolete, [PathBuf::from(obsolete)]);
+        assert_eq!(qualification, [".github/workflows/ci.yaml"]);
+        assert_eq!(
+            merge(&["ci".into(), "release".into()])
+                .unwrap()
+                .0
+                .patches
+                .len(),
+            1
+        );
+    }
+
+    #[test]
+    fn namespace_self_pinned_consumer_regenerates_both_drift_checks() {
+        self_pinned_candidate(false);
+    }
+
+    #[test]
+    fn namespace_generator_and_explicit_pins_both_precede_rendering() {
+        self_pinned_candidate(true);
+    }
+
+    fn self_pinned_candidate(explicit_pin: bool) {
+        let mut f = Fixture::new();
+        let generator = &mut f.config.profiles.get_mut("fleet").unwrap().generator;
+        let revision = generator.source_revision.clone();
+        let old = "b".repeat(40);
+        let explicit_target = "c".repeat(40);
+        let decoy_revision = if explicit_pin { &explicit_target } else { &old };
+        fs::write(
+            f.source.join("flake.nix"),
+            format!(
+                r#"{{
+  inputs = {{
+    simit = {{
+      url = "git+https://fixture.example/team/generator.git?ref=trunk&rev={old}";
+      inputs.flake-utils.url = "github:numtide/flake-utils";
+    }};
+    decoy.url = "github:other/simit/{old}";
+  }};
+  outputs = {{ self, ... }}: {{}};
+}}
+"#
+            ),
+        )
+        .unwrap();
+        save(
+            &f.source.join("flake.lock"),
+            &json!({"root":"root","version":7,"nodes":{
+                "root":{"inputs":{"simit":"simit","decoy":"decoy"}},
+                "simit":{"locked":{"rev":old,"lastModified":10},
+                    "original":{"type":"git","url":"https://fixture.example/team/generator.git","ref":"trunk","rev":old}},
+                "decoy":{"locked":{"rev":old}}
+            }}),
+        )
+        .unwrap();
+        let marker = "# Generated by simit. Manual edits will be reported as ci=drift.";
+        let release = ".github/workflows/release.yml";
+        fs::create_dir_all(f.source.join(".github/workflows")).unwrap();
+        fs::write(
+            f.source.join(release),
+            format!("{marker}\nname: old release\n"),
+        )
+        .unwrap();
+        fs::write(
+            f.source.join(".github/workflows/pages.yaml"),
+            format!("{marker}\nname: old pages\n"),
+        )
+        .unwrap();
+        let extra = json!({"relative_path":".github/workflows/pages.yaml","content":format!("{marker}\nname: Pages\n")});
+        let released =
+            json!({"relative_path":release,"content":format!("{marker}\nname: new release\n")});
+        scoped_plans(
+            &mut f,
+            &["ci"],
+            json!({
+                "init ci --primary-only --plan-json":{"schema":"simit.ci-update-plan.v1","files":[primary_ci()],"obsolete":[]},
+                "init ci --plan-json":{"schema":"simit.ci-update-plan.v1","files":[primary_ci(), extra],"obsolete":[]},
+                "init release --plan-json":{"schema":"simit.ci-update-plan.v1","files":[released],"obsolete":[]}
+            }),
+        );
+        f.inject_generator(&format!(
+            r#"
+from pathlib import Path
+import json
+flake = Path('flake.nix').read_text()
+nodes = json.loads(Path('flake.lock').read_text())['nodes']
+assert 'ref=trunk&rev={revision}' in flake
+assert 'github:other/simit/{decoy_revision}' in flake
+assert nodes['simit']['locked']['rev'] == '{revision}'
+assert nodes['decoy']['locked']['rev'] == '{decoy_revision}'
+"#
+        ));
+        let tools = tempfile::tempdir().unwrap();
+        let nix = tools.path().join("nix");
+        let shell = super::super::sandbox::tool("sh").unwrap();
+        fs::write(
+            &nix,
+            format!(
+                "#!{} -e\nsed -i '/\"simit\": {{/,+4 s/{old}/{revision}/' flake.lock\nif grep -q 'github:other/simit/{explicit_target}' flake.nix; then\n  sed -i '/\"decoy\": {{/,+2 s/{old}/{explicit_target}/' flake.lock\nfi\n",
+                shell.display()
+            ),
+        )
+        .unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&nix, fs::Permissions::from_mode(0o700)).unwrap();
+        f.control(json!({"candidate":"pending","expectedWorkflows":[".github/workflows/ci.yaml"]}));
+        super::super::pin::NIX.set(Some(nix));
+        let item = explicit_pin.then(|| PinItem {
+            coordinate: f.project.coordinate.clone(),
+            relative_path: f.project.relative_path.clone(),
+            input: "decoy".into(),
+            target: explicit_target.clone(),
+        });
+        let receipt = f.update_pin(true, item.as_ref()).unwrap();
+        super::super::pin::NIX.set(None);
+        assert_eq!(receipt.phase, "candidate");
+        assert!(
+            receipt.patches.contains_key("flake.nix") && receipt.patches.contains_key("flake.lock")
+        );
+        assert_eq!(receipt.patches.len(), 2);
+        let committed = |path| {
+            git(
+                &f.remote,
+                &["show", &format!("{}:{path}", receipt.candidate)],
+            )
+            .unwrap()
+        };
+        assert!(committed("flake.nix").contains(&format!("ref=trunk&rev={revision}")));
+        assert!(committed("flake.nix").contains(&format!("github:other/simit/{decoy_revision}")));
+        let lock: serde_json::Value = serde_json::from_str(&committed("flake.lock")).unwrap();
+        assert_eq!(lock["nodes"]["simit"]["locked"]["rev"], revision);
+        assert_eq!(
+            &lock["nodes"]["decoy"]["locked"]["rev"],
+            decoy_revision.as_str()
+        );
+        assert!(receipt.managed.contains_key(".github/workflows/pages.yaml"));
+        assert!(committed(release).contains("name: new release"));
+    }
+
+    #[test]
     fn namespace_readme_patch_waits_for_a_run_that_leaves_badge_inputs_alone() {
         let mut f = Fixture::new();
         let readme = json!({"relative_path":"README.md","content":"# demo\n<!-- simit:badges:start -->\ncurrent\n<!-- simit:badges:end -->\n"});
@@ -3986,7 +4373,7 @@ else:
             }),
         )
         .unwrap();
-        *super::super::pin::NIX.lock().unwrap() = Some(nix);
+        super::super::pin::NIX.set(Some(nix));
         // An unrecognised declaration drops the item without a candidate.
         let absent = PinItem {
             coordinate: f.project.coordinate.clone(),
@@ -4106,7 +4493,7 @@ else:
             crate::review::read_json::<serde_json::Value>(&rollouts()[0]).unwrap()["completed"],
             true
         );
-        *super::super::pin::NIX.lock().unwrap() = None;
+        super::super::pin::NIX.set(None);
     }
 
     #[test]

@@ -170,7 +170,7 @@ pub fn run(command: InitReleaseCommand) -> Result<()> {
     }
 }
 
-fn is_release_workflow_name(name: &std::ffi::OsStr) -> bool {
+pub(crate) fn is_release_workflow_name(name: &std::ffi::OsStr) -> bool {
     matches!(
         name.to_str(),
         Some("release.yml" | "release.yaml" | "release.jsonnet")

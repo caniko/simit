@@ -2752,7 +2752,11 @@ fn reconcile_ci_files(
         let (mut patches, files): (Vec<_>, Vec<_>) = files
             .into_iter()
             .partition(|file| file.relative_path == Path::new("deny.toml"));
-        if let Some(ci) = persisted {
+        if let Some(ci) = persisted
+            && (command.platform.is_some()
+                || command.ci_provider.is_some()
+                || ProjectConfig::can_persist_ci(workspace_root)?)
+        {
             patches.extend(ProjectConfig::render_ci(workspace_root, ci)?);
         }
         return project::CiUpdatePlan::new(files, obsolete, patches).print();
