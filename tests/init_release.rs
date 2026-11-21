@@ -189,7 +189,7 @@ fn bootstraps_github_release_workflow_with_native_permissions_and_uploads() {
             "[aur]",
             "[homebrew]\ntap_url = \"https://example.com/homebrew-github-demo.git\"\ndescription = \"Demo\"\nhomepage = \"https://example.com\"\nlicense = \"MIT\"\ndownload_repo = \"example/github-demo\"\n\n[aur]",
         );
-    fs::write(config_path, config).unwrap();
+    fs::write(&config_path, config).unwrap();
 
     let output = simit()
         .current_dir(project.path())
@@ -219,6 +219,33 @@ fn bootstraps_github_release_workflow_with_native_permissions_and_uploads() {
     assert!(!workflow.contains("https://codeberg.org/example/github-demo"));
     assert!(
         String::from_utf8_lossy(&output.stdout).contains("git add .github/workflows/release.yml")
+    );
+
+    let sha = "0123456789abcdef0123456789abcdef01234567";
+    let config = read(&config_path);
+    fs::write(
+        config_path,
+        config.replacen(
+            "[ci]",
+            &format!("[ci]\nnix_setup_action_ref = \"{sha}\""),
+            1,
+        ),
+    )
+    .unwrap();
+    let output = simit()
+        .current_dir(project.path())
+        .args(["init", "release", "--platform", "github"])
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{output:?}");
+    let direct = "cachix/install-nix-action@13d8dd58da0234aa297dedd986986ccb8e7f3e24 # v31.11.1";
+    assert!(workflow.contains(direct));
+    assert_eq!(
+        read(&project.path().join(".github/workflows/release.yml")),
+        workflow.replace(
+            direct,
+            &format!("caniko/simit/.github/actions/nix-setup@{sha}")
+        ),
     );
 }
 

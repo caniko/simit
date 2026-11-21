@@ -90,6 +90,7 @@ fn provision_python(workflow: &mut String, runner: &ResolvedRunner) {
     workflow.push_str("\n        with:\n          python-version: '3.12'\n");
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(super) fn job(
     workflow: &mut String,
     runner: &ResolvedRunner,
@@ -98,6 +99,7 @@ pub(super) fn job(
     keys: &[String],
     options: &NixBuildConfig,
     plan: &[String],
+    nix_setup: Option<&NixSetupActionRef>,
 ) -> Result<()> {
     if options.dependency_installables.is_empty() {
         return Ok(());
@@ -120,7 +122,7 @@ pub(super) fn job(
     workflow.push_str("    steps:\n");
     push_checkout_step(workflow, Platform::Github, runner);
     workflow.push_str("        with:\n          repository: ${{ github.event.pull_request.head.repo.full_name || github.repository }}\n          ref: ${{ github.event.pull_request.head.sha || github.sha }}\n          persist-credentials: false\n");
-    push_install_nix_step_with_cache(workflow, Platform::Github, substituters, keys);
+    push_install_nix_step_with_cache(workflow, Platform::Github, substituters, keys, nix_setup);
     push_required_env_step(workflow, &options.required_secrets);
     provision_python(workflow, runner);
     if options.kvm {

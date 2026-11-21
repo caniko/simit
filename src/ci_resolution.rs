@@ -512,6 +512,7 @@ impl ResolvedCiInputs {
     ) -> CiOptions {
         CiOptions {
             tag_prefix: cfg.release.tag_prefix,
+            nix_setup_action_ref: cfg.ci.nix_setup_action_ref.clone(),
             nix_builds: cfg.ci.nix_builds.clone(),
             components: cfg.ci.components.clone(),
             repository_checks: true,

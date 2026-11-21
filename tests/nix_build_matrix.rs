@@ -60,6 +60,45 @@ fn workflow(temp: &TempDir) -> Value {
 }
 
 #[test]
+fn nix_setup_action_preserves_grouped_matrix_and_dependency_transport() {
+    let temp = project(
+        "[ci.nix_build]\nonly = true\ncapture_results = true\ncheck_systems = [\"x86_64-linux\"]\ndependency_installables = [\".#packages.x86_64-linux.deps\"]\n[ci.nix_build.groups]\nnetwork = [\".#checks.x86_64-linux.client\", \".#checks.x86_64-linux.recovery\"]",
+    );
+    let output = generate(&temp, &[]);
+    assert!(output.status.success(), "{output:?}");
+    let path = temp.path().join(".github/workflows/nix-builds.yaml");
+    let before = fs::read_to_string(&path).unwrap();
+    let direct = "cachix/install-nix-action@13d8dd58da0234aa297dedd986986ccb8e7f3e24 # v31.11.1";
+    assert_eq!(before.matches(direct).count(), 2);
+    let sha = "0123456789abcdef0123456789abcdef01234567";
+    let config = temp.path().join("simit.toml");
+    let text = fs::read_to_string(&config).unwrap();
+    fs::write(
+        config,
+        text.replacen(
+            "[ci]",
+            &format!("[ci]\nnix_setup_action_ref = \"{sha}\""),
+            1,
+        ),
+    )
+    .unwrap();
+    let output = generate(&temp, &[]);
+    assert!(output.status.success(), "{output:?}");
+    assert_eq!(
+        fs::read_to_string(path).unwrap(),
+        before.replace(
+            direct,
+            &format!("caniko/simit/.github/actions/nix-setup@{sha}")
+        ),
+    );
+    let yaml = workflow(&temp);
+    assert!(yaml["jobs"]["build"].is_mapping());
+    assert!(yaml["jobs"]["dependencies"].is_mapping());
+    let output = generate(&temp, &["--check", "--diff"]);
+    assert!(output.status.success(), "{output:?}");
+}
+
+#[test]
 fn grouped_installables_share_a_runner_with_complete_per_output_evidence() {
     let temp = project(
         "[ci.nix_build]\nonly = true\ncapture_results = true\nseparate_events = true\nmax_parallel = 4\n[ci.nix_build.groups]\nnetwork = [\".#checks.x86_64-linux.client\", \".#checks.x86_64-linux.recovery\"]",

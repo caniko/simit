@@ -103,7 +103,7 @@ pub fn run(command: InitReleaseCommand) -> Result<()> {
     let workflow = if provider == CiProvider::Crow {
         crate::render::crow::release_file(cfg.ci.crow.format, &cfg.ci.crow, &inputs)?
     } else {
-        release_workflow::file(&inputs)
+        release_workflow::file_with_nix_setup(&inputs, cfg.ci.nix_setup_action_ref.as_ref())
     };
     let workflow_path = workflow.relative_path.to_string_lossy().into_owned();
     let plan = project::GeneratedPlan {

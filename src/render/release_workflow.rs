@@ -17,13 +17,15 @@ use std::fmt::Write as _;
 use crate::cli::Platform;
 use crate::config::{
     AnnounceConfig, ArtifactsConfig, AtticConfig, ExtractAssetConfig, FlatpakConfig,
-    PrebuildConfig, PypiReleaseConfig, ReleaseNotesSource, ReleaseProvider, ReleasePublishConfig,
-    ReleasePublisherEnforcement, ReleasePublisherPolicy, RequiredGate, ResolvedApt, ResolvedAur,
-    ResolvedChocolatey, ResolvedCopr, ResolvedHomebrew, ResolvedReleaseTarget, ResolvedScoop,
-    ResolvedWinget, WindowsSigningConfig, WingetFile,
+    NixSetupActionRef, PrebuildConfig, PypiReleaseConfig, ReleaseNotesSource, ReleaseProvider,
+    ReleasePublishConfig, ReleasePublisherEnforcement, ReleasePublisherPolicy, RequiredGate,
+    ResolvedApt, ResolvedAur, ResolvedChocolatey, ResolvedCopr, ResolvedHomebrew,
+    ResolvedReleaseTarget, ResolvedScoop, ResolvedWinget, WindowsSigningConfig, WingetFile,
 };
 use crate::project::GeneratedFile;
-use crate::render::ci::{forgejo_action_ref, github_action_ref, immutable_action_ref};
+use crate::render::ci::{
+    forgejo_action_ref, github_action_ref, github_nix_setup_action_ref, immutable_action_ref,
+};
 use serde::Serialize;
 
 /// Everything the release workflow generator needs, resolved up front.
@@ -505,13 +507,27 @@ const VERSION_FROM_REF: &str = r#"VERSION="${GITHUB_REF_NAME:-${FORGE_REF_NAME:-
           if [ -z "$VERSION" ]; then ref="${GITHUB_REF:-${FORGE_REF:-${FORGEJO_REF:-}}}"; VERSION="${ref#refs/tags/}"; fi"#;
 
 pub fn file(inputs: &ReleaseWorkflowInputs<'_>) -> GeneratedFile {
+    file_with_nix_setup(inputs, None)
+}
+
+pub(crate) fn file_with_nix_setup(
+    inputs: &ReleaseWorkflowInputs<'_>,
+    nix_setup: Option<&NixSetupActionRef>,
+) -> GeneratedFile {
     GeneratedFile {
         relative_path: std::path::PathBuf::from(inputs.platform.workflow_dir()).join("release.yml"),
-        content: render(inputs),
+        content: render_with_nix_setup(inputs, nix_setup),
     }
 }
 
 pub fn render(inputs: &ReleaseWorkflowInputs<'_>) -> String {
+    render_with_nix_setup(inputs, None)
+}
+
+fn render_with_nix_setup(
+    inputs: &ReleaseWorkflowInputs<'_>,
+    nix_setup: Option<&NixSetupActionRef>,
+) -> String {
     let mut w = String::new();
     let activated_remote =
         inputs.publish_enforcement == ReleasePublisherEnforcement::ActivatedRemote;
@@ -592,7 +608,7 @@ pub fn render(inputs: &ReleaseWorkflowInputs<'_>) -> String {
         w.push_str("    steps:\n");
         push_checkout(&mut w, inputs.platform, inputs.runner, "${{ github.sha }}");
         if !inputs.preinstalled_nix {
-            push_install_nix(&mut w, inputs.platform, inputs.artifacts);
+            push_install_nix(&mut w, inputs.platform, inputs.artifacts, nix_setup);
         }
         push_validate_tag(
             &mut w,
@@ -634,6 +650,7 @@ pub fn render(inputs: &ReleaseWorkflowInputs<'_>) -> String {
             inputs.artifacts,
             inputs.preinstalled_nix,
             not_republish,
+            nix_setup,
         );
     }
     w.push_str("  release:\n");
@@ -672,7 +689,7 @@ pub fn render(inputs: &ReleaseWorkflowInputs<'_>) -> String {
 
     push_checkout(&mut w, inputs.platform, inputs.runner, "${{ github.sha }}");
     if !inputs.preinstalled_nix {
-        push_install_nix(&mut w, inputs.platform, inputs.artifacts);
+        push_install_nix(&mut w, inputs.platform, inputs.artifacts, nix_setup);
     }
     push_validate_tag(
         &mut w,
@@ -783,7 +800,7 @@ pub fn render(inputs: &ReleaseWorkflowInputs<'_>) -> String {
         push_publish_chocolatey(&mut w, chocolatey, activated_remote, inputs.platform, false);
     }
     if republish_enabled(inputs) {
-        push_republish_job(&mut w, inputs, notes_source, activated_remote);
+        push_republish_job(&mut w, inputs, notes_source, activated_remote, nix_setup);
     }
 
     w
@@ -925,6 +942,7 @@ fn push_republish_job(
     inputs: &ReleaseWorkflowInputs<'_>,
     notes_source: ReleaseNotesSource,
     activated_remote: bool,
+    nix_setup: Option<&NixSetupActionRef>,
 ) {
     let release = inputs.release.expect("republish needs a GitHub release");
     let channels = republishable_channels(inputs);
@@ -971,7 +989,7 @@ fn push_republish_job(
         "refs/tags/${{ inputs.tag }}",
     );
     if !inputs.preinstalled_nix {
-        push_install_nix(w, inputs.platform, inputs.artifacts);
+        push_install_nix(w, inputs.platform, inputs.artifacts, nix_setup);
     }
     push_validate_tag(w, inputs.artifacts, inputs.tag_prefix, notes_source, true);
 
@@ -1262,7 +1280,12 @@ fn push_checkout(w: &mut String, platform: Platform, runner: &str, ref_expr: &st
     .expect("write");
 }
 
-fn push_install_nix(w: &mut String, platform: Platform, artifacts: &ArtifactsConfig) {
+fn push_install_nix(
+    w: &mut String,
+    platform: Platform,
+    artifacts: &ArtifactsConfig,
+    nix_setup: Option<&NixSetupActionRef>,
+) {
     if let Some(secret) = &artifacts.netrc_secret {
         crate::render::ci::push_nix_netrc_step(w, secret);
     }
@@ -1274,7 +1297,7 @@ fn push_install_nix(w: &mut String, platform: Platform, artifacts: &ArtifactsCon
             version,
         ));
     } else {
-        w.push_str(&github_action_ref("cachix/install-nix-action", version));
+        w.push_str(&github_nix_setup_action_ref(nix_setup));
     }
     w.push('\n');
     w.push_str("        with:\n          extra_nix_config: |\n");
@@ -1735,6 +1758,7 @@ fn push_release_bundle_matrix(
     artifacts: &ArtifactsConfig,
     preinstalled_nix: bool,
     not_republish: &str,
+    nix_setup: Option<&NixSetupActionRef>,
 ) {
     let bundle_attrs = artifacts.effective_nix_bundle_attrs();
     let runners = artifacts.effective_system_runners();
@@ -1766,7 +1790,7 @@ fn push_release_bundle_matrix(
     }
     w.push_str("\n        with:\n          fetch-depth: 0\n          ref: ${{ github.sha }}\n          persist-credentials: false\n");
     if !preinstalled_nix {
-        push_install_nix(w, platform, artifacts);
+        push_install_nix(w, platform, artifacts, nix_setup);
     }
     w.push_str("      - name: Verify native Nix runner\n        env:\n          EXPECTED_NIX_SYSTEM: ${{ matrix.system }}\n        run: test \"$(nix eval --impure --raw --expr builtins.currentSystem)\" = \"$EXPECTED_NIX_SYSTEM\"\n");
     w.push_str("      - name: Build release bundles\n        env:\n          SYSTEM: ${{ matrix.system }}\n        run: |\n          set -euo pipefail\n          shopt -s nullglob\n          TAG=\"${GITHUB_REF_NAME#v}\"\n          mkdir -p release target\n");
