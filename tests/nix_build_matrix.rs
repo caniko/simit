@@ -137,7 +137,7 @@ fn grouped_installables_share_a_runner_with_complete_per_output_evidence() {
     // The pinned engine's closure is reused across runs around unchanged provisioning.
     let at = |name: &str| steps.iter().position(|s| s["name"] == name).unwrap();
     let key =
-        "simit-engine-v1-${{ vars.SIMIT_CI_ENGINE_REVISION }}-${{ runner.os }}-${{ runner.arch }}";
+        "simit-engine-v2-${{ vars.SIMIT_CI_ENGINE_REVISION }}-${{ runner.os }}-${{ runner.arch }}";
     assert_eq!(
         steps[at("Restore grouped-build engine")]["with"]["key"],
         key
@@ -151,7 +151,13 @@ fn grouped_installables_share_a_runner_with_complete_per_output_evidence() {
         steps[at("Import grouped-build engine")]["run"]
             .as_str()
             .unwrap()
-            .contains("nix copy --no-check-sigs --all")
+            .contains(r#"nix copy --no-check-sigs --from "file://$cache_root" "$root""#)
+    );
+    assert!(
+        steps[at("Export grouped-build engine")]["run"]
+            .as_str()
+            .unwrap()
+            .contains(r#"> "$cache_root/root""#)
     );
     assert!(generate(&temp, &["--check", "--diff"]).status.success());
     assert!(generate(&temp, &[]).status.success());
@@ -968,7 +974,7 @@ fn committed_engine_revision_is_the_fork_safe_fallback_for_the_repository_variab
     );
     // The engine cache follows the effective revision, so fork runs reuse it too.
     let key = format!(
-        "simit-engine-v1-${{{{ {revision} }}}}-${{{{ runner.os }}}}-${{{{ runner.arch }}}}"
+        "simit-engine-v2-${{{{ {revision} }}}}-${{{{ runner.os }}}}-${{{{ runner.arch }}}}"
     );
     for name in ["Restore grouped-build engine", "Save grouped-build engine"] {
         assert_eq!(step(name)["with"]["key"], key.as_str());

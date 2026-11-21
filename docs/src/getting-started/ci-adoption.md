@@ -536,7 +536,7 @@ generation; custom runners must pass the system guard before provisioning.
 Grouped configuration cannot override reserved `SIMIT_CI_*`, `SIMIT_NIX_*` or
 `INSTALLABLES` runtime inputs.
 The pinned engine's closure is reused across runs through the GitHub Actions
-cache key `simit-engine-v1-<revision>-<os>-<arch>`, so group jobs evaluate the
+cache key `simit-engine-v2-<revision>-<os>-<arch>`, so group jobs evaluate the
 pin instead of compiling Simit each time. Provisioning, the source revision and
 the executable digest evidence are unchanged; a miss or unreadable entry builds
 normally. Like `cache_installables`, entries carry the trust of the
