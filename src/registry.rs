@@ -1220,7 +1220,7 @@ fn infer_expected_primary_ci_files(
             && config.ci_owns_nix_build_matrix(platform)
             && !options.nix_builds.is_empty()
         {
-            files.push(crate::render::ci::nix_build_matrix_file_with_options(
+            files.push(crate::render::ci::nix_build_matrix_file_with_nix_setup(
                 platform,
                 &runner,
                 &options.nix_builds,
@@ -1228,6 +1228,7 @@ fn infer_expected_primary_ci_files(
                 &options.ci_nix_substituters,
                 &options.ci_nix_trusted_public_keys,
                 &config.ci.nix_build,
+                config.ci.nix_setup_action_ref.as_ref(),
             )?);
         }
         if resolved.with_pypi_publish {
@@ -1239,8 +1240,11 @@ fn infer_expected_primary_ci_files(
             )?);
         }
         if let Some(pages) = config_pages_or_inferred(workspace_root, &config, marked)? {
-            files.push(crate::render::ci::codeberg_pages_file(
-                platform, &runner, &pages,
+            files.push(crate::render::ci::pages_file_with_nix_setup(
+                platform,
+                &runner,
+                &pages,
+                config.ci.nix_setup_action_ref.as_ref(),
             )?);
         }
         push_prebuild_file(&mut files, &config, config.ci.crow.format)?;
@@ -1283,6 +1287,7 @@ fn infer_expected_primary_ci_files(
             &config.ci_cache_artifacts(),
             &config.ci.components,
             &config.ci.push_branches,
+            config.ci.nix_setup_action_ref.as_ref(),
         )?;
         let mut files = if config.ci.nix_build.only {
             Vec::new()
@@ -1293,7 +1298,7 @@ fn infer_expected_primary_ci_files(
             && config.ci_owns_nix_build_matrix(platform)
             && !config.ci.nix_builds.is_empty()
         {
-            files.push(crate::render::ci::nix_build_matrix_file_with_options(
+            files.push(crate::render::ci::nix_build_matrix_file_with_nix_setup(
                 platform,
                 &runner,
                 &config.ci.nix_builds,
@@ -1301,6 +1306,7 @@ fn infer_expected_primary_ci_files(
                 &config.ci_cache_artifacts().substituters,
                 &config.ci_cache_artifacts().trusted_public_keys,
                 &config.ci.nix_build,
+                config.ci.nix_setup_action_ref.as_ref(),
             )?);
         }
         files.extend(crate::commands::init_ci::nix_only_publish_files(
@@ -1310,8 +1316,11 @@ fn infer_expected_primary_ci_files(
             &runner,
         )?);
         if let Some(pages) = config_pages_or_inferred(workspace_root, &config, marked)? {
-            files.push(crate::render::ci::codeberg_pages_file(
-                platform, &runner, &pages,
+            files.push(crate::render::ci::pages_file_with_nix_setup(
+                platform,
+                &runner,
+                &pages,
+                config.ci.nix_setup_action_ref.as_ref(),
             )?);
         }
         push_prebuild_file(&mut files, &config, config.ci.crow.format)?;
@@ -1512,7 +1521,7 @@ fn infer_expected_primary_ci_files(
         && config.ci_owns_nix_build_matrix(platform)
         && !options.nix_builds.is_empty()
     {
-        files.push(crate::render::ci::nix_build_matrix_file_with_options(
+        files.push(crate::render::ci::nix_build_matrix_file_with_nix_setup(
             platform,
             &runners.ci,
             &options.nix_builds,
@@ -1520,6 +1529,7 @@ fn infer_expected_primary_ci_files(
             &options.ci_nix_substituters,
             &options.ci_nix_trusted_public_keys,
             &config.ci.nix_build,
+            config.ci.nix_setup_action_ref.as_ref(),
         )?);
     }
     if resolved.with_pypi_publish && cargo::has_pyo3_dep(&metadata.packages) {
@@ -1540,7 +1550,12 @@ fn infer_expected_primary_ci_files(
             .transpose()?
             .or_else(|| infer_primary_runner(marked, "pages").ok())
             .unwrap_or_else(|| ResolvedRunner::literal("ubuntu-latest").expect("literal runner"));
-        files.push(ci::codeberg_pages_file(platform, &pages_runner, &pages)?);
+        files.push(ci::pages_file_with_nix_setup(
+            platform,
+            &pages_runner,
+            &pages,
+            config.ci.nix_setup_action_ref.as_ref(),
+        )?);
     }
     push_prebuild_file(&mut files, &config, config.ci.crow.format)?;
 

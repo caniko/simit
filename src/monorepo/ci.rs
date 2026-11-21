@@ -75,13 +75,13 @@ pub(super) fn checkout_submodules(config: &ProjectConfig, workflow: &mut Value) 
     }
 }
 
-pub(super) fn install_nix(cache: Option<&NixCiCacheConfig>) -> Value {
+pub(super) fn install_nix(
+    cache: Option<&NixCiCacheConfig>,
+    nix_setup: Option<&crate::config::NixSetupActionRef>,
+) -> Value {
     // 2.35.2 contains the lost build-slot wakeup fix (NixOS/nix fba3f6e).
     // The action's default 2.35.1 can abort Worker::run during qualification.
-    let action = github_action_ref(
-        "cachix/install-nix-action",
-        crate::render::ci::INSTALL_NIX_ACTION_VERSION,
-    );
+    let action = crate::render::ci::github_nix_setup_action_ref(nix_setup);
     let mut step = json!({"uses": action.split(" #").next().unwrap(), "with": {"install_url": "https://releases.nixos.org/nix/nix-2.35.2/install"}});
     // Same pull-only policy as single-project CI; publication never inherits it.
     if let Some(cache) =
@@ -211,7 +211,12 @@ pub(crate) fn files(
         trusted_public_keys: artifacts.trusted_public_keys,
     };
     let cache = Some(&cache);
-    let mut plan_steps = vec![checkout(node24), install_nix(cache), input_transport()];
+    let nix_setup = config.ci.nix_setup_action_ref.as_ref();
+    let mut plan_steps = vec![
+        checkout(node24),
+        install_nix(cache, nix_setup),
+        input_transport(),
+    ];
     if !evaluated_policy {
         plan_steps.push(drift_check.clone());
     }
@@ -296,7 +301,7 @@ pub(crate) fn files(
         let mut steps = vec![
             gate_budget(),
             checkout(node24),
-            install_nix(cache),
+            install_nix(cache, nix_setup),
             input_transport(),
         ];
         if !component.systems.is_empty() {

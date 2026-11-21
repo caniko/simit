@@ -269,6 +269,7 @@ pub(super) fn source_workflow_with_namespace(
             Platform::Github,
             &options.nix_substituters,
             &options.nix_trusted_public_keys,
+            options.nix_setup_action_ref.as_ref(),
         );
     } else {
         push_rust_setup_step(&mut w, Platform::Github);
@@ -463,6 +464,7 @@ pub(super) fn publisher_file_with_namespace(
                 Platform::Github,
                 &options.nix_substituters,
                 &options.nix_trusted_public_keys,
+                options.nix_setup_action_ref.as_ref(),
             );
         }
         w.push_str(&format!("      - name: Admit signed source and provider-bound archive {name}\n        env:\n          GITHUB_TOKEN: ${{{{ github.token }}}}\n        run: |\n          set -euo pipefail\n          .simit-publisher-engine/target/release/simit release publisher --publisher-stage prepare --repo \"$GITHUB_REPOSITORY\" --package {} --source-workflow {} --publisher-workflow {}{reconstruction}{namespace_argument} --publisher-output \"$RUNNER_TEMP/verified-{id}\" > \"$RUNNER_TEMP/verified-{id}.json\"\n", shell_word(name), shell_word(&source_path.to_string_lossy()), shell_word(&publisher_path.to_string_lossy())));

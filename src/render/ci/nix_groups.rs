@@ -11,6 +11,7 @@ pub(super) fn render(
     substituters: &[String],
     trusted_public_keys: &[String],
     options: &NixBuildConfig,
+    nix_setup: Option<&NixSetupActionRef>,
 ) -> Result<GeneratedFile> {
     let native_runners = !options.system_runners.is_empty();
     if native_runners {
@@ -105,6 +106,7 @@ pub(super) fn render(
         Platform::Github,
         substituters,
         trusted_public_keys,
+        nix_setup,
     );
     if native_runners {
         push_native_nix_runner_step_with_context(&mut workflow, |w| {
@@ -220,6 +222,7 @@ pub(super) fn render(
         trusted_public_keys,
         options,
         installables,
+        nix_setup,
     )?;
     push_docs_gate_job(
         &mut workflow,

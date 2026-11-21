@@ -493,7 +493,7 @@ pub fn run(command: InitCiCommand) -> Result<()> {
         && cfg.ci_owns_nix_build_matrix(platform)
         && !options.nix_builds.is_empty()
     {
-        files.push(ci::nix_build_matrix_file_with_options(
+        files.push(ci::nix_build_matrix_file_with_nix_setup(
             platform,
             &runners.ci,
             &options.nix_builds,
@@ -501,6 +501,7 @@ pub fn run(command: InitCiCommand) -> Result<()> {
             &options.ci_nix_substituters,
             &options.ci_nix_trusted_public_keys,
             &cfg.ci.nix_build,
+            cfg.ci.nix_setup_action_ref.as_ref(),
         )?);
     }
     if !command.primary_only
@@ -516,7 +517,7 @@ pub fn run(command: InitCiCommand) -> Result<()> {
         ));
     }
     if !command.primary_only && !cfg.ci.target_smokes.is_empty() {
-        files.push(ci::target_smokes_file(
+        files.push(ci::target_smokes_file_with_nix_setup(
             &runners.ci,
             &options.push_branches,
             (
@@ -524,6 +525,7 @@ pub fn run(command: InitCiCommand) -> Result<()> {
                 &options.ci_nix_trusted_public_keys,
             ),
             &cfg.ci.target_smokes,
+            cfg.ci.nix_setup_action_ref.as_ref(),
         )?);
     }
     if !command.primary_only && !cfg.ci.native_tests.is_empty() {
@@ -552,28 +554,35 @@ pub fn run(command: InitCiCommand) -> Result<()> {
         codeberg_pages_options(&cfg, &command, inferred_pages.as_ref())?
     };
     if let Some(pages) = &pages {
-        files.push(ci::codeberg_pages_file(platform, &runners.ci, pages)?);
+        files.push(ci::pages_file_with_nix_setup(
+            platform,
+            &runners.ci,
+            pages,
+            cfg.ci.nix_setup_action_ref.as_ref(),
+        )?);
     }
     if !command.primary_only && wants_vscode {
         let vscode = vscode_options(&cfg)?;
         let vscode_runner = vscode_runner(platform, &vscode, &runners.release)?;
-        files.push(ci::vscode_extension_file_with_prefix(
+        files.push(ci::vscode_extension_file_with_nix_setup(
             platform,
             resolved.runtime,
             &vscode_runner,
             &vscode,
             cfg.release.tag_prefix,
+            cfg.ci.nix_setup_action_ref.as_ref(),
         )?);
     }
     if !command.primary_only && wants_jetbrains {
         let jetbrains = jetbrains_options(&cfg)?;
         let jetbrains_runner = jetbrains_runner(platform, &jetbrains, &runners.release)?;
-        files.push(ci::jetbrains_plugin_file_with_prefix(
+        files.push(ci::jetbrains_plugin_file_with_nix_setup(
             platform,
             resolved.runtime,
             &jetbrains_runner,
             &jetbrains,
             cfg.release.tag_prefix,
+            cfg.ci.nix_setup_action_ref.as_ref(),
         )?);
     }
     let persisted_ci = resolved.persisted_ci(
@@ -900,7 +909,14 @@ fn run_pages_only(command: InitCiCommand) -> Result<()> {
     }
     let files = pages
         .iter()
-        .map(|pages| ci::codeberg_pages_file(platform, &ResolvedRunner::literal(runner)?, pages))
+        .map(|pages| {
+            ci::pages_file_with_nix_setup(
+                platform,
+                &ResolvedRunner::literal(runner)?,
+                pages,
+                cfg.ci.nix_setup_action_ref.as_ref(),
+            )
+        })
         .collect::<Result<Vec<_>>>()?;
     // A qualified repository owns no qualification workflows: simit-generated
     // ones (marker-checked, so handwritten files are never touched) are drift.
@@ -1014,6 +1030,7 @@ pub(crate) fn nix_only_publish_files(
     let metadata = cargo::cargo_metadata(&cargo::find_manifest(workspace_root)?)?;
     let options = ci::CiOptions {
         tag_prefix: cfg.release.tag_prefix,
+        nix_setup_action_ref: cfg.ci.nix_setup_action_ref.clone(),
         nix_substituters: cfg.release.artifacts.substituters.clone(),
         nix_trusted_public_keys: cfg.release.artifacts.trusted_public_keys.clone(),
         ci_nix_substituters: cfg.ci_cache_artifacts().substituters,
@@ -1245,6 +1262,7 @@ fn run_nix_only_at(command: InitCiCommand, workspace_root: &Path) -> Result<()> 
                 &cfg.ci_cache_artifacts(),
                 &cfg.ci.components,
                 &cfg.ci.push_branches,
+                cfg.ci.nix_setup_action_ref.as_ref(),
             )?,
         };
         let mut files = if cfg.ci.nix_build.only {
@@ -1256,7 +1274,7 @@ fn run_nix_only_at(command: InitCiCommand, workspace_root: &Path) -> Result<()> 
             && cfg.ci_owns_nix_build_matrix(platform)
             && !cfg.ci.nix_builds.is_empty()
         {
-            files.push(ci::nix_build_matrix_file_with_options(
+            files.push(ci::nix_build_matrix_file_with_nix_setup(
                 platform,
                 &ResolvedRunner::literal(&runner)?,
                 &cfg.ci.nix_builds,
@@ -1264,6 +1282,7 @@ fn run_nix_only_at(command: InitCiCommand, workspace_root: &Path) -> Result<()> 
                 &cfg.ci_cache_artifacts().substituters,
                 &cfg.ci_cache_artifacts().trusted_public_keys,
                 &cfg.ci.nix_build,
+                cfg.ci.nix_setup_action_ref.as_ref(),
             )?);
         }
         if !command.primary_only && cfg.ci.publish_crates {
@@ -1295,11 +1314,12 @@ fn run_nix_only_at(command: InitCiCommand, workspace_root: &Path) -> Result<()> 
         }
         if !command.primary_only && !cfg.ci.target_smokes.is_empty() {
             let cache = cfg.ci_cache_artifacts();
-            files.push(ci::target_smokes_file(
+            files.push(ci::target_smokes_file_with_nix_setup(
                 &ResolvedRunner::literal(&runner)?,
                 &cfg.ci.push_branches,
                 (&cache.substituters, &cache.trusted_public_keys),
                 &cfg.ci.target_smokes,
+                cfg.ci.nix_setup_action_ref.as_ref(),
             )?);
         }
         if !command.primary_only && !cfg.ci.native_tests.is_empty() {
@@ -1311,10 +1331,11 @@ fn run_nix_only_at(command: InitCiCommand, workspace_root: &Path) -> Result<()> 
         }
         files.extend(prebuild_files(&cfg, cfg.ci.crow.format)?);
         if let Some(pages) = &pages {
-            files.push(ci::codeberg_pages_file(
+            files.push(ci::pages_file_with_nix_setup(
                 platform,
                 &ResolvedRunner::literal(&runner)?,
                 pages,
+                cfg.ci.nix_setup_action_ref.as_ref(),
             )?);
         }
         files
@@ -1430,7 +1451,7 @@ pub(crate) fn prebuild_files(
         }
         return Ok(files);
     }
-    Ok(vec![ci::github_prebuild_file_with_policy(
+    Ok(vec![ci::github_prebuild_file_with_nix_setup(
         prebuild.effective_system_runners(&cfg.ci),
         prebuild.effective_nix_builds(&cfg.ci),
         prebuild,
@@ -1439,6 +1460,7 @@ pub(crate) fn prebuild_files(
         cfg.release.tag_prefix,
         cfg.release.notes_source(Platform::Github),
         cfg.release.github.is_some(),
+        cfg.ci.nix_setup_action_ref.as_ref(),
     )?])
 }
 
@@ -1551,7 +1573,7 @@ fn run_python(command: InitCiCommand) -> Result<()> {
         && cfg.ci_owns_nix_build_matrix(platform)
         && !options.nix_builds.is_empty()
     {
-        files.push(ci::nix_build_matrix_file_with_options(
+        files.push(ci::nix_build_matrix_file_with_nix_setup(
             platform,
             &runners.ci,
             &options.nix_builds,
@@ -1559,6 +1581,7 @@ fn run_python(command: InitCiCommand) -> Result<()> {
             &options.ci_nix_substituters,
             &options.ci_nix_trusted_public_keys,
             &cfg.ci.nix_build,
+            cfg.ci.nix_setup_action_ref.as_ref(),
         )?);
     }
     files.extend(prebuild_files(&cfg, cfg.ci.crow.format)?);
@@ -1576,7 +1599,12 @@ fn run_python(command: InitCiCommand) -> Result<()> {
         codeberg_pages_options(&cfg, &command, inferred_pages.as_ref())?
     };
     if let Some(pages) = &pages {
-        files.push(ci::codeberg_pages_file(platform, &runners.ci, pages)?);
+        files.push(ci::pages_file_with_nix_setup(
+            platform,
+            &runners.ci,
+            pages,
+            cfg.ci.nix_setup_action_ref.as_ref(),
+        )?);
     }
     let mut persisted_ci =
         resolved.persisted_ci(&cfg, platform, false, &omnix_ref, persisted_runner, None);

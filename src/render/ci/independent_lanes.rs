@@ -50,6 +50,7 @@ pub(super) fn render(
             platform,
             &options.ci_nix_substituters,
             &options.ci_nix_trusted_public_keys,
+            options.nix_setup_action_ref.as_ref(),
         );
         if lane == "rust" {
             push_nix_cargo_cache_steps(&mut workflow, platform, &runners.ci, &options, lane);

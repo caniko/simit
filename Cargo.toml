@@ -20,6 +20,7 @@ include = [
   "/Cargo.lock",
   "/Cargo.toml",
   "/ci-actions.json",
+  "/.github/actions/nix-setup/action.yml",
   "/.github/workflows/*.yaml",
   "/.github/workflows/*.yml",
   "/.simit/workflows/**",

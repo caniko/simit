@@ -1859,6 +1859,179 @@ runtime = "nix"
 }
 
 #[test]
+fn nix_setup_action_wraps_only_the_current_installer() {
+    let action = include_str!("../.github/actions/nix-setup/action.yml");
+    let yaml: serde_yaml::Value = serde_yaml::from_str(action).unwrap();
+    let pinned = simit::render::ci::github_action_ref(
+        "cachix/install-nix-action",
+        simit::render::ci::INSTALL_NIX_ACTION_VERSION,
+    );
+    assert!(action.contains(&pinned));
+    assert_eq!(yaml["runs"]["using"].as_str(), Some("composite"));
+    assert_eq!(yaml["inputs"].as_mapping().unwrap().len(), 3);
+    let steps = yaml["runs"]["steps"].as_sequence().unwrap();
+    assert_eq!(steps.len(), 1);
+    assert_eq!(steps[0].as_mapping().unwrap().len(), 2);
+    assert_eq!(
+        steps[0]["uses"].as_str(),
+        Some(pinned.split_once(" # ").unwrap().0)
+    );
+    assert_eq!(steps[0]["with"].as_mapping().unwrap().len(), 3);
+    for input in ["extra_nix_config", "install_url", "nix_path"] {
+        assert_eq!(yaml["inputs"][input]["required"].as_bool(), Some(false));
+        assert_eq!(
+            steps[0]["with"][input].as_str(),
+            Some(format!("${{{{ inputs.{input} }}}}").as_str())
+        );
+    }
+}
+
+#[test]
+fn nix_setup_action_changes_only_installer_refs() {
+    const SHA: &str = "0123456789abcdef0123456789abcdef01234567";
+    const CONFIG: &str = r#"[ci]
+platform = "github"
+provider = "actions"
+runtime = "nix"
+runner = "ubuntu-24.04"
+nix_builds = [".#demo", ".#checks.x86_64-linux.demo"]
+required_gates = [{ id = "generated-parity", run = "true" }]
+
+[ci.nix_build]
+capture_results = true
+
+[ci.custody]
+repository = "example/demo"
+status_context = "demo/custody"
+producer_attempt = 1
+
+[ci.custody.producers.CI]
+workflow = ".github/workflows/ci.yaml"
+jobs = ["test", "gate-generated-parity"]
+
+[prebuild]
+nix_builds = [".#demo"]
+publish_attic = true
+attic_app = ".#push-flake-inputs"
+system_runners = { x86_64-linux = "ubuntu-24.04" }
+
+[release.artifacts]
+substituters = ["https://cache.example"]
+trusted_public_keys = ["cache.example:abc"]
+
+[release.attic]
+cache = "demo"
+url = "https://attic.example"
+token_name = "demo"
+token_secret = "ATTIC_TOKEN"
+"#;
+    let temp = init_package(true);
+    let config = temp.path().join("simit.toml");
+    let workflows = temp.path().join(".github/workflows");
+    let generate = |args: &[&str]| {
+        let output = simit()
+            .current_dir(temp.path())
+            .args(["init", "ci"])
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    };
+    fs::write(&config, CONFIG).unwrap();
+    generate(&[]);
+    generate(&["--check", "--diff"]);
+
+    let direct = "cachix/install-nix-action@13d8dd58da0234aa297dedd986986ccb8e7f3e24 # v31.11.1";
+    let composite = format!("caniko/simit/.github/actions/nix-setup@{SHA}");
+    let cases = [
+        ("ci.yaml", &["test", "gate-generated-parity"][..], 2),
+        ("nix-builds.yaml", &["build"][..], 1),
+        ("prebuild.yaml", &["build"][..], 1),
+    ];
+    let before = cases.map(|(file, jobs, count)| {
+        let yaml = read(&workflows.join(file));
+        let parsed: serde_yaml::Value = serde_yaml::from_str(&yaml).unwrap();
+        assert_eq!(parsed["permissions"]["contents"].as_str(), Some("read"));
+        for job in jobs {
+            assert!(parsed["jobs"][*job].is_mapping(), "{file}: missing {job}");
+        }
+        assert_eq!(yaml.matches(direct).count(), count, "{file}");
+        assert!(!yaml.contains(&composite));
+        yaml
+    });
+    let custody = read(&workflows.join("producer-custody.yaml"));
+    assert!(before[0].contains("Configure GitHub input transport"));
+    assert!(before[1].contains("github.event.pull_request.head.sha"));
+    assert!(before[1].contains("Prepare Nix build evidence"));
+    assert!(before[2].contains("github.event.repository.default_branch"));
+    assert!(before[2].contains("secrets.ATTIC_TOKEN"));
+
+    let persisted = read(&config);
+    fs::write(
+        &config,
+        persisted.replacen(
+            "[ci]",
+            &format!("[ci]\nnix_setup_action_ref = \"{SHA}\""),
+            1,
+        ),
+    )
+    .unwrap();
+    generate(&[]);
+    generate(&["--check", "--diff"]);
+    generate(&["--prebuild-only", "--check", "--diff"]);
+    let audit = simit::registry::audit_ci(temp.path()).unwrap();
+    assert_eq!(
+        audit.status,
+        simit::registry::FeatureStatus::Managed,
+        "{audit:?}"
+    );
+    assert!(read(&config).contains(&format!("nix_setup_action_ref = \"{SHA}\"")));
+    assert_eq!(read(&workflows.join("producer-custody.yaml")), custody);
+    for ((file, _, _), yaml) in cases.into_iter().zip(before) {
+        let opted_in = read(&workflows.join(file));
+        assert_yaml_parses(&opted_in);
+        // Full byte comparison covers triggers, check names, checkout refs,
+        // permissions, transport, evidence uploads and push-only publication.
+        assert_eq!(opted_in, yaml.replace(direct, &composite), "{file}");
+    }
+}
+
+#[test]
+fn nix_setup_action_rejects_unpinned_and_non_lowercase_refs() {
+    let temp = init_package(true);
+    for invalid in [
+        "trunk",
+        "v1",
+        "",
+        "0123456789abcdef0123456789abcdef0123456",
+        "0123456789abcdef0123456789Abcdef01234567",
+        "0123456789abcdef0123456789gbcdef01234567",
+        "0123456789abcdef0123456789abcdef012345678",
+    ] {
+        let config = format!("[ci]\nnix_setup_action_ref = \"{invalid}\"\n");
+        fs::write(temp.path().join("simit.toml"), config).unwrap();
+        let output = simit()
+            .current_dir(temp.path())
+            .args(["init", "ci"])
+            .output()
+            .unwrap();
+        assert!(!output.status.success(), "{invalid:?}");
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            stderr.contains(
+                "[ci].nix_setup_action_ref must be a 40-character lowercase Git revision"
+            ),
+            "{stderr}"
+        );
+        assert!(!temp.path().join(".github").exists());
+    }
+}
+
+#[test]
 fn github_prebuild_is_reusable_publishes_attic_and_tracks_drift() {
     let temp = init_flake_only();
     fs::write(

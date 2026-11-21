@@ -703,6 +703,32 @@ impl Default for ReleasePlzConfig {
     }
 }
 
+/// An immutable GitHub commit pin for Simit's Nix setup composite action.
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+#[serde(try_from = "String")]
+pub struct NixSetupActionRef(String);
+
+impl TryFrom<String> for NixSetupActionRef {
+    type Error = anyhow::Error;
+
+    fn try_from(revision: String) -> Result<Self> {
+        if revision.len() != 40
+            || !revision
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+        {
+            bail!("[ci].nix_setup_action_ref must be a 40-character lowercase Git revision");
+        }
+        Ok(Self(revision))
+    }
+}
+
+impl NixSetupActionRef {
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
 #[derive(Debug, Clone, Default, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct CiConfig {
@@ -712,6 +738,9 @@ pub struct CiConfig {
     pub platform: Option<Platform>,
     #[serde(default)]
     pub runtime: Option<Runtime>,
+    /// Opt in to the Simit-hosted installer in generated GitHub workflows.
+    #[serde(default)]
+    pub nix_setup_action_ref: Option<NixSetupActionRef>,
     #[serde(default)]
     pub runner: Option<String>,
     /// Native GitHub-hosted runner label for each Nix system in a flake-only
@@ -5824,6 +5853,13 @@ fn set_ci_table(table: &mut Table, ci: &CiConfig) {
     set_optional_string(table, "provider", ci.provider.map(ci_provider_name));
     set_optional_string(table, "platform", ci.platform.map(Platform::as_str));
     set_optional_string(table, "runtime", ci.runtime.map(runtime_name));
+    set_optional_string(
+        table,
+        "nix_setup_action_ref",
+        ci.nix_setup_action_ref
+            .as_ref()
+            .map(NixSetupActionRef::as_str),
+    );
     set_optional_string(table, "runner", ci.runner.as_deref());
     set_string_map(table, "nix_system_runners", &ci.nix_system_runners);
     set_optional_string(table, "windows_runner", ci.windows_runner.as_deref());

@@ -109,6 +109,9 @@
           || pkgs.lib.hasSuffix "/.simit/release-plz.py" pathString
           || pkgs.lib.hasSuffix "ci-actions.json" pathString
           || pkgs.lib.hasSuffix "/.github" pathString
+          || pkgs.lib.hasSuffix "/.github/actions" pathString
+          || pkgs.lib.hasSuffix "/.github/actions/nix-setup" pathString
+          || pkgs.lib.hasSuffix "/.github/actions/nix-setup/action.yml" pathString
           || pkgs.lib.hasSuffix "/.github/workflows" pathString
           || pkgs.lib.hasInfix "/.github/workflows/" pathString
           || pkgs.lib.hasSuffix "/.simit" pathString

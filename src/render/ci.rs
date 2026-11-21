@@ -7,7 +7,9 @@ use serde::Deserialize;
 
 use crate::cargo::Package;
 use crate::cli::{CiProvider, Platform, Runtime, WorkspaceStrategy};
-use crate::config::{ArtifactsConfig, AtticConfig, CiComponent, CrowCiConfig, PrebuildConfig};
+use crate::config::{
+    ArtifactsConfig, AtticConfig, CiComponent, CrowCiConfig, NixSetupActionRef, PrebuildConfig,
+};
 use crate::config::{
     JetbrainsCredentialSource, ResolvedJetbrains, ResolvedVscode, VscodePatSource,
 };
@@ -34,6 +36,13 @@ pub const INSTALL_NIX_ACTION_URL: &str = "https://github.com/cachix/install-nix-
 /// (NixOS/nix fba3f6e); v31's 2.35.1 can abort `Worker::run` during
 /// qualification, which broke `harbor-ci full` on release jobs.
 pub const INSTALL_NIX_ACTION_VERSION: &str = "v31.11.1";
+
+pub(crate) fn github_nix_setup_action_ref(action: Option<&NixSetupActionRef>) -> String {
+    match action {
+        Some(action) => format!("caniko/simit/.github/actions/nix-setup@{}", action.as_str()),
+        None => github_action_ref("cachix/install-nix-action", INSTALL_NIX_ACTION_VERSION),
+    }
+}
 const CHECKOUT_VERSION: &str = "v7.0.1";
 const CHECKOUT_COMPAT_VERSION: &str = "v4.3.1";
 pub const SIMIT_SOURCE_URL: &str = "https://simit.rs";
@@ -190,6 +199,7 @@ pub(crate) fn publisher_bootstrap() -> String {
 #[derive(Debug, Clone)]
 pub struct CiOptions {
     pub tag_prefix: crate::release_identity::TagPrefix,
+    pub nix_setup_action_ref: Option<NixSetupActionRef>,
     /// CI-only cache policy; publication uses the separate nix_* fields.
     pub ci_nix_substituters: Vec<String>,
     pub ci_nix_trusted_public_keys: Vec<String>,
@@ -257,6 +267,7 @@ impl Default for CiOptions {
     fn default() -> Self {
         Self {
             tag_prefix: Default::default(),
+            nix_setup_action_ref: None,
             ci_nix_substituters: Vec::new(),
             ci_nix_trusted_public_keys: Vec::new(),
             independent_lanes: false,
@@ -692,6 +703,7 @@ fn publish_workspace_workflow(
             platform,
             &options.nix_substituters,
             &options.nix_trusted_public_keys,
+            options.nix_setup_action_ref.as_ref(),
         );
     } else {
         push_rust_setup_step(&mut w, platform);
@@ -766,6 +778,7 @@ fn publish_workspace_workflow(
                 platform,
                 &options.nix_substituters,
                 &options.nix_trusted_public_keys,
+                options.nix_setup_action_ref.as_ref(),
             );
         } else {
             push_rust_setup_step(&mut w, platform);
@@ -817,6 +830,7 @@ fn publish_workspace_workflow(
                 platform,
                 &options.nix_substituters,
                 &options.nix_trusted_public_keys,
+                options.nix_setup_action_ref.as_ref(),
             );
             push_nix_cargo_bin_path_step(&mut w);
         } else {
@@ -918,11 +932,20 @@ pub fn codeberg_pages_file(
     runner: &ResolvedRunner,
     pages: &CodebergPagesOptions,
 ) -> Result<GeneratedFile> {
+    pages_file_with_nix_setup(platform, runner, pages, None)
+}
+
+pub(crate) fn pages_file_with_nix_setup(
+    platform: Platform,
+    runner: &ResolvedRunner,
+    pages: &CodebergPagesOptions,
+    nix_setup: Option<&NixSetupActionRef>,
+) -> Result<GeneratedFile> {
     Ok(GeneratedFile {
         relative_path: PathBuf::from(platform.workflow_dir()).join("pages.yaml"),
         content: match platform {
             Platform::Forgejo => codeberg_pages_workflow(runner, pages),
-            Platform::Github => github_pages_workflow(runner, pages),
+            Platform::Github => github_pages_workflow(runner, pages, nix_setup),
             Platform::Gitlab => bail!("Codeberg Pages workflow is not supported on GitLab"),
         },
     })
@@ -944,13 +967,24 @@ pub fn vscode_extension_file_with_prefix(
     vscode: &ResolvedVscode,
     prefix: crate::release_identity::TagPrefix,
 ) -> Result<GeneratedFile> {
+    vscode_extension_file_with_nix_setup(platform, runtime, runner, vscode, prefix, None)
+}
+
+pub(crate) fn vscode_extension_file_with_nix_setup(
+    platform: Platform,
+    runtime: Runtime,
+    runner: &ResolvedRunner,
+    vscode: &ResolvedVscode,
+    prefix: crate::release_identity::TagPrefix,
+    nix_setup: Option<&NixSetupActionRef>,
+) -> Result<GeneratedFile> {
     if runtime != Runtime::Nix {
         bail!("VS Code extension workflow generation requires --runtime nix");
     }
 
     Ok(GeneratedFile {
         relative_path: PathBuf::from(platform.workflow_dir()).join("publish-vscode-extension.yaml"),
-        content: vscode_extension_workflow(platform, runner, vscode, prefix)?,
+        content: vscode_extension_workflow(platform, runner, vscode, prefix, nix_setup)?,
     })
 }
 
@@ -976,13 +1010,24 @@ pub fn jetbrains_plugin_file_with_prefix(
     jetbrains: &ResolvedJetbrains,
     prefix: crate::release_identity::TagPrefix,
 ) -> Result<GeneratedFile> {
+    jetbrains_plugin_file_with_nix_setup(platform, runtime, runner, jetbrains, prefix, None)
+}
+
+pub(crate) fn jetbrains_plugin_file_with_nix_setup(
+    platform: Platform,
+    runtime: Runtime,
+    runner: &ResolvedRunner,
+    jetbrains: &ResolvedJetbrains,
+    prefix: crate::release_identity::TagPrefix,
+    nix_setup: Option<&NixSetupActionRef>,
+) -> Result<GeneratedFile> {
     if runtime != Runtime::Nix {
         bail!("JetBrains plugin workflow generation requires --runtime nix");
     }
 
     Ok(GeneratedFile {
         relative_path: PathBuf::from(platform.workflow_dir()).join("publish-jetbrains-plugin.yaml"),
-        content: jetbrains_plugin_workflow(platform, runner, jetbrains, prefix),
+        content: jetbrains_plugin_workflow(platform, runner, jetbrains, prefix, nix_setup),
     })
 }
 
@@ -1038,7 +1083,15 @@ pub fn nix_flake_ci_file_with_system_runners(
     artifacts: &ArtifactsConfig,
     components: &[CiComponent],
 ) -> Result<GeneratedFile> {
-    nix_flake_ci_file_with_events(platform, runner, system_runners, artifacts, components, &[])
+    nix_flake_ci_file_with_events(
+        platform,
+        runner,
+        system_runners,
+        artifacts,
+        components,
+        &[],
+        None,
+    )
 }
 
 pub(crate) fn nix_flake_ci_file_with_events(
@@ -1048,6 +1101,7 @@ pub(crate) fn nix_flake_ci_file_with_events(
     artifacts: &ArtifactsConfig,
     components: &[CiComponent],
     push_branches: &[String],
+    nix_setup: Option<&NixSetupActionRef>,
 ) -> Result<GeneratedFile> {
     if platform == Platform::Gitlab {
         bail!("GitLab flake CI uses .gitlab-ci.yml");
@@ -1104,6 +1158,7 @@ pub(crate) fn nix_flake_ci_file_with_events(
         platform,
         &artifacts.substituters,
         &artifacts.trusted_public_keys,
+        nix_setup,
     );
     let selected = |component| components.is_empty() || components.contains(&component);
     if components.is_empty() {
@@ -1191,6 +1246,31 @@ pub fn github_prebuild_file_with_policy(
     notes: crate::config::ReleaseNotesSource,
     github_release: bool,
 ) -> Result<GeneratedFile> {
+    github_prebuild_file_with_nix_setup(
+        system_runners,
+        nix_builds,
+        prebuild,
+        artifacts,
+        attic,
+        prefix,
+        notes,
+        github_release,
+        None,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn github_prebuild_file_with_nix_setup(
+    system_runners: &BTreeMap<String, String>,
+    nix_builds: &[String],
+    prebuild: &PrebuildConfig,
+    artifacts: &ArtifactsConfig,
+    attic: Option<&AtticConfig>,
+    prefix: crate::release_identity::TagPrefix,
+    notes: crate::config::ReleaseNotesSource,
+    github_release: bool,
+    nix_setup: Option<&NixSetupActionRef>,
+) -> Result<GeneratedFile> {
     if system_runners.is_empty() {
         bail!("GitHub prebuild requires at least one native system runner");
     }
@@ -1267,6 +1347,7 @@ pub fn github_prebuild_file_with_policy(
         &artifacts.substituters,
         &artifacts.trusted_public_keys,
         artifacts.netrc_secret.as_deref(),
+        nix_setup,
     );
     if release_entry {
         // Reusable release prebuilds also validate their own event checkout before
@@ -1410,6 +1491,29 @@ pub fn nix_build_matrix_file_with_options(
     trusted_public_keys: &[String],
     options: &crate::config::NixBuildConfig,
 ) -> Result<GeneratedFile> {
+    nix_build_matrix_file_with_nix_setup(
+        platform,
+        runner,
+        installables,
+        extra_setup,
+        substituters,
+        trusted_public_keys,
+        options,
+        None,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn nix_build_matrix_file_with_nix_setup(
+    platform: Platform,
+    runner: &ResolvedRunner,
+    installables: &[String],
+    extra_setup: &[String],
+    substituters: &[String],
+    trusted_public_keys: &[String],
+    options: &crate::config::NixBuildConfig,
+    nix_setup: Option<&NixSetupActionRef>,
+) -> Result<GeneratedFile> {
     if platform == Platform::Gitlab {
         bail!("GitLab Nix installable matrices are not supported");
     }
@@ -1432,6 +1536,7 @@ pub fn nix_build_matrix_file_with_options(
             substituters,
             trusted_public_keys,
             options,
+            nix_setup,
         );
     }
 
@@ -1518,7 +1623,13 @@ pub fn nix_build_matrix_file_with_options(
     } else {
         push_checkout_step_with_version(&mut workflow, platform, checkout_version);
     }
-    push_install_nix_step_with_cache(&mut workflow, platform, substituters, trusted_public_keys);
+    push_install_nix_step_with_cache(
+        &mut workflow,
+        platform,
+        substituters,
+        trusted_public_keys,
+        nix_setup,
+    );
     push_required_env_step(&mut workflow, &options.required_secrets);
     if native_runners {
         push_native_nix_runner_step(&mut workflow);
@@ -1680,7 +1791,11 @@ fn codeberg_pages_workflow(runner: &ResolvedRunner, pages: &CodebergPagesOptions
     workflow
 }
 
-fn github_pages_workflow(runner: &ResolvedRunner, pages: &CodebergPagesOptions) -> String {
+fn github_pages_workflow(
+    runner: &ResolvedRunner,
+    pages: &CodebergPagesOptions,
+    nix_setup: Option<&NixSetupActionRef>,
+) -> String {
     let mut workflow = String::new();
     push_generated_workflow_header(&mut workflow);
     workflow.push_str("name: pages\n\n");
@@ -1696,7 +1811,7 @@ fn github_pages_workflow(runner: &ResolvedRunner, pages: &CodebergPagesOptions) 
     workflow.push_str("\n    environment:\n      name: github-pages\n      url: ${{ steps.deployment.outputs.page_url }}");
     workflow.push_str("\n    env:\n      NIX_CONFIG: \"experimental-features = nix-command flakes\"\n    steps:\n");
     push_checkout_step(&mut workflow, Platform::Github, runner);
-    push_install_nix_step(&mut workflow, Platform::Github);
+    push_install_nix_step(&mut workflow, Platform::Github, nix_setup);
     push_extra_setup_steps(&mut workflow, &pages.extra_setup);
     workflow.push_str("      - name: Configure GitHub Pages\n        uses: ");
     workflow.push_str(&github_action_ref("actions/configure-pages", "v6"));
@@ -1759,6 +1874,7 @@ fn vscode_extension_workflow(
     runner: &ResolvedRunner,
     vscode: &ResolvedVscode,
     prefix: crate::release_identity::TagPrefix,
+    nix_setup: Option<&NixSetupActionRef>,
 ) -> Result<String> {
     let mut workflow = String::new();
     push_generated_workflow_header(&mut workflow);
@@ -1787,7 +1903,7 @@ fn vscode_extension_workflow(
     workflow.push_str("      NIX_CONFIG: \"experimental-features = nix-command flakes\"\n");
     workflow.push_str("    steps:\n");
     push_event_checkout_step(&mut workflow, platform, Some(runner));
-    push_install_nix_step(&mut workflow, platform);
+    push_install_nix_step(&mut workflow, platform, nix_setup);
     push_vscode_version_validation(&mut workflow, vscode, prefix);
     push_vscode_credential_preflight(&mut workflow, platform, vscode);
     for (index, command) in vscode.prepublish_commands.iter().enumerate() {
@@ -1817,6 +1933,7 @@ fn jetbrains_plugin_workflow(
     runner: &ResolvedRunner,
     jetbrains: &ResolvedJetbrains,
     prefix: crate::release_identity::TagPrefix,
+    nix_setup: Option<&NixSetupActionRef>,
 ) -> String {
     let artifact_label = Path::new(&jetbrains.plugin_dir)
         .file_name()
@@ -1858,7 +1975,7 @@ fn jetbrains_plugin_workflow(
     workflow.push_str("      NIX_CONFIG: \"experimental-features = nix-command flakes\"\n");
     workflow.push_str("    steps:\n");
     push_checkout_step(&mut workflow, platform, runner);
-    push_install_nix_step(&mut workflow, platform);
+    push_install_nix_step(&mut workflow, platform, nix_setup);
     push_jetbrains_credential_preflight(&mut workflow, jetbrains);
     push_jetbrains_version_validation(&mut workflow, jetbrains, prefix);
     for (index, command) in jetbrains.prepublish_commands.iter().enumerate() {
@@ -2659,6 +2776,7 @@ fn python_ci_workflow(
         platform,
         &options.ci_nix_substituters,
         &options.ci_nix_trusted_public_keys,
+        options.nix_setup_action_ref.as_ref(),
     );
     push_extra_setup_steps(&mut workflow, &options.extra_setup);
     if selected(CiComponent::FlakeWiring) {
@@ -2756,7 +2874,11 @@ fn python_publish_workflow(
     workflow.push_str("    steps:\n");
     push_checkout_step(&mut workflow, platform, runner);
     push_required_env_step(&mut workflow, &options.required_env);
-    push_install_nix_step(&mut workflow, platform);
+    push_install_nix_step(
+        &mut workflow,
+        platform,
+        options.nix_setup_action_ref.as_ref(),
+    );
     push_validate_pypi_tag_step(&mut workflow, options.tag_prefix, ".");
     push_extra_setup_steps(&mut workflow, &options.extra_setup);
     workflow.push_str("      - name: Build Nix package\n");
@@ -2832,7 +2954,11 @@ fn maturin_publish_workflow(
     workflow.push_str("    steps:\n");
     push_checkout_step(&mut workflow, platform, runner);
     push_required_env_step(&mut workflow, &options.required_env);
-    push_install_nix_step(&mut workflow, platform);
+    push_install_nix_step(
+        &mut workflow,
+        platform,
+        options.nix_setup_action_ref.as_ref(),
+    );
     push_validate_pypi_tag_step(&mut workflow, options.tag_prefix, pyproject_dir);
     push_extra_setup_steps(&mut workflow, &options.extra_setup);
     workflow.push_str("      - name: Build and publish to PyPI\n");
@@ -2920,6 +3046,7 @@ fn ci_workflow_single_job(
                 platform,
                 &options.ci_nix_substituters,
                 &options.ci_nix_trusted_public_keys,
+                options.nix_setup_action_ref.as_ref(),
             );
             push_nix_cargo_cache_steps(&mut workflow, platform, &runners.ci, &options, "test");
             push_nix_cargo_bin_path_step(&mut workflow);
@@ -3290,6 +3417,7 @@ fn ci_workflow_multi_job(
                     platform,
                     &options.ci_nix_substituters,
                     &options.ci_nix_trusted_public_keys,
+                    options.nix_setup_action_ref.as_ref(),
                 );
                 push_nix_cargo_cache_steps(
                     &mut workflow,
@@ -3414,6 +3542,7 @@ fn push_required_gate_jobs(
                 platform,
                 &options.ci_nix_substituters,
                 &options.ci_nix_trusted_public_keys,
+                options.nix_setup_action_ref.as_ref(),
             );
         } else {
             push_rust_setup_step(workflow, platform);
@@ -3483,6 +3612,16 @@ pub fn target_smokes_file(
     nix_cache: (&[String], &[String]),
     smokes: &[crate::config::TargetSmoke],
 ) -> Result<GeneratedFile> {
+    target_smokes_file_with_nix_setup(ci_runner, push_branches, nix_cache, smokes, None)
+}
+
+pub(crate) fn target_smokes_file_with_nix_setup(
+    ci_runner: &ResolvedRunner,
+    push_branches: &[String],
+    nix_cache: (&[String], &[String]),
+    smokes: &[crate::config::TargetSmoke],
+    nix_setup: Option<&NixSetupActionRef>,
+) -> Result<GeneratedFile> {
     let platform = Platform::Github;
     let mut workflow = String::new();
     push_generated_workflow_header(&mut workflow);
@@ -3510,7 +3649,13 @@ pub fn target_smokes_file(
         push_job_github_read_permissions(&mut workflow, platform);
         workflow.push_str("    steps:\n");
         push_checkout_step(&mut workflow, platform, ci_runner);
-        push_install_nix_step_with_cache(&mut workflow, platform, nix_cache.0, nix_cache.1);
+        push_install_nix_step_with_cache(
+            &mut workflow,
+            platform,
+            nix_cache.0,
+            nix_cache.1,
+            nix_setup,
+        );
         workflow.push_str(&format!(
             "      - name: Build {}\n        run: |\n          set -euo pipefail\n          nix build {} --out-link result\n          mkdir {dir}\n          cp -rL result/. {dir}/\n          chmod -R u+w {dir}\n\n",
             smoke.id,
@@ -3856,7 +4001,11 @@ fn publish_workflow(
 
     match runtime {
         Runtime::Nix => {
-            push_install_nix_step(&mut workflow, platform);
+            push_install_nix_step(
+                &mut workflow,
+                platform,
+                options.nix_setup_action_ref.as_ref(),
+            );
             push_nix_cargo_bin_path_step(&mut workflow);
             workflow.push_str(&validate_release_tag_step_with_prefix(
                 Some(command_prefix(runtime)),
@@ -3985,7 +4134,11 @@ fn artifacts_workflow(
     ));
     match runtime {
         Runtime::Nix => {
-            push_install_nix_step(&mut workflow, platform);
+            push_install_nix_step(
+                &mut workflow,
+                platform,
+                options.nix_setup_action_ref.as_ref(),
+            );
             push_nix_cargo_bin_path_step(&mut workflow);
             push_extra_setup_steps(&mut workflow, &options.extra_setup);
             workflow.push_str("      - name: Build package\n");
@@ -4005,7 +4158,9 @@ fn artifacts_workflow(
             if platform == Platform::Forgejo {
                 workflow.push_str(&immutable_action_ref(INSTALL_NIX_ACTION_URL, version));
             } else {
-                workflow.push_str(&github_action_ref("cachix/install-nix-action", version));
+                workflow.push_str(&github_nix_setup_action_ref(
+                    options.nix_setup_action_ref.as_ref(),
+                ));
             }
             workflow.push_str("\n\n");
             push_sccache_stats_step(&mut workflow, platform, runtime);
@@ -5448,8 +5603,12 @@ fn nix_build_action_version<'a>(
     }
 }
 
-fn push_install_nix_step(workflow: &mut String, platform: Platform) {
-    push_install_nix_step_with_cache(workflow, platform, &[], &[]);
+fn push_install_nix_step(
+    workflow: &mut String,
+    platform: Platform,
+    nix_setup: Option<&NixSetupActionRef>,
+) {
+    push_install_nix_step_with_cache(workflow, platform, &[], &[], nix_setup);
 }
 
 fn push_install_nix_step_with_cache(
@@ -5457,8 +5616,16 @@ fn push_install_nix_step_with_cache(
     platform: Platform,
     substituters: &[String],
     trusted_public_keys: &[String],
+    nix_setup: Option<&NixSetupActionRef>,
 ) {
-    push_install_nix_step_with_netrc(workflow, platform, substituters, trusted_public_keys, None);
+    push_install_nix_step_with_netrc(
+        workflow,
+        platform,
+        substituters,
+        trusted_public_keys,
+        None,
+        nix_setup,
+    );
 }
 
 pub(crate) const NIX_NETRC_FILE_CONFIG: &str = "netrc-file = ${{ runner.temp }}/simit-nix-netrc";
@@ -5479,6 +5646,7 @@ fn push_install_nix_step_with_netrc(
     substituters: &[String],
     trusted_public_keys: &[String],
     netrc_secret: Option<&str>,
+    nix_setup: Option<&NixSetupActionRef>,
 ) {
     if platform == Platform::Forgejo {
         if !substituters.is_empty() || !trusted_public_keys.is_empty() {
@@ -5506,10 +5674,7 @@ fn push_install_nix_step_with_netrc(
     }
     workflow.push_str("      - name: Install Nix\n");
     workflow.push_str("        uses: ");
-    workflow.push_str(&github_action_ref(
-        "cachix/install-nix-action",
-        INSTALL_NIX_ACTION_VERSION,
-    ));
+    workflow.push_str(&github_nix_setup_action_ref(nix_setup));
     if !substituters.is_empty() || !trusted_public_keys.is_empty() || netrc_secret.is_some() {
         workflow.push_str("\n        with:\n          extra_nix_config: |\n            experimental-features = nix-command flakes\n");
         if !substituters.is_empty() {
@@ -6101,6 +6266,7 @@ pub(crate) fn release_plz_setup(workflow: &mut String, runtime: Runtime, options
             Platform::Github,
             &options.nix_substituters,
             &options.nix_trusted_public_keys,
+            options.nix_setup_action_ref.as_ref(),
         );
     } else {
         push_rust_setup_step(workflow, Platform::Github);
