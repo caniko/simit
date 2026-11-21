@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Fixed: grouped Nix builds reuse the cached Simit engine instead of compiling
+  it in every group job. The import used `nix copy --all`, which a multi-user
+  daemon rejects for a `file://` cache (`path ... is not valid`); the export now
+  records the engine root and the import copies that closure. The cache key
+  moves to `simit-engine-v2-`, so the first run after regenerating saves anew.
 - Fixed: fleet pin rollouts (`simit projects update --pin-file ... --push`) land
   without per-repository edits or babysitting.
   - Generated GitHub workflows with a non-empty `push_branches` filter always

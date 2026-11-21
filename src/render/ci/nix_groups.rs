@@ -245,7 +245,7 @@ pub(super) fn render(
 const INPUT_CACHE_MAX_KIB: u64 = 4 << 20;
 
 fn engine_cache_key(revision: &str) -> String {
-    format!("simit-engine-v1-${{{{ {revision} }}}}-${{{{ runner.os }}}}-${{{{ runner.arch }}}}")
+    format!("simit-engine-v2-${{{{ {revision} }}}}-${{{{ runner.os }}}}-${{{{ runner.arch }}}}")
 }
 
 /// Reuse the pinned engine's closure across runs instead of compiling it in
@@ -272,7 +272,14 @@ fn push_engine_cache_restore(workflow: &mut String, revision: &str) {
           set -euo pipefail
           [ "$SIMIT_ENGINE_CACHE_HIT" = true ] || exit 0
           cache_root="$RUNNER_TEMP/simit-engine-cache"
-          env -u GH_TOKEN -u GITHUB_TOKEN -u GITHUB_OAUTH_TOKEN -u ATTIC_TOKEN -u CACHIX_AUTH_TOKEN -u CACHIX_SIGNING_KEY nix copy --no-check-sigs --all --from "file://$cache_root" || echo '::warning::Cached grouped-build engine failed to import; building it normally'
+          # Copy from the recorded root: `--all` lists a file cache under placeholder
+          # names, so the daemon rejects paths whose references are not yet valid.
+          root=$(cat "$cache_root/root" 2>/dev/null || true)
+          if [[ "$root" =~ ^/nix/store/[0-9a-z]{32}-[A-Za-z0-9+._?=-]+$ ]]; then
+            env -u GH_TOKEN -u GITHUB_TOKEN -u GITHUB_OAUTH_TOKEN -u ATTIC_TOKEN -u CACHIX_AUTH_TOKEN -u CACHIX_SIGNING_KEY nix copy --no-check-sigs --from "file://$cache_root" "$root" || echo '::warning::Cached grouped-build engine failed to import; building it normally'
+          else
+            echo '::warning::Cached grouped-build engine has no valid root; building it normally'
+          fi
           rm -rf "$cache_root"
 "#);
 }
@@ -294,6 +301,7 @@ fn push_engine_cache_save(workflow: &mut String, revision: &str) {
           cache_root="$RUNNER_TEMP/simit-engine-cache"
           rm -rf "$cache_root"
           if nix copy --to "file://$cache_root?compression=zstd" "${SIMIT_CI_ENGINE%/bin/simit}"; then
+            printf '%s\n' "${SIMIT_CI_ENGINE%/bin/simit}" > "$cache_root/root"
             printf 'save=true\n' >> "$GITHUB_OUTPUT"
           else
             echo '::warning::Grouped-build engine failed to export; not saving it'
