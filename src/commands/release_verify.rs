@@ -244,11 +244,12 @@ pub fn run(command: ReleaseCommand) -> Result<()> {
             .effective_nix_bundle_attrs()
             .is_empty()
             && config.release.artifacts.build_commands.is_empty()
+            && config.release.artifacts.cargo.is_empty()
         {
             results.push(CheckResult::fail(
                 "release artifacts",
                 "no artifact producer configured",
-                "configure release.artifacts.prebuild_binaries, nix_bundle_attrs or build_commands",
+                "configure release.artifacts.cargo, prebuild_binaries, nix_bundle_attrs or build_commands",
             ));
         } else {
             results.push(CheckResult::pass(

@@ -32,6 +32,13 @@ Chocolatey requires `download_repo` plus package metadata. Scoop requires
 `bucket_url` and `download_repo`. Fields not listed here can usually fall back
 to Cargo package metadata.
 
+For a Scoop bucket on GitHub, configure `SCOOP_BUCKET_TOKEN` with a token
+that can push to the bucket repository. The workflow's automatic `GITHUB_TOKEN`
+cannot push to a different repository. Simit maps a legacy
+`bucket_token_secret = "CODEBERG_TOKEN"` to `SCOOP_BUCKET_TOKEN` for a
+`github.com` bucket URL. Codeberg bucket settings and custom secret names
+are unchanged.
+
 Chocolatey dependencies become nuspec `<dependencies>`; `version` is optional
 (a NuGet version or range) and ids must be non-empty without whitespace:
 

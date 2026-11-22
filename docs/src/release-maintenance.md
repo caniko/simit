@@ -76,6 +76,50 @@ versioned `*-release-manifest.json`; Simit validates its schema and release
 version before checksums and hosted-release upload. Project-specific
 `build_commands` remain additive for formats outside this contract.
 
+### Building release archives with Cargo
+
+Use `[[release.artifacts.cargo]]` to build directly on GitHub or Forgejo
+Actions runners, without Nix or a flake in the build job. The local
+`simit release verify` command still requires a Simit-managed flake. For example:
+
+```toml
+[[release.artifacts.cargo]]
+id = "linux-amd64"
+runner = "ubuntu-24.04"
+target = "x86_64-unknown-linux-gnu"
+toolchain = "1.95.0"
+packages = ["modde", "modde-ui"]
+binaries = ["modde", "modde-ui"]
+archive = "modde-{version}-x86_64-linux.tar.gz"
+setup = "sudo apt-get update && sudo apt-get install -y libwayland-dev libxkbcommon-dev"
+```
+
+For Linux arm64, add a second entry with its own ID and archive name,
+`runner = "ubuntu-24.04-arm"`, and `target = "aarch64-unknown-linux-gnu"`.
+Use matching runner and Rust host triples on macOS and Windows as well
+(for example, `macos-15` with `aarch64-apple-darwin`, or `windows-2022`
+with `x86_64-pc-windows-msvc`). The runner needs Bash and rustup; `setup`
+is optional Bash run before the build. Pin `toolchain` to an exact Rust
+release or dated nightly. The job runs `cargo build --release --locked`
+with the listed `binaries` and optional `packages`, `features`, and
+`default_features = false`. Windows appends `.exe` to the binary names.
+Linux requires `readelf` and rejects binaries whose interpreter, needed library
+(`DT_NEEDED`), RPATH or RUNPATH points into `/nix/store`. The runner image
+sets the glibc baseline; this check does not establish compatibility with
+older distributions.
+
+Archives are flat unless you set a single directory `prefix`. `archive` must
+be a distinct `.tar.gz` or `.zip` filename; `archive` and `prefix` accept
+`{version}` without the leading `v`. ZIP creation uses `zip` on Linux and
+macOS and the system `tar.exe` on Windows. Simit collects the archives after
+other build commands and Windows PFX repacking, before SignPath, checksums and
+hosted upload. They can replace or coexist with Nix bundles; do not reuse the
+same asset name. The build jobs never install Nix. With native jobs configured,
+tag validation installs Nix only for `version_attr` or required gates; set
+`validation_nix = false` under `[release.artifacts]` if all required gates
+are native. The publishing job still uses the existing Nix-backed tools.
+`simit binstall sync` still reads a Nix bundle, not these Cargo entries.
+
 ### Promoting archive members to release assets
 
 `[[release.artifacts.extract]]` copies one member of a release archive into

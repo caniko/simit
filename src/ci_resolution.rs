@@ -81,6 +81,11 @@ pub fn release_backend(
     let backend = CiBackend::from_parts(provider, platform)?;
     cfg.ci
         .validate_required_gate_artifacts_backend(provider, platform)?;
+    if !cfg.release.artifacts.cargo.is_empty()
+        && (provider != CiProvider::Actions || platform == Platform::Gitlab)
+    {
+        bail!("[[release.artifacts.cargo]] requires a GitHub or Forgejo Actions release backend");
+    }
     if cfg.release.artifacts.netrc_secret.is_some()
         && (provider != CiProvider::Actions || platform != Platform::Github)
     {
