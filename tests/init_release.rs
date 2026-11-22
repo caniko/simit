@@ -255,6 +255,31 @@ fn native_cargo_release_jobs_join_existing_publication() {
 }
 
 #[test]
+fn cargo_archive_collection_follows_repack_but_precedes_signpath() {
+    let osslsigncode = render_release(&format!(
+        "{CARGO_RELEASE}\n[release.windows_signing]\n\
+         binaries = ['demo']\nsign_name = 'demo'\nsign_url = 'https://example.com'\n\
+         tar_archive = 'demo-{{version}}-windows.tar.gz'\nzip_archive = 'demo-{{version}}-windows.zip'\n"
+    ));
+    let repack = osslsigncode
+        .find("Sign Windows Authenticode artifacts")
+        .unwrap();
+    let collect = osslsigncode.find("Collect Cargo release archives").unwrap();
+    assert!(repack < collect, "collect must reject the existing ZIP");
+
+    let signpath = render_release(&format!(
+        "{CARGO_RELEASE}\n[release.windows_signing]\nprovider = 'signpath'\n\
+         organization_id = '00000000-0000-0000-0000-000000000000'\nproject_slug = 'demo'\n\
+         signing_policy_slug = 'release'\narchives = ['demo-{{version}}-windows.zip']\npe_files = ['demo.exe']\n"
+    ));
+    let collect = signpath.find("Collect Cargo release archives").unwrap();
+    let sign = signpath
+        .find("Check SignPath signing availability")
+        .unwrap();
+    assert!(collect < sign, "SignPath requires the collected archive");
+}
+
+#[test]
 fn cargo_release_coexists_with_nix_bundles_and_version_check() {
     let config = CARGO_RELEASE.replace(
         "[release.artifacts]\n",
@@ -365,6 +390,19 @@ cargo() {
         .map(|orig| std::path::PathBuf::from(orig.trim()).join("bin/ld"))
         .filter(|path| path.is_file())
         .unwrap_or_else(|| std::path::PathBuf::from("ld"));
+    let output = Command::new(&linker)
+        .current_dir(root)
+        .args([
+            "-shared",
+            "-soname",
+            "/nix/store/fake/lib/libfixture.so",
+            "-o",
+            "libfixture.so",
+            "elf.o",
+        ])
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{output:?}");
     for (interp, linker_args, acceptable) in [
         ("/lib/ld-linux.so.2", vec![], true),
         ("/nix/store/fake/ld.so", vec![], false),
@@ -376,6 +414,11 @@ cargo() {
         (
             "/lib/ld-linux.so.2",
             vec!["--disable-new-dtags", "-rpath", "/nix/store/fake/lib"],
+            false,
+        ),
+        (
+            "/lib/ld-linux.so.2",
+            vec!["--no-as-needed", "./libfixture.so"],
             false,
         ),
     ] {
@@ -398,10 +441,7 @@ cargo() {
         let output = run_build();
         assert_eq!(output.status.success(), acceptable, "{output:?}");
         if !acceptable {
-            assert!(
-                String::from_utf8_lossy(&output.stderr)
-                    .contains("library search path in /nix/store")
-            );
+            assert!(String::from_utf8_lossy(&output.stderr).contains("::error::demo needs"));
         }
     }
     let outputs = read(&root.join("outputs"));

@@ -760,18 +760,25 @@ fn render_with_nix_setup(
         inputs.artifacts,
         prebuilt_release_archives || bundle_matrix,
     );
-    if native_cargo {
-        cargo::push_collect(&mut w, inputs);
-    }
     if let Some(apt) = inputs.apt.filter(|_| channel_enabled(inputs, "apt")) {
         push_build_debs(&mut w, apt);
     }
-    if let Some(windows) = inputs.windows_signing {
-        if windows.is_signpath() {
-            push_signpath_signing(&mut w, windows);
-        } else {
-            push_windows_signing(&mut w, windows);
-        }
+    // PFX signing packs loose EXEs into new archives. Collect afterward so the
+    // existing collision check protects both producers. SignPath consumes archives.
+    if let Some(windows) = inputs
+        .windows_signing
+        .filter(|windows| !windows.is_signpath())
+    {
+        push_windows_signing(&mut w, windows);
+    }
+    if native_cargo {
+        cargo::push_collect(&mut w, inputs);
+    }
+    if let Some(windows) = inputs
+        .windows_signing
+        .filter(|windows| windows.is_signpath())
+    {
+        push_signpath_signing(&mut w, windows);
     }
     push_promote_assets(&mut w, inputs.artifacts);
     push_checksums(&mut w, inputs.artifacts);

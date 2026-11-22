@@ -92,8 +92,8 @@ pub(super) fn push_job(
     if job.linux() {
         w.push_str(r#"            headers="$(LC_ALL=C readelf -lW "$binary")"
             dynamic="$(LC_ALL=C readelf -dW "$binary")"
-            if grep -Eq '(Requesting program interpreter:|\((RPATH|RUNPATH)\)).*/nix/store' <<< "$headers"$'\n'"$dynamic"; then
-              echo "::error::$name has an interpreter or library search path in /nix/store" >&2
+            if grep -Eq '(Requesting program interpreter:|\((NEEDED|RPATH|RUNPATH)\)).*/nix/store' <<< "$headers"$'\n'"$dynamic"; then
+              echo "::error::$name needs an interpreter or library in /nix/store, or searches there for libraries" >&2
               exit 1
             fi
 "#);
@@ -111,11 +111,10 @@ pub(super) fn push_job(
     };
     writeln!(
         w,
-        "          (cd \"$stage/files\" && {archive_command} \"../$archive\" -- \"${{files[@]}}\")\n\
-         {pad}printf 'path=%s\\n' \"$stage/$archive\" >> \"$GITHUB_OUTPUT\"",
-        pad = "          ",
+        "          (cd \"$stage/files\" && {archive_command} \"../$archive\" -- \"${{files[@]}}\")"
     )
     .expect("write");
+    w.push_str("          printf 'path=%s\\n' \"$stage/$archive\" >> \"$GITHUB_OUTPUT\"\n");
     let action = if platform == Platform::Forgejo {
         forgejo_action_ref("upload-artifact", "v4.6.2")
     } else {

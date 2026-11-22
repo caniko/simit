@@ -79,7 +79,8 @@ version before checksums and hosted-release upload. Project-specific
 ### Building release archives with Cargo
 
 Use `[[release.artifacts.cargo]]` to build directly on GitHub or Forgejo
-Actions runners, without Nix or a flake. For example:
+Actions runners, without Nix or a flake in the build job. The local
+`simit release verify` command still requires a Simit-managed flake. For example:
 
 ```toml
 [[release.artifacts.cargo]]
@@ -102,17 +103,18 @@ is optional Bash run before the build. Pin `toolchain` to an exact Rust
 release or dated nightly. The job runs `cargo build --release --locked`
 with the listed `binaries` and optional `packages`, `features`, and
 `default_features = false`. Windows appends `.exe` to the binary names.
-Linux requires `readelf` and rejects binaries with a `/nix/store` interpreter,
-RPATH or RUNPATH. The runner image sets the glibc baseline; this check does not
-establish compatibility with older distributions.
+Linux requires `readelf` and rejects binaries whose interpreter, needed library
+(`DT_NEEDED`), RPATH or RUNPATH points into `/nix/store`. The runner image
+sets the glibc baseline; this check does not establish compatibility with
+older distributions.
 
 Archives are flat unless you set a single directory `prefix`. `archive` must
 be a distinct `.tar.gz` or `.zip` filename; `archive` and `prefix` accept
 `{version}` without the leading `v`. ZIP creation uses `zip` on Linux and
 macOS and the system `tar.exe` on Windows. Simit collects the archives after
-other build commands and before APT builds, checksums, signing and hosted
-upload. They can replace or coexist with Nix bundles; do not reuse the same
-asset name. The build jobs never install Nix. With native jobs configured,
+other build commands and Windows PFX repacking, before SignPath, checksums and
+hosted upload. They can replace or coexist with Nix bundles; do not reuse the
+same asset name. The build jobs never install Nix. With native jobs configured,
 tag validation installs Nix only for `version_attr` or required gates; set
 `validation_nix = false` under `[release.artifacts]` if all required gates
 are native. The publishing job still uses the existing Nix-backed tools.
