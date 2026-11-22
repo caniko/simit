@@ -1,4 +1,4 @@
-//! Generate the comprehensive single-job release workflow (`release.yml`).
+//! Generate the hosted release workflow (`release.yml`).
 //!
 //! This reproduces a hand-rolled Forgejo/Codeberg release pipeline generically:
 //! validate the signed tag, build artifacts (project-supplied build commands
@@ -27,6 +27,8 @@ use crate::render::ci::{
     forgejo_action_ref, github_action_ref, github_nix_setup_action_ref, immutable_action_ref,
 };
 use serde::Serialize;
+
+mod cargo;
 
 /// Everything the release workflow generator needs, resolved up front.
 pub struct ReleaseWorkflowInputs<'a> {
@@ -584,7 +586,14 @@ fn render_with_nix_setup(
     let bundle_matrix = !prebuilt_release_archives
         && !inputs.artifacts.effective_system_runners().is_empty()
         && !inputs.artifacts.effective_nix_bundle_attrs().is_empty();
-    let separate_validation = github_prebuild || !inputs.required_gates.is_empty() || bundle_matrix;
+    let native_cargo = !inputs.artifacts.cargo.is_empty();
+    let separate_validation =
+        github_prebuild || !inputs.required_gates.is_empty() || bundle_matrix || native_cargo;
+    let validation_nix = inputs.artifacts.version_attr.is_some()
+        || inputs
+            .artifacts
+            .validation_nix
+            .unwrap_or(!native_cargo || !inputs.required_gates.is_empty());
     if separate_validation {
         // No reusable build or Attic credential is admitted before event-bound
         // signed-tag validation. Every job checks out the same immutable SHA.
@@ -602,12 +611,12 @@ fn render_with_nix_setup(
         )
         .expect("write");
         writeln!(w, "    runs-on: {}", inputs.runner).expect("write");
-        if inputs.preinstalled_nix {
+        if validation_nix && inputs.preinstalled_nix {
             push_preinstalled_nix_env(&mut w, inputs.artifacts);
         }
         w.push_str("    steps:\n");
         push_checkout(&mut w, inputs.platform, inputs.runner, "${{ github.sha }}");
-        if !inputs.preinstalled_nix {
+        if validation_nix && !inputs.preinstalled_nix {
             push_install_nix(&mut w, inputs.platform, inputs.artifacts, nix_setup);
         }
         push_validate_tag(
@@ -653,16 +662,37 @@ fn render_with_nix_setup(
             nix_setup,
         );
     }
+    for job in &inputs.artifacts.cargo {
+        cargo::push_job(
+            &mut w,
+            inputs.platform,
+            inputs.tag_prefix,
+            job,
+            not_republish,
+        );
+    }
     w.push_str("  release:\n");
     w.push_str(not_republish);
-    if github_prebuild && bundle_matrix {
-        w.push_str("    needs: [validate, prebuild, bundles]\n");
-    } else if github_prebuild {
-        w.push_str("    needs: [validate, prebuild]\n");
-    } else if bundle_matrix {
-        w.push_str("    needs: [validate, bundles]\n");
-    } else if separate_validation {
-        w.push_str("    needs: validate\n");
+    if separate_validation {
+        let mut needs = vec!["validate".to_owned()];
+        if github_prebuild {
+            needs.push("prebuild".to_owned());
+        }
+        if bundle_matrix {
+            needs.push("bundles".to_owned());
+        }
+        needs.extend(
+            inputs
+                .artifacts
+                .cargo
+                .iter()
+                .map(|job| format!("cargo-{}", job.id)),
+        );
+        if needs.len() == 1 {
+            w.push_str("    needs: validate\n");
+        } else {
+            writeln!(w, "    needs: [{}]", needs.join(", ")).expect("write");
+        }
     }
     writeln!(w, "    runs-on: {}", inputs.runner).expect("write");
     match inputs.platform {
@@ -730,6 +760,9 @@ fn render_with_nix_setup(
         inputs.artifacts,
         prebuilt_release_archives || bundle_matrix,
     );
+    if native_cargo {
+        cargo::push_collect(&mut w, inputs);
+    }
     if let Some(apt) = inputs.apt.filter(|_| channel_enabled(inputs, "apt")) {
         push_build_debs(&mut w, apt);
     }
@@ -1732,20 +1765,24 @@ fn push_download_prebuilt_archives(
     require_archives: bool,
 ) {
     w.push_str("      - name: Download native release archives\n        uses: ");
+    w.push_str(&download_artifact_action(platform, runner));
+    w.push_str("\n        with:\n          pattern: release-*\n          path: .simit-prebuilt\n");
+    w.push_str("      - name: Collect native release archives\n        run: |\n          set -euo pipefail\n          mkdir -p release\n          count=0\n          if [ -d .simit-prebuilt ]; then\n            while IFS= read -r file; do\n              name=\"$(basename \"$file\")\"\n              test ! -e \"release/$name\" || { echo \"release artifact collision: $name\" >&2; exit 1; }\n              cp \"$file\" \"release/$name\"\n              count=$((count + 1))\n            done < <(find .simit-prebuilt -mindepth 1 -type f -print | LC_ALL=C sort)\n          fi\n");
+    if require_archives {
+        w.push_str("          test \"$count\" -gt 0 || { echo \"no native release archives were downloaded\" >&2; exit 1; }\n");
+    }
+}
+
+fn download_artifact_action(platform: Platform, runner: &str) -> String {
     if platform == Platform::Forgejo {
-        w.push_str(&forgejo_action_ref("download-artifact", "v4.3.0"));
+        forgejo_action_ref("download-artifact", "v4.3.0")
     } else {
         let version = if super::ci::github_runner_supports_node24(runner) {
             "v8.0.2"
         } else {
             "v4.3.0"
         };
-        w.push_str(&github_action_ref("actions/download-artifact", version));
-    }
-    w.push_str("\n        with:\n          pattern: release-*\n          path: .simit-prebuilt\n");
-    w.push_str("      - name: Collect native release archives\n        run: |\n          set -euo pipefail\n          mkdir -p release\n          count=0\n          if [ -d .simit-prebuilt ]; then\n            while IFS= read -r file; do\n              name=\"$(basename \"$file\")\"\n              test ! -e \"release/$name\" || { echo \"release artifact collision: $name\" >&2; exit 1; }\n              cp \"$file\" \"release/$name\"\n              count=$((count + 1))\n            done < <(find .simit-prebuilt -mindepth 1 -type f -print | LC_ALL=C sort)\n          fi\n");
-    if require_archives {
-        w.push_str("          test \"$count\" -gt 0 || { echo \"no native release archives were downloaded\" >&2; exit 1; }\n");
+        github_action_ref("actions/download-artifact", version)
     }
 }
 
@@ -1882,7 +1919,7 @@ fn push_build_artifacts(
         w.push_str("          jq -e --arg version \"$VERSION\" '(.schemaVersion == 2) and (.version == $version) and (.artifacts | length > 0)' \"${manifests[0]}\" >/dev/null\n");
     }
     if artifacts.build_commands.is_empty() {
-        if bundle_attrs.is_empty() && !external_release_archives {
+        if bundle_attrs.is_empty() && !external_release_archives && artifacts.cargo.is_empty() {
             w.push_str("          echo \"[release.artifacts] has no Nix bundles or build_commands\" >&2\n          exit 1\n");
         }
     } else {
@@ -1941,14 +1978,19 @@ fn push_promote_assets(w: &mut String, artifacts: &ArtifactsConfig) {
     w.push_str("          SCRIPT\n");
 }
 
-/// Add promoted assets to a bash `files` array; globs like `checksum_globs`
-/// must never be able to leave them out. Needs `VERSION` in scope.
-fn push_extract_files(w: &mut String, artifacts: &ArtifactsConfig, dir: &str) {
-    for e in &artifacts.extract {
+/// Explicitly include native Cargo archives and promoted assets even if globs
+/// omit them. Needs `VERSION` in scope.
+fn push_explicit_files(w: &mut String, artifacts: &ArtifactsConfig, dir: &str) {
+    for name in artifacts
+        .extract
+        .iter()
+        .map(|entry| &entry.asset)
+        .chain(artifacts.cargo.iter().map(|job| &job.archive))
+    {
         writeln!(
             w,
             "          files+=(\"{dir}{}\")",
-            ExtractAssetConfig::shell_word(&e.asset)
+            ExtractAssetConfig::shell_word(name)
         )
         .expect("write");
     }
@@ -1958,7 +2000,7 @@ fn push_checksums(w: &mut String, artifacts: &ArtifactsConfig) {
     w.push_str(
         "      - name: Generate release checksums\n        run: |\n          set -euo pipefail\n",
     );
-    if !artifacts.extract.is_empty() {
+    if !artifacts.extract.is_empty() || !artifacts.cargo.is_empty() {
         w.push_str("          . ./release-env\n");
     }
     w.push_str("          cd release\n");
@@ -1972,7 +2014,7 @@ fn push_checksums(w: &mut String, artifacts: &ArtifactsConfig) {
             writeln!(w, "          add_matches {}", shell_single_quote(glob)).expect("write");
         }
     }
-    push_extract_files(w, artifacts, "");
+    push_explicit_files(w, artifacts, "");
     w.push_str("          : > SHA256SUMS.txt\n");
     w.push_str("          count=0\n");
     w.push_str("          while IFS= read -r file; do\n");
@@ -2055,7 +2097,7 @@ fn push_sign(
     w.push_str("          attest_blob_with_key() { file=\"$1\"; predicate=\"$2\"; cosign attest-blob --yes --key \"$cosign_key\" --predicate \"$predicate\" --type slsaprovenance1 --bundle \"${file}.intoto.bundle\" \"$file\"; }\n");
     w.push_str("          shopt -s nullglob\n");
     w.push_str("          files=(release/*.tar.gz release/*.zip release/*.AppImage release/*.deb release/*.src.rpm release/*.exe)\n");
-    push_extract_files(w, artifacts, "release/");
+    push_explicit_files(w, artifacts, "release/");
     w.push_str("          while IFS= read -r file; do\n");
     w.push_str("            [ -f \"$file\" ] || continue\n");
     w.push_str("            artifact_sha=\"$(sha256sum \"$file\" | awk '{print $1}')\"; predicate=\"$(mktemp)\"\n");
@@ -2211,7 +2253,7 @@ fn push_github_release(
             .expect("write");
         }
     }
-    push_extract_files(w, artifacts, "release/");
+    push_explicit_files(w, artifacts, "release/");
     w.push_str("          while IFS= read -r file; do\n");
     w.push_str(
         "            [ -f \"$file\" ] || continue\n            name=$(basename \"$file\")\n",
@@ -2287,7 +2329,7 @@ fn push_forgejo_release(
             .expect("write");
         }
     }
-    push_extract_files(w, artifacts, "release/");
+    push_explicit_files(w, artifacts, "release/");
     w.push_str("          while IFS= read -r file; do\n");
     w.push_str("            [ -f \"$file\" ] || continue\n");
     w.push_str("            name=\"$(basename \"$file\")\"\n");
@@ -3790,6 +3832,8 @@ mod tests {
             supply_chain_command: Some("cargo deny check".to_owned()),
             build_commands: vec!["nix build .#modde --out-link release/x".to_owned()],
             nix_bundle_attrs: vec![],
+            cargo: vec![],
+            validation_nix: None,
             sbom_commands: vec![],
             checksum_globs: vec!["*.tar.gz".to_owned(), "*.deb".to_owned()],
             minisign_pub: "keys/minisign.pub".to_owned(),

@@ -1971,6 +1971,12 @@ pub struct ArtifactsConfig {
     /// cannot be represented by the generic bundle contract.
     #[serde(default)]
     pub nix_bundle_attrs: Vec<String>,
+    /// Build and package binaries directly on native Actions runners.
+    #[serde(default)]
+    pub cargo: Vec<CargoReleaseArtifact>,
+    /// Override Nix setup for required release gates. A flake version check
+    /// always needs Nix, regardless of this setting.
+    pub validation_nix: Option<bool>,
     /// SBOM / supply-chain report command lines, emitted verbatim before the
     /// build step when non-empty.
     #[serde(default)]
@@ -1989,6 +1995,36 @@ pub struct ArtifactsConfig {
     /// uploaded like every other asset.
     #[serde(default)]
     pub extract: Vec<ExtractAssetConfig>,
+}
+
+/// `[[release.artifacts.cargo]]` — one native runner job and one archive.
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct CargoReleaseArtifact {
+    pub id: String,
+    pub runner: String,
+    pub target: String,
+    pub toolchain: String,
+    #[serde(default)]
+    pub packages: Vec<String>,
+    pub binaries: Vec<String>,
+    #[serde(default)]
+    pub features: Vec<String>,
+    #[serde(default = "default_true")]
+    pub default_features: bool,
+    pub archive: String,
+    pub prefix: Option<String>,
+    pub setup: Option<String>,
+}
+
+impl CargoReleaseArtifact {
+    pub fn linux(&self) -> bool {
+        self.target.ends_with("-linux-gnu")
+    }
+
+    pub fn windows(&self) -> bool {
+        self.target.ends_with("-pc-windows-msvc") || self.target.ends_with("-pc-windows-gnu")
+    }
 }
 
 /// `[release.artifacts].platforms` — an operating system whose archives the
@@ -2070,6 +2106,88 @@ fn validate_extract_text(what: &str, value: &str) -> Result<()> {
 }
 
 impl ArtifactsConfig {
+    fn validate_cargo(&self) -> Result<()> {
+        const FIELD: &str = "[[release.artifacts.cargo]]";
+        let mut ids = std::collections::BTreeSet::new();
+        let mut archives = std::collections::BTreeSet::new();
+        let identifier = |value: &str| {
+            value.starts_with(|c: char| c.is_ascii_alphanumeric() || c == '_')
+                && value
+                    .bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || b"_-".contains(&b))
+        };
+        let file_component = |value: &str| {
+            let example = value.replace("{version}", "0.0.0");
+            example.starts_with(|c: char| c.is_ascii_alphanumeric())
+                && !example.ends_with('.')
+                && example
+                    .bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || b"._-".contains(&b))
+        };
+        for job in &self.cargo {
+            let label = format!("{FIELD} {:?}", job.id);
+            if !identifier(&job.id) || !ids.insert(job.id.to_ascii_lowercase()) {
+                bail!("{label}: id must be a unique alphanumeric, '_' or '-' identifier");
+            }
+            validate_runner_label(&job.runner)
+                .map_err(|error| anyhow!("{label}: runner: {error}"))?;
+            if !identifier(&job.target)
+                || !(job.linux() || job.windows() || job.target.ends_with("-apple-darwin"))
+            {
+                bail!(
+                    "{label}: target must be a native Linux GNU, macOS, or Windows Rust host triple"
+                );
+            }
+            if !semver::Version::parse(&job.toolchain)
+                .is_ok_and(|v| v.pre.is_empty() && v.build.is_empty())
+                && !job.toolchain.strip_prefix("nightly-").is_some_and(|date| {
+                    chrono::NaiveDate::parse_from_str(date, "%Y-%m-%d")
+                        .is_ok_and(|d| d.format("%Y-%m-%d").to_string() == date)
+                })
+            {
+                bail!("{label}: toolchain must be an exact Rust version or a dated nightly");
+            }
+            let mut binaries = std::collections::BTreeSet::new();
+            if job.binaries.is_empty()
+                || !job
+                    .binaries
+                    .iter()
+                    .all(|bin| identifier(bin) && binaries.insert(bin.to_ascii_lowercase()))
+            {
+                bail!("{label}: binaries must list unique Cargo binary names");
+            }
+            if !job.packages.iter().all(|package| identifier(package)) {
+                bail!("{label}: packages must list Cargo package names");
+            }
+            if !job.features.iter().all(|feature| {
+                !feature.is_empty()
+                    && feature
+                        .chars()
+                        .all(|c| c.is_alphanumeric() || "-_.:+/?".contains(c))
+            }) {
+                bail!("{label}: features must list individual Cargo feature names");
+            }
+            if !file_component(&job.archive)
+                || !(job.archive.ends_with(".tar.gz") || job.archive.ends_with(".zip"))
+                || !archives.insert(job.archive.to_ascii_lowercase())
+            {
+                bail!(
+                    "{label}: archive must be a unique bare .tar.gz or .zip filename (only {{version}} is supported)"
+                );
+            }
+            if job
+                .prefix
+                .as_deref()
+                .is_some_and(|prefix| !file_component(prefix))
+            {
+                bail!(
+                    "{label}: prefix must be a bare directory name (only {{version}} is supported)"
+                );
+            }
+        }
+        Ok(())
+    }
+
     /// Validate `[[release.artifacts.extract]]` entries.
     pub fn validate_extract(&self) -> Result<()> {
         let bare = |what: &str, value: &str| -> Result<()> {
@@ -3424,6 +3542,7 @@ impl ProjectConfig {
             )?;
         }
         self.release.artifacts.validate_extract()?;
+        self.release.artifacts.validate_cargo()?;
         self.release.artifacts.validate_release_bundles()?;
         if let Some(windows) = &self.release.windows_signing {
             windows.validate()?;
@@ -4050,6 +4169,10 @@ impl ProjectConfig {
             "simit project config: [scoop].bucket_url",
             &scoop.bucket_url,
         )?;
+        validate_secret_name(
+            "simit project config: [scoop].bucket_token_secret",
+            &scoop.bucket_token_secret,
+        )?;
         if scoop.download_repo.is_empty() {
             bail!("simit project config: [scoop].download_repo is required");
         }
@@ -4439,13 +4562,21 @@ impl ProjectConfig {
             bail!("scoop.architectures has all architectures disabled");
         }
 
+        let mut bucket_token_secret = cfg.map_or_else(default_scoop_bucket_token_secret, |scoop| {
+            scoop.bucket_token_secret.clone()
+        });
+        // The historical Codeberg token cannot push to a GitHub bucket, and
+        // the workflow's automatic GITHUB_TOKEN is scoped to the source repo.
+        if bucket_token_secret.eq_ignore_ascii_case("CODEBERG_TOKEN")
+            && url::Url::parse(&bucket_url).is_ok_and(|url| url.host_str() == Some("github.com"))
+        {
+            bucket_token_secret = default_scoop_bucket_token_secret();
+        }
         Ok(ResolvedScoop {
             tag_prefix: self.release.tag_prefix,
             name,
             bucket_url,
-            bucket_token_secret: cfg.map_or_else(default_scoop_bucket_token_secret, |scoop| {
-                scoop.bucket_token_secret.clone()
-            }),
+            bucket_token_secret,
             description,
             homepage,
             license,
@@ -6644,8 +6775,60 @@ mod release_bundle_tests {
 
     fn parse(toml: &str) -> Result<ArtifactsConfig> {
         let artifacts: ArtifactsConfig = toml_edit::de::from_str(toml)?;
+        artifacts.validate_cargo()?;
         artifacts.validate_release_bundles()?;
         Ok(artifacts)
+    }
+
+    #[test]
+    fn native_cargo_release_rejects_unsafe_or_ambiguous_jobs() {
+        let job = r#"
+[[cargo]]
+id = "linux-amd64"
+runner = "ubuntu-24.04"
+target = "x86_64-unknown-linux-gnu"
+toolchain = "1.95.0"
+binaries = ["demo"]
+archive = "demo-{version}.tar.gz"
+prefix = "demo-{version}"
+"#;
+        assert!(parse(job).unwrap().effective_nix_bundle_attrs().is_empty());
+        for (old, new, field) in [
+            ("linux-amd64", "linux.amd64", ": id"),
+            ("ubuntu-24.04", "${{ evil }}", ": runner"),
+            (
+                "x86_64-unknown-linux-gnu",
+                "aarch64-linux-android",
+                ": target",
+            ),
+            ("1.95.0", "stable", ": toolchain"),
+            ("1.95.0", "nightly-2026-02-31", ": toolchain"),
+            ("[\"demo\"]", "[]", ": binaries"),
+            ("[\"demo\"]", "[\"demo\", \"DEMO\"]", ": binaries"),
+            ("demo-{version}.tar.gz", "../demo.tar.gz", ": archive"),
+            ("demo-{version}.tar.gz", "demo-{tag}.zip", ": archive"),
+            ("demo-{version}.tar.gz", "demo-{version}.deb", ": archive"),
+            (
+                "prefix = \"demo-{version}\"",
+                "prefix = \"bad/$name\"",
+                ": prefix",
+            ),
+        ] {
+            let err = parse(&job.replace(old, new)).unwrap_err().to_string();
+            assert!(err.contains(field), "{err}");
+        }
+        assert!(
+            parse(&format!("{job}{job}"))
+                .unwrap_err()
+                .to_string()
+                .contains(": id")
+        );
+        assert!(
+            parse(&format!("{job}{}", job.replace("linux-amd64", "other")))
+                .unwrap_err()
+                .to_string()
+                .contains(": archive")
+        );
     }
 
     #[test]

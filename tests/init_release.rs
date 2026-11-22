@@ -121,6 +121,355 @@ fn read(path: &Path) -> String {
     fs::read_to_string(path).unwrap_or_else(|err| panic!("reading {}: {err}", path.display()))
 }
 
+const BUNDLE_RELEASE: &str = r#"
+[release.github]
+repo = "example/demo"
+[release.artifacts]
+runner = "ubuntu-24.04"
+prebuild_binaries = true
+[release.artifacts.system_runners]
+x86_64-linux = "ubuntu-24.04"
+"#;
+
+const CARGO_RELEASE: &str = r#"
+[release]
+tag_prefix = "v"
+[release.github]
+repo = "example/demo"
+[release.artifacts]
+runner = "ubuntu-24.04"
+checksum_globs = ["*.deb"]
+build_commands = ["rm -rf release", "mkdir release"]
+
+[[release.artifacts.cargo]]
+id = "linux-amd64"
+runner = "ubuntu-24.04"
+target = "x86_64-unknown-linux-gnu"
+toolchain = "1.95.0"
+packages = ["demo", "demo-ui"]
+binaries = ["demo", "demo-ui"]
+archive = "demo-{version}-x86_64-linux.tar.gz"
+setup = "sudo apt-get update && sudo apt-get install -y libwayland-dev"
+
+[[release.artifacts.cargo]]
+id = "linux-arm64"
+runner = "ubuntu-24.04-arm"
+target = "aarch64-unknown-linux-gnu"
+toolchain = "nightly-2026-08-01"
+binaries = ["demo", "demo-ui"]
+archive = "demo-{version}-aarch64-linux.tar.gz"
+
+[[release.artifacts.cargo]]
+id = "macos-arm64"
+runner = "macos-15"
+target = "aarch64-apple-darwin"
+toolchain = "1.95.0"
+binaries = ["demo"]
+archive = "demo-{version}-macos.zip"
+prefix = "demo-{version}"
+
+[[release.artifacts.cargo]]
+id = "windows-amd64"
+runner = "windows-2022"
+target = "x86_64-pc-windows-msvc"
+toolchain = "1.95.0"
+binaries = ["demo"]
+archive = "demo-{version}-windows.zip"
+"#;
+
+fn render_release(config: &str) -> String {
+    let project = init_package("demo");
+    fs::write(project.path().join("simit.toml"), config).unwrap();
+    let output = simit()
+        .current_dir(project.path())
+        .args(["init", "release", "--print"])
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{output:?}");
+    String::from_utf8(output.stdout).unwrap()
+}
+
+fn actionlint(workflow: &str) {
+    let project = TempDir::new().unwrap();
+    let path = project.path().join("release.yml");
+    fs::write(&path, workflow).unwrap();
+    let output = Command::new("actionlint").arg(path).output().unwrap();
+    assert!(
+        output.status.success(),
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+fn nix_bundle_release_workflow_is_byte_stable() {
+    use sha2::{Digest, Sha256};
+
+    let workflow = render_release(BUNDLE_RELEASE);
+    assert_eq!(
+        format!("{:x}", Sha256::digest(&workflow)),
+        "dc4efe88d07cd8b3b695780928de40d58a419b02fd6e1f97de78bc04b50b261a"
+    );
+    actionlint(&workflow);
+}
+
+#[test]
+fn native_cargo_release_jobs_join_existing_publication() {
+    let workflow = render_release(CARGO_RELEASE);
+    let yaml: serde_yaml::Value = serde_yaml::from_str(&workflow).unwrap();
+    let jobs = &yaml["jobs"];
+    for (id, runner) in [
+        ("linux-amd64", "ubuntu-24.04"),
+        ("linux-arm64", "ubuntu-24.04-arm"),
+        ("macos-arm64", "macos-15"),
+        ("windows-amd64", "windows-2022"),
+    ] {
+        let job = &jobs[format!("cargo-{id}")];
+        assert_eq!(job["runs-on"], runner);
+        assert_eq!(job["needs"], "validate");
+        let rendered = serde_yaml::to_string(job).unwrap();
+        assert!(rendered.contains("cargo +"));
+        assert!(rendered.contains("build --release --locked"));
+        assert!(!rendered.contains("install-nix-action") && !rendered.contains("nix "));
+        assert_eq!(rendered.contains("readelf"), id.starts_with("linux"));
+        assert_eq!(rendered.contains("/nix/store"), id.starts_with("linux"));
+    }
+    assert!(jobs.get("bundles").is_none());
+    let mac = serde_yaml::to_string(&jobs["cargo-macos-arm64"]).unwrap();
+    assert!(mac.contains("zip -q") && mac.contains(r#"prefix="demo-${VERSION}/""#));
+    let windows = serde_yaml::to_string(&jobs["cargo-windows-amd64"]).unwrap();
+    assert!(windows.contains("tar.exe") && windows.contains("'demo.exe'"));
+    let validate = serde_yaml::to_string(&jobs["validate"]).unwrap();
+    assert!(validate.contains("git verify-tag") && !validate.contains("install-nix-action"));
+    let release = serde_yaml::to_string(&jobs["release"]).unwrap();
+    assert!(release.contains("cargo-linux-amd64") && release.contains("cargo-linux-arm64"));
+    let local_build = release.find("rm -rf release").unwrap();
+    let cargo_collect = release.find("Collect Cargo release archives").unwrap();
+    let checksums = release.find("Generate release checksums").unwrap();
+    assert!(local_build < cargo_collect && cargo_collect < checksums);
+    assert!(release.contains(r#"files+=("demo-${VERSION}-x86_64-linux.tar.gz")"#));
+    assert!(release.contains(r#"files+=("release/demo-${VERSION}-aarch64-linux.tar.gz")"#));
+    assert!(release.contains("minisign -S") && release.contains("Publish GitHub release"));
+    actionlint(&workflow);
+}
+
+#[test]
+fn cargo_release_coexists_with_nix_bundles_and_version_check() {
+    let config = CARGO_RELEASE.replace(
+        "[release.artifacts]\n",
+        "[release.artifacts]\nprebuild_binaries = true\nversion_attr = 'demo'\nsystem_runners = { x86_64-linux = 'ubuntu-24.04' }\n",
+    );
+    let workflow = render_release(&config);
+    assert!(workflow.contains("needs: [validate, bundles, cargo-linux-amd64, cargo-linux-arm64,"));
+    assert!(workflow.contains("nix eval --raw \"$tag_worktree#demo.version\""));
+    assert!(workflow.contains("pattern: release-*"));
+    assert!(workflow.contains("name: simit-cargo-linux-amd64"));
+    actionlint(&workflow);
+}
+
+#[test]
+fn native_required_gates_can_skip_nix_setup() {
+    let config = format!(
+        "[ci]\nrequired_gates = [{{id='native',run='true'}}]\n{}",
+        CARGO_RELEASE.replace(
+            "[release.artifacts]\n",
+            "[release.artifacts]\nvalidation_nix = false\n"
+        )
+    );
+    let workflow = render_release(&config);
+    let validate = workflow.split("  cargo-linux-amd64:").next().unwrap();
+    assert!(validate.contains("Required gate native") && !validate.contains("install-nix-action"));
+    actionlint(&workflow);
+}
+
+#[test]
+fn forgejo_cargo_release_uses_forgejo_artifact_transport() {
+    let workflow = render_release(
+        &CARGO_RELEASE
+            .replace("[release.github]", "[release.codeberg]")
+            .replace(
+                "build_commands = [\"rm -rf release\", \"mkdir release\"]\n",
+                "",
+            ),
+    );
+    let yaml: serde_yaml::Value = serde_yaml::from_str(&workflow).unwrap();
+    let build = serde_yaml::to_string(&yaml["jobs"]["cargo-linux-amd64"]).unwrap();
+    let publish = serde_yaml::to_string(&yaml["jobs"]["release"]).unwrap();
+    assert!(build.contains("https://code.forgejo.org/actions/upload-artifact@"));
+    assert!(publish.contains("https://code.forgejo.org/actions/download-artifact@"));
+    assert!(publish.contains("Publish Forgejo release"));
+    assert!(!publish.contains("has no Nix bundles or build_commands"));
+    assert!(!build.contains("install-nix-action"));
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn cargo_release_packages_elf_and_rejects_nix_linkage() {
+    use std::io::Read;
+
+    fn script<'a>(job: &'a serde_yaml::Value, name: &str) -> &'a str {
+        job["steps"]
+            .as_sequence()
+            .unwrap()
+            .iter()
+            .find(|step| step["name"] == name)
+            .unwrap()["run"]
+            .as_str()
+            .unwrap()
+    }
+
+    let workflow = render_release(CARGO_RELEASE);
+    let yaml: serde_yaml::Value = serde_yaml::from_str(&workflow).unwrap();
+    let jobs = &yaml["jobs"];
+    let build = script(
+        &jobs["cargo-linux-amd64"],
+        "Build and archive Cargo binaries",
+    );
+    let collect = script(&jobs["release"], "Collect Cargo release archives");
+    let checksums = script(&jobs["release"], "Generate release checksums");
+    let project = TempDir::new().unwrap();
+    let root = project.path();
+    fs::write(root.join("elf.c"), "int main(void) { return 0; }\n").unwrap();
+    let output = Command::new("cc")
+        .current_dir(root)
+        .args(["-fno-stack-protector", "-c", "elf.c", "-o", "elf.o"])
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{output:?}");
+    let bash = |script: &str| {
+        Command::new("bash")
+            .current_dir(root)
+            .env("RUNNER_TEMP", root)
+            .env("GITHUB_OUTPUT", root.join("outputs"))
+            .env("GITHUB_REF_NAME", "v1.2.3-rc.4")
+            .args(["-c", script])
+            .output()
+            .unwrap()
+    };
+    let stubs = r#"
+rustup() { :; }
+rustc() { printf 'host: x86_64-unknown-linux-gnu\n'; }
+cargo() {
+  while [ "$1" != --target-dir ]; do shift; done
+  mkdir -p "$2/x86_64-unknown-linux-gnu/release"
+  for name in demo demo-ui; do cp -p elf "$2/x86_64-unknown-linux-gnu/release/$name"; done
+}
+"#;
+    let run_build = || bash(&format!("{stubs}\n{build}"));
+    for (interp, linker_args, acceptable) in [
+        ("/lib/ld-linux.so.2", vec![], true),
+        ("/nix/store/fake/ld.so", vec![], false),
+        (
+            "/lib/ld-linux.so.2",
+            vec!["-rpath", "/nix/store/fake/lib"],
+            false,
+        ),
+        (
+            "/lib/ld-linux.so.2",
+            vec!["--disable-new-dtags", "-rpath", "/nix/store/fake/lib"],
+            false,
+        ),
+    ] {
+        let output = Command::new("ld")
+            .current_dir(root)
+            .args([
+                "-pie",
+                "--entry",
+                "main",
+                "--dynamic-linker",
+                interp,
+                "elf.o",
+                "-o",
+                "elf",
+            ])
+            .args(linker_args)
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "{output:?}");
+        let output = run_build();
+        assert_eq!(output.status.success(), acceptable, "{output:?}");
+        if !acceptable {
+            assert!(
+                String::from_utf8_lossy(&output.stderr)
+                    .contains("library search path in /nix/store")
+            );
+        }
+    }
+    let outputs = read(&root.join("outputs"));
+    let archive = root.join(outputs.trim().strip_prefix("path=").unwrap());
+    assert_eq!(
+        archive.file_name().unwrap(),
+        "demo-1.2.3-rc.4-x86_64-linux.tar.gz"
+    );
+    let mut tar = tar::Archive::new(flate2::read::GzDecoder::new(
+        fs::File::open(&archive).unwrap(),
+    ));
+    let entries: Vec<_> = tar
+        .entries()
+        .unwrap()
+        .map(|entry| {
+            let mut entry = entry.unwrap();
+            let path = entry.path().unwrap().into_owned();
+            assert_ne!(entry.header().mode().unwrap() & 0o111, 0);
+            let mut magic = [0; 4];
+            entry.read_exact(&mut magic).unwrap();
+            assert_eq!(&magic, b"\x7fELF");
+            path
+        })
+        .collect();
+    assert_eq!(entries, [Path::new("demo"), Path::new("demo-ui")]);
+
+    // Simulate the action service's handoff, then execute the actual release scripts.
+    fs::write(root.join("release-env"), "VERSION=1.2.3-rc.4\n").unwrap();
+    for (id, ext) in [
+        ("linux-amd64", "x86_64-linux.tar.gz"),
+        ("linux-arm64", "aarch64-linux.tar.gz"),
+        ("macos-arm64", "macos.zip"),
+        ("windows-amd64", "windows.zip"),
+    ] {
+        let dir = root.join("simit-cargo-release").join(id);
+        fs::create_dir_all(&dir).unwrap();
+        fs::copy(&archive, dir.join(format!("demo-1.2.3-rc.4-{ext}"))).unwrap();
+    }
+    let output = bash(collect);
+    assert!(output.status.success(), "{output:?}");
+    let output = bash(checksums);
+    assert!(output.status.success(), "{output:?}");
+    assert_eq!(
+        read(&root.join("release/SHA256SUMS.txt")).lines().count(),
+        4
+    );
+    let output = bash(collect);
+    assert!(
+        !output.status.success() && String::from_utf8_lossy(&output.stderr).contains("collision")
+    );
+}
+
+#[test]
+fn scoop_secret_follows_the_bucket_not_the_release_host() {
+    for (host, configured, expected) in [
+        ("github.com", "CODEBERG_TOKEN", "SCOOP_BUCKET_TOKEN"),
+        ("codeberg.org", "CODEBERG_TOKEN", "CODEBERG_TOKEN"),
+        ("github.com", "CUSTOM_BUCKET_PAT", "CUSTOM_BUCKET_PAT"),
+    ] {
+        let workflow = render_release(&format!(
+            "{BUNDLE_RELEASE}\n[release.publish.channels]\nscoop = \"required\"\n[scoop]\nbucket_url = \"https://{host}/example/scoop-demo.git\"\nbucket_token_secret = \"{configured}\"\ndownload_repo = \"example/demo\"\n"
+        ));
+        assert!(workflow.contains(&format!(
+            "SCOOP_BUCKET_TOKEN: ${{{{ secrets.{expected} }}}}"
+        )));
+        assert!(workflow.contains(&format!(
+            "require_credential 'global/user secret' '{expected}'"
+        )));
+        assert_eq!(
+            workflow.contains("secrets.CODEBERG_TOKEN"),
+            expected == "CODEBERG_TOKEN"
+        );
+        actionlint(&workflow);
+    }
+}
+
 #[test]
 fn bootstraps_release_workflow_for_enabled_channels() {
     let project = init_package("demo");
