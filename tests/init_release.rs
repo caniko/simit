@@ -357,6 +357,14 @@ cargo() {
 }
 "#;
     let run_build = || bash(&format!("{stubs}\n{build}"));
+    // Under Nix (e.g. sandboxed Crane builds), `ld` on PATH is bintools-wrapper,
+    // which rejects synthetic `/lib/ld-linux.so.2` paths and injects `/nix/store`
+    // RUNPATH entries. Use the unwrapped linker when `NIX_BINTOOLS` is set.
+    let linker = std::env::var_os("NIX_BINTOOLS")
+        .and_then(|dir| fs::read_to_string(Path::new(&dir).join("nix-support/orig-bintools")).ok())
+        .map(|orig| std::path::PathBuf::from(orig.trim()).join("bin/ld"))
+        .filter(|path| path.is_file())
+        .unwrap_or_else(|| std::path::PathBuf::from("ld"));
     for (interp, linker_args, acceptable) in [
         ("/lib/ld-linux.so.2", vec![], true),
         ("/nix/store/fake/ld.so", vec![], false),
@@ -371,7 +379,7 @@ cargo() {
             false,
         ),
     ] {
-        let output = Command::new("ld")
+        let output = Command::new(&linker)
             .current_dir(root)
             .args([
                 "-pie",
