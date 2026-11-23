@@ -22,9 +22,21 @@ def git(*args):
 
 
 def api(path, key=None):
-    pages = json.loads(
-        subprocess.check_output(["gh", "api", "--paginate", "--slurp", path], text=True)
-    )
+    # An interrupted GitHub response can make gh fail before it emits JSON.
+    # Retry the entire read; never interpret missing pages as an empty result.
+    for delay in (2, 10, None):
+        try:
+            pages = json.loads(
+                subprocess.check_output(["gh", "api", "--paginate", "--slurp", path], text=True)
+            )
+            if not isinstance(pages, list) or not pages:
+                raise ValueError(f"GitHub API returned no pages for {path}")
+            break
+        except (subprocess.CalledProcessError, ValueError):
+            if delay is None:
+                raise
+            print(f"GitHub API read failed for {path}; retrying in {delay}s", file=sys.stderr)
+            time.sleep(delay)
     return [item for page in pages for item in (page[key] if key else page)]
 
 
@@ -113,9 +125,10 @@ def predecessor_state(repo, run):
         # may be half-published.
         return "unresolved"
     if conclusions.get("select") == "success":
-        # `qualify` runs only for a non-empty selection, so a skipped
-        # qualification means this event had nothing to publish.
-        return "empty" if conclusions.get("qualify") == "skipped" else "unresolved"
+        # Qualification runs only for a non-empty selection. Older workflow
+        # runs used `qualify` before the job was renamed.
+        qualify = conclusions.get("release-plz-qualify", conclusions.get("qualify"))
+        return "empty" if qualify == "skipped" else "unresolved"
     steps = {step["name"]: step["conclusion"] for job in jobs if job["name"] == "select"
              for step in job.get("steps") or []}
     if steps.get(GATE_STEP) == "failure" and steps.get(SELECTION_STEP) == "skipped":

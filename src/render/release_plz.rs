@@ -885,7 +885,7 @@ fn workflow(
     );
     checkout(&mut w);
     w.push_str("      - name: Require the preceding release-plz event to succeed\n        env:\n          GH_TOKEN: ${{ github.token }}\n        run: python3 .simit/release-plz.py prior-run\n\n");
-    w.push_str(&format!("      - name: Resolve release-plz immutable revision\n        id: select\n        env:\n          GH_TOKEN: ${{{{ github.token }}}}\n          RELEASE_TRUST_ROOT: {:?}\n        run: python3 .simit/release-plz.py select\n\n  qualify:\n    needs: select\n    if: needs.select.outputs.release_sha != ''\n    runs-on: ubuntu-24.04\n    timeout-minutes: 120\n    permissions:\n      contents: read\n      pull-requests: read\n", config.release.signing.trust_root));
+    w.push_str(&format!("      - name: Resolve release-plz immutable revision\n        id: select\n        env:\n          GH_TOKEN: ${{{{ github.token }}}}\n          RELEASE_TRUST_ROOT: {:?}\n        run: python3 .simit/release-plz.py select\n\n  release-plz-qualify:\n    needs: select\n    if: needs.select.outputs.release_sha != ''\n    runs-on: ubuntu-24.04\n    timeout-minutes: 120\n    permissions:\n      contents: read\n      pull-requests: read\n", config.release.signing.trust_root));
     ci::push_job_env(&mut w, Platform::Github, runtime, &options.extra_env, true);
     w.push_str("    steps:\n");
     checkout(&mut w);
@@ -907,7 +907,7 @@ fn workflow(
         ""
     };
     w.push_str(&format!("      - name: Verify package archives including unpublished workspace dependencies\n        run: |\n          set -euo pipefail\n          package_cargo=$(rustup which --toolchain stable cargo)\n          {prefix}\"$package_cargo\" package --locked --allow-dirty{selection} --target-dir \"$RUNNER_TEMP/release-plz-package\"\n\n      - name: Retain qualified crate archives\n        uses: {}\n        with:\n          name: release-plz-crates-${{{{ github.run_attempt }}}}\n          if-no-files-found: error\n          path: ${{{{ runner.temp }}}}/release-plz-package/package/*.crate\n\n", ci::github_action_ref("actions/upload-artifact", "v7.0.2")));
-    w.push_str("  publish:\n    needs: [select, qualify]\n    runs-on: ubuntu-24.04\n    timeout-minutes: 60\n    permissions:\n      contents: read\n      pull-requests: read\n    steps:\n");
+    w.push_str("  publish:\n    needs: [select, release-plz-qualify]\n    runs-on: ubuntu-24.04\n    timeout-minutes: 60\n    permissions:\n      contents: read\n      pull-requests: read\n    steps:\n");
     checkout(&mut w);
     prepare(&mut w);
     ci::trusted_publisher::bootstrap(&mut w);
