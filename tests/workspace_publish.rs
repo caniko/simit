@@ -257,8 +257,20 @@ paths = ["target/evidence/"]
     // Lockstep validation for every publishable member.
     assert!(publish.contains("cargo pkgid --locked -p a"));
     assert!(publish.contains("cargo pkgid --locked -p d"));
-    assert!(publish.contains("$(nix develop -c cargo pkgid --locked -p a"));
+    assert!(publish.contains("$(cargo pkgid --locked -p a"));
     let parsed: serde_yaml::Value = serde_yaml::from_str(&publish).unwrap();
+    let validate = serde_yaml::to_string(&parsed["jobs"]["validate"]).unwrap();
+    assert!(
+        !validate.contains("nix ")
+            && !validate.contains("install-nix-action")
+            && !validate.contains("nix-setup")
+    );
+    assert_eq!(parsed["jobs"]["build"]["needs"], "validate");
+    let lint = Command::new("actionlint")
+        .arg(temp.path().join(".github/workflows/publish-workspace.yaml"))
+        .output()
+        .unwrap();
+    assert!(lint.status.success(), "{lint:?}");
     // The tag may move after validation. Every job that reads source, including
     // required gates and transitive dependent publishers, retains the event SHA
     // that validation requires the signed tag to match.
@@ -734,11 +746,16 @@ fn coordinated_tag_prefixes_validate_source_and_archive_versions() {
         ))
         .unwrap();
         assert_eq!(workflow["on"]["push"]["tags"][0], format!("{prefix}[0-9]*"));
-        let script = workflow["jobs"]["build"]["steps"]
-            .as_sequence()
-            .unwrap()
+        let steps = workflow["jobs"]["validate"]["steps"].as_sequence().unwrap();
+        let script = steps
             .iter()
             .find(|step| step["name"].as_str() == Some("Validate signed release tag"))
+            .unwrap()["run"]
+            .as_str()
+            .unwrap();
+        let version_script = steps
+            .iter()
+            .find(|step| step["name"] == "Validate Cargo package versions")
             .unwrap()["run"]
             .as_str()
             .unwrap();
@@ -788,6 +805,17 @@ fn coordinated_tag_prefixes_validate_source_and_archive_versions() {
                 "the tag validator must never checkout a mutable tag"
             );
         }
+        for version in ["0.1.0", "0.2.0"] {
+            let output = Command::new("bash")
+                .current_dir(temp.path())
+                .args(["-c", version_script])
+                .env("PATH", &path)
+                .env("GITHUB_REF_NAME", format!("{prefix}0.1.0"))
+                .env("TEST_VERSION", version)
+                .output()
+                .unwrap();
+            assert_eq!(output.status.success(), version == "0.1.0", "{output:?}");
+        }
         for step in workflow["jobs"]["build"]["steps"].as_sequence().unwrap() {
             let Some(name) = step["name"]
                 .as_str()
@@ -800,22 +828,15 @@ fn coordinated_tag_prefixes_validate_source_and_archive_versions() {
                 .join(format!("simit-package-target/package/{name}-0.1.0.crate"));
             fs::create_dir_all(packaged.parent().unwrap()).unwrap();
             fs::write(packaged, "fixture archive").unwrap();
-            for version in ["0.1.0", "0.2.0"] {
-                let output = Command::new("bash")
-                    .current_dir(temp.path())
-                    .args(["-c", step["run"].as_str().unwrap()])
-                    .env("PATH", &path)
-                    .env("RUNNER_TEMP", temp.path())
-                    .env("GITHUB_REF_NAME", format!("{prefix}0.1.0"))
-                    .env("TEST_VERSION", version)
-                    .output()
-                    .unwrap();
-                assert_eq!(
-                    output.status.success(),
-                    version == "0.1.0",
-                    "{prefix}/{name}/{version}: {output:?}"
-                );
-            }
+            let output = Command::new("bash")
+                .current_dir(temp.path())
+                .args(["-c", step["run"].as_str().unwrap()])
+                .env("PATH", &path)
+                .env("RUNNER_TEMP", temp.path())
+                .env("GITHUB_REF_NAME", format!("{prefix}0.1.0"))
+                .output()
+                .unwrap();
+            assert!(output.status.success(), "{prefix}/{name}: {output:?}");
             assert_eq!(
                 read(
                     &temp

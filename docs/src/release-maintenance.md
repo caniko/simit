@@ -114,10 +114,13 @@ be a distinct `.tar.gz` or `.zip` filename; `archive` and `prefix` accept
 macOS and the system `tar.exe` on Windows. Simit collects the archives after
 other build commands and Windows PFX repacking, before SignPath, checksums and
 hosted upload. They can replace or coexist with Nix bundles; do not reuse the
-same asset name. The build jobs never install Nix. With native jobs configured,
-tag validation installs Nix only for `version_attr` or required gates; set
-`validation_nix = false` under `[release.artifacts]` if all required gates
-are native. The publishing job still uses the existing Nix-backed tools.
+same asset name. The Cargo build jobs never install Nix. The separate tag
+validation job is native by default, including when it precedes Nix builds.
+It sets up Nix for `version_attr` or a required gate whose command starts with
+`nix`. Set `validation_nix = true` under `[release.artifacts]` if a wrapper
+script needs Nix, or `false` if the gates provide their own Nix. A configured
+`version_attr` always requires Nix. The publishing job still uses the
+existing Nix-backed tools.
 `simit binstall sync` still reads a Nix bundle, not these Cargo entries.
 
 ### Promoting archive members to release assets

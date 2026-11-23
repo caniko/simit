@@ -78,22 +78,42 @@ fn publishers_validate_before_project_setup_without_persisting_credentials() {
                 .output()
                 .unwrap();
             assert!(output.status.success(), "{platform}/{runtime}: {output:?}");
-            let workflow = fs::read_to_string(
-                temp.path()
-                    .join(format!(".{platform}/workflows/publish-crate.yaml")),
-            )
-            .unwrap();
+            let workflow_path = temp
+                .path()
+                .join(format!(".{platform}/workflows/publish-crate.yaml"));
+            if platform == "github" {
+                let lint = Command::new("actionlint")
+                    .arg(&workflow_path)
+                    .output()
+                    .unwrap();
+                assert!(lint.status.success(), "{lint:?}");
+            }
+            let workflow = fs::read_to_string(workflow_path).unwrap();
             let parsed: serde_yaml::Value = serde_yaml::from_str(&workflow).unwrap();
-            let steps = parsed["jobs"]["publish"]["steps"].as_sequence().unwrap();
+            let publish_steps = parsed["jobs"]["publish"]["steps"].as_sequence().unwrap();
+            assert_eq!(publish_steps[0]["with"]["ref"], "${{ github.sha }}");
+            let steps = if runtime == "nix" {
+                assert_eq!(parsed["jobs"]["publish"]["needs"], "validate");
+                let validate = &parsed["jobs"]["validate"];
+                let rendered = serde_yaml::to_string(validate).unwrap();
+                for nix in ["install-nix-action", "nix-setup", "nix ", "NIX_CONFIG"] {
+                    assert!(!rendered.contains(nix), "{platform}: {rendered}");
+                }
+                validate["steps"].as_sequence().unwrap()
+            } else {
+                publish_steps
+            };
             let validation = steps
                 .iter()
                 .position(|step| step["name"] == "Validate signed release tag")
                 .unwrap();
-            let setup = steps
+            let setup = publish_steps
                 .iter()
                 .position(|step| step["run"] == "echo checkout-controlled-setup")
                 .unwrap();
-            assert!(validation < setup, "{platform}/{runtime}: {workflow}");
+            if runtime == "cargo" {
+                assert!(validation < setup, "{platform}/{runtime}: {workflow}");
+            }
             let checkout = steps
                 .iter()
                 .find(|step| step["name"] == "Checkout")
@@ -104,7 +124,7 @@ fn publishers_validate_before_project_setup_without_persisting_credentials() {
             let binding = run
                 .find("if [ \"$validated_sha\" != \"$checkout_sha\" ]")
                 .unwrap();
-            assert!(binding < run.find("cargo pkgid").unwrap());
+            assert!(binding < run.find("$(cargo pkgid").unwrap());
         }
     }
 }

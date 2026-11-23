@@ -209,8 +209,13 @@ fn nix_bundle_release_workflow_is_byte_stable() {
     let workflow = render_release(BUNDLE_RELEASE);
     assert_eq!(
         format!("{:x}", Sha256::digest(&workflow)),
-        "dc4efe88d07cd8b3b695780928de40d58a419b02fd6e1f97de78bc04b50b261a"
+        "713bb719c6facfb1838748a9ccacaf373324d127815703d59d050c563e935677"
     );
+    let yaml: serde_yaml::Value = serde_yaml::from_str(&workflow).unwrap();
+    let validate = serde_yaml::to_string(&yaml["jobs"]["validate"]).unwrap();
+    let bundles = serde_yaml::to_string(&yaml["jobs"]["bundles"]).unwrap();
+    assert!(!validate.contains("install-nix-action") && !validate.contains("nix "));
+    assert!(bundles.contains("install-nix-action"));
     actionlint(&workflow);
 }
 
@@ -241,7 +246,24 @@ fn native_cargo_release_jobs_join_existing_publication() {
     let windows = serde_yaml::to_string(&jobs["cargo-windows-amd64"]).unwrap();
     assert!(windows.contains("tar.exe") && windows.contains("'demo.exe'"));
     let validate = serde_yaml::to_string(&jobs["validate"]).unwrap();
-    assert!(validate.contains("git verify-tag") && !validate.contains("install-nix-action"));
+    for check in [
+        "keys/maintainers.gpg",
+        "gpg --batch --import",
+        "git verify-tag",
+        "git cat-file tag",
+        "immutable event checkout",
+        "grep -Eq",
+        "CHANGELOG.md missing section",
+    ] {
+        assert!(validate.contains(check), "{validate}");
+    }
+    for nix in ["install-nix-action", "nix-setup", "nix ", "NIX_CONFIG"] {
+        assert!(!validate.contains(nix), "{validate}");
+    }
+    assert_eq!(
+        jobs["validate"]["steps"][0]["with"]["ref"],
+        "${{ github.sha }}"
+    );
     let release = serde_yaml::to_string(&jobs["release"]).unwrap();
     assert!(release.contains("cargo-linux-amd64") && release.contains("cargo-linux-arm64"));
     let local_build = release.find("rm -rf release").unwrap();
@@ -283,29 +305,40 @@ fn cargo_archive_collection_follows_repack_but_precedes_signpath() {
 fn cargo_release_coexists_with_nix_bundles_and_version_check() {
     let config = CARGO_RELEASE.replace(
         "[release.artifacts]\n",
-        "[release.artifacts]\nprebuild_binaries = true\nversion_attr = 'demo'\nsystem_runners = { x86_64-linux = 'ubuntu-24.04' }\n",
+        "[release.artifacts]\nprebuild_binaries = true\nversion_attr = 'demo'\nvalidation_nix = false\nsystem_runners = { x86_64-linux = 'ubuntu-24.04' }\n",
     );
     let workflow = render_release(&config);
     assert!(workflow.contains("needs: [validate, bundles, cargo-linux-amd64, cargo-linux-arm64,"));
-    assert!(workflow.contains("nix eval --raw \"$tag_worktree#demo.version\""));
+    let yaml: serde_yaml::Value = serde_yaml::from_str(&workflow).unwrap();
+    let validate = serde_yaml::to_string(&yaml["jobs"]["validate"]).unwrap();
+    assert!(validate.contains("install-nix-action"));
+    assert!(validate.contains("nix eval --raw \"$tag_worktree#demo.version\""));
     assert!(workflow.contains("pattern: release-*"));
     assert!(workflow.contains("name: simit-cargo-linux-amd64"));
     actionlint(&workflow);
 }
 
 #[test]
-fn native_required_gates_can_skip_nix_setup() {
-    let config = format!(
-        "[ci]\nrequired_gates = [{{id='native',run='true'}}]\n{}",
-        CARGO_RELEASE.replace(
+fn release_validation_only_provisions_nix_for_gates_that_need_it() {
+    for (run, override_config, needs_nix) in [
+        ("echo 'not a nix command'", "", false),
+        ("nix run .#check", "", true),
+        ("./check-with-nix", "validation_nix = true\n", true),
+    ] {
+        let release = CARGO_RELEASE.replace(
             "[release.artifacts]\n",
-            "[release.artifacts]\nvalidation_nix = false\n"
-        )
-    );
-    let workflow = render_release(&config);
-    let validate = workflow.split("  cargo-linux-amd64:").next().unwrap();
-    assert!(validate.contains("Required gate native") && !validate.contains("install-nix-action"));
-    actionlint(&workflow);
+            &format!("[release.artifacts]\n{override_config}"),
+        );
+        let workflow = render_release(&format!(
+            "[ci]\nrequired_gates = [{{id='integration',run=\"{run}\"}}]\n{release}"
+        ));
+        let yaml: serde_yaml::Value = serde_yaml::from_str(&workflow).unwrap();
+        let validate = serde_yaml::to_string(&yaml["jobs"]["validate"]).unwrap();
+        assert!(validate.contains("Required gate integration"));
+        assert_eq!(validate.contains("install-nix-action"), needs_nix);
+        assert!(!validate.contains("nix eval"));
+        actionlint(&workflow);
+    }
 }
 
 #[test]

@@ -694,20 +694,9 @@ fn publish_workspace_workflow(
     w.push('\n');
     w.push_str("    timeout-minutes: 15\n");
     push_release_permissions(&mut w, platform);
-    push_job_env(&mut w, platform, runtime, &[], true);
     w.push_str("    steps:\n");
     push_event_checkout_step(&mut w, platform, Some(runner));
-    if runtime == Runtime::Nix {
-        push_install_nix_step_with_cache(
-            &mut w,
-            platform,
-            &options.nix_substituters,
-            &options.nix_trusted_public_keys,
-            options.nix_setup_action_ref.as_ref(),
-        );
-    } else {
-        push_rust_setup_step(&mut w, platform);
-    }
+    push_rust_setup_step(&mut w, platform);
     w.push_str("      - name: Validate signed release tag and lockstep versions\n");
     w.push_str("        env:\n          GITHUB_TOKEN: ${{ github.token }}\n");
     w.push_str("        run: |\n");
@@ -729,9 +718,7 @@ fn publish_workspace_workflow(
     w.push_str("          test \"$validated_sha\" = \"${GITHUB_SHA:?missing workflow event SHA}\" || { echo \"Signed tag commit does not match the workflow event SHA; refusing a moved tag\" >&2; exit 1; }\n");
     w.push_str("          git checkout --detach \"$validated_sha\"\n");
     for (name, version) in versions {
-        w.push_str("          test \"$(");
-        w.push_str(command_prefix(runtime));
-        w.push_str("cargo pkgid -p ");
+        w.push_str("          test \"$(cargo pkgid -p ");
         w.push_str(&shell_word(name));
         w.push_str(" | awk -F'[#@]' 'NF > 1 {print $NF}' | tail -n 1)\" = \"");
         w.push_str(if independent_package.is_some() {
@@ -3979,7 +3966,28 @@ fn publish_workflow(
         push_provider_concurrency(&mut workflow, platform);
     }
     workflow.push_str("jobs:\n");
+    let validate_in_separate_job = runtime == Runtime::Nix;
+    if validate_in_separate_job {
+        workflow.push_str("  validate:\n");
+        push_job_github_read_permissions(&mut workflow, platform);
+        workflow.push_str(&format!("    runs-on: {}\n", runs_on(runner)));
+        workflow.push_str("    timeout-minutes: 15\n");
+        push_container(&mut workflow, platform, Runtime::Cargo, package);
+        workflow.push_str("    steps:\n");
+        push_event_checkout_step(&mut workflow, platform, Some(runner));
+        if platform == Platform::Github {
+            push_rust_setup_step(&mut workflow, platform);
+        }
+        workflow.push_str(&validate_release_tag_step(
+            Some(&package.name),
+            None,
+            options.tag_prefix,
+        ));
+    }
     workflow.push_str("  publish:\n");
+    if validate_in_separate_job {
+        workflow.push_str("    needs: validate\n");
+    }
     if platform == Platform::Github {
         push_job_github_read_permissions(&mut workflow, platform);
     } else {
@@ -4007,12 +4015,6 @@ fn publish_workflow(
                 options.nix_setup_action_ref.as_ref(),
             );
             push_nix_cargo_bin_path_step(&mut workflow);
-            workflow.push_str(&validate_release_tag_step_with_prefix(
-                Some(command_prefix(runtime)),
-                Some(&package.name),
-                None,
-                options.tag_prefix,
-            ));
             push_extra_setup_steps(&mut workflow, &options.extra_setup);
             match options.om_ci {
                 OmCiMode::Off => {
@@ -4043,8 +4045,7 @@ fn publish_workflow(
         Runtime::Cargo => {
             push_rust_setup_step(&mut workflow, platform);
             push_rust_cache_steps(&mut workflow, platform, runner);
-            workflow.push_str(&validate_release_tag_step_with_prefix(
-                Some(command_prefix(runtime)),
+            workflow.push_str(&validate_release_tag_step(
                 Some(&package.name),
                 None,
                 options.tag_prefix,
@@ -4104,12 +4105,7 @@ fn artifacts_workflow(
         workflow.push_str(&runs_on(&runners.release));
         workflow.push_str("\n    steps:\n");
         push_event_checkout_step(&mut workflow, platform, Some(&runners.release));
-        workflow.push_str(&validate_release_tag_step_with_prefix(
-            None,
-            None,
-            None,
-            options.tag_prefix,
-        ));
+        workflow.push_str(&validate_release_tag_step(None, None, options.tag_prefix));
     }
     workflow.push_str("  ");
     workflow.push_str(linux_job_name);
@@ -4126,12 +4122,7 @@ fn artifacts_workflow(
     workflow.push_str("    steps:\n");
     push_event_checkout_step(&mut workflow, platform, Some(&runners.release));
     push_required_env_step(&mut workflow, &options.required_env);
-    workflow.push_str(&validate_release_tag_step_with_prefix(
-        None,
-        None,
-        None,
-        options.tag_prefix,
-    ));
+    workflow.push_str(&validate_release_tag_step(None, None, options.tag_prefix));
     match runtime {
         Runtime::Nix => {
             push_install_nix_step(
@@ -6545,8 +6536,7 @@ fn release_trust_root_steps() -> String {
     )
 }
 
-fn validate_release_tag_step_with_prefix(
-    cargo_command_prefix: Option<&str>,
+fn validate_release_tag_step(
     package_name: Option<&str>,
     namespace: Option<&str>,
     prefix: crate::release_identity::TagPrefix,
@@ -6563,14 +6553,12 @@ fn validate_release_tag_step_with_prefix(
     } else {
         "$tag"
     };
-    let version_check = if let (Some(cargo_command_prefix), Some(package_name)) =
-        (cargo_command_prefix, package_name)
-    {
+    let version_check = if let Some(package_name) = package_name {
         let package_name = shell_word(package_name);
         format!(
             r#"
           # cargo pkgid scopes the version lookup to the crate this workflow publishes.
-          version="$({cargo_command_prefix}cargo pkgid -p {package_name} | awk -F'[#@]' 'NF > 1 {{print $NF}}' | tail -n 1)"
+          version="$(cargo pkgid -p {package_name} | awk -F'[#@]' 'NF > 1 {{print $NF}}' | tail -n 1)"
           if [ -z "$version" ]; then
             echo "Could not read package version from cargo pkgid" >&2
             exit 1

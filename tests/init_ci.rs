@@ -1562,9 +1562,10 @@ fn generates_forgejo_nix_workflows() {
     assert!(publish.contains("grep -Eq '^[0-9]+\\.[0-9]+\\.[0-9]+$'"));
     assert!(publish.contains("keys/maintainers.gpg"));
     assert!(publish.contains("git verify-tag \"$tag\""));
-    assert!(publish.contains(
-        r#"nix develop -c cargo pkgid -p demo | awk -F'[#@]' 'NF > 1 {print $NF}' | tail -n 1"#
-    ));
+    assert!(
+        publish
+            .contains(r#"$(cargo pkgid -p demo | awk -F'[#@]' 'NF > 1 {print $NF}' | tail -n 1"#)
+    );
     assert!(!publish.contains("inputs:\n"));
     assert!(publish.contains("CRATES_IO_API_TOKEN: ${{ secrets.CRATES_IO_API_TOKEN }}"));
     assert!(publish.contains("CRATES_IO_API_TOKEN is required"));
@@ -4933,9 +4934,10 @@ fn forgejo_nix_with_om_ci_replace_emits_om_ci_step() {
     let publish = read(&temp.path().join(".forgejo/workflows/publish-crate.yaml"));
     assert!(publish.contains("OMNIX_REF:"));
     assert!(publish.contains("nix run \"$OMNIX_REF\" -- ci run"));
-    assert!(publish.contains(
-        r#"nix develop -c cargo pkgid -p demo | awk -F'[#@]' 'NF > 1 {print $NF}' | tail -n 1"#
-    ));
+    assert!(
+        publish
+            .contains(r#"$(cargo pkgid -p demo | awk -F'[#@]' 'NF > 1 {print $NF}' | tail -n 1"#)
+    );
     assert!(publish.contains("nix develop -c cargo publish --dry-run"));
     assert!(!publish.contains("run: nix flake check"));
     assert!(!publish.contains("nix develop -c cargo test"));
