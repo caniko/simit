@@ -301,7 +301,7 @@ reads each predecessor's job outcomes; publication is the only irreversible step
   cannot be identified, blocks until it is retried or reconciled, because crates
   or tags may be half-published.
 - A predecessor that selected a release but never published it — typically a
-  failed `qualify` after a release-version bump merged — blocks. The successor's
+  failed `release-plz-qualify` after a release-version bump merged — blocks. The successor's
   selection only covers its own push range, so advancing would silently drop
   that version.
 - A predecessor that selected no release and published nothing is passed over,
@@ -319,7 +319,8 @@ revision` is exactly `skipped`) never examined its push range. The successor
   fails closed instead of advancing.
 
 A half-delivered release PR is resumed or refused by the successor's signed-head
-guard. Incomplete provider history fails closed. Actionlint 1.7.12 does not yet support `queue`;
+guard. Paginated GitHub API reads are retried on failure; incomplete provider
+history still fails closed. Actionlint 1.7.12 does not yet support `queue`;
 Simit's Nix development/test environments use `nix/actionlint-queue.patch` to
 validate `single|max` and reject `max` with literal `cancel-in-progress: true`,
 without suppressing any other lint checks. Downstream lint environments need

@@ -51,7 +51,7 @@ jobs:
           RELEASE_TRUST_ROOT: "keys/maintainers.gpg"
         run: python3 .simit/release-plz.py select
 
-  qualify:
+  release-plz-qualify:
     needs: select
     if: needs.select.outputs.release_sha != ''
     runs-on: ubuntu-24.04
@@ -171,7 +171,7 @@ jobs:
           path: ${{ runner.temp }}/release-plz-package/package/*.crate
 
   publish:
-    needs: [select, qualify]
+    needs: [select, release-plz-qualify]
     runs-on: ubuntu-24.04
     timeout-minutes: 60
     permissions:

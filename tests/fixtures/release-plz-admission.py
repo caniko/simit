@@ -9,12 +9,35 @@ import shutil
 import subprocess
 import sys
 import tempfile
+from unittest.mock import patch
 
 helper = Path(sys.argv[1]).resolve()
 sys.dont_write_bytecode = True
 spec = importlib.util.spec_from_file_location("admission", helper)
 admission = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(admission)
+
+endpoint = "repos/owner/repo/commits/" + "a" * 40 + "/pulls?per_page=100"
+interrupted = subprocess.CalledProcessError(1, ["gh", "api", endpoint])
+with patch.object(admission.time, "sleep"), patch.object(
+    admission.subprocess, "check_output",
+    side_effect=[interrupted, "[[", '[[{"number": 1}], [{"number": 2}]]'],
+) as request:
+    assert admission.api(endpoint) == [{"number": 1}, {"number": 2}]
+    assert request.call_count == 3
+with patch.object(admission.time, "sleep"), patch.object(
+    admission.subprocess, "check_output", side_effect=interrupted,
+) as request:
+    try:
+        admission.api(endpoint)
+        raise AssertionError("incomplete API lookup was treated as empty")
+    except subprocess.CalledProcessError:
+        assert request.call_count == 3
+with patch.object(admission.time, "sleep"), patch.object(
+    admission.subprocess, "check_output", side_effect=["[]", "[[]]"],
+) as request:
+    assert admission.api(endpoint) == []
+    assert request.call_count == 2
 
 
 def git(*args):
@@ -35,7 +58,7 @@ def job(name, conclusion, steps=None):
     return entry
 
 
-predecessor_jobs = [job("select", "success"), job("qualify", "skipped"), job("publish", "skipped")]
+predecessor_jobs = [job("select", "success"), job("release-plz-qualify", "skipped"), job("publish", "skipped")]
 jobs_by_run = {19: predecessor_jobs}
 runs = [newer, current_run, predecessor]
 original_api, original_github = admission.api, admission.github
@@ -85,6 +108,10 @@ def scenario(*older):
 for conclusion in ["failure", "cancelled", "timed_out"]:
     predecessor.update(status="completed", conclusion=conclusion)
     admission.prior_run()
+# Runs produced before the job rename must still be recognized.
+qualify_job.update(name="qualify")
+admission.prior_run()
+qualify_job.update(name="release-plz-qualify")
 # An event whose workflow never ran examined no range either: it is only
 # passed over once an older event bounds that range.
 predecessor.update(status="completed", conclusion="skipped")

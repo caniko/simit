@@ -49,6 +49,11 @@ fn new_publishing_defaults_to_release_plz_and_round_trips() {
     );
     assert_eq!(yaml["jobs"]["select"]["timeout-minutes"], 360);
     assert_eq!(yaml["jobs"]["select"]["permissions"]["actions"], "read");
+    assert!(yaml["jobs"]["qualify"].is_null());
+    assert_eq!(
+        yaml["jobs"]["publish"]["needs"],
+        serde_yaml::from_str::<serde_yaml::Value>("[select, release-plz-qualify]").unwrap()
+    );
     let select_steps = yaml["jobs"]["select"]["steps"].as_sequence().unwrap();
     let prior = select_steps
         .iter()
@@ -520,7 +525,7 @@ fn workspace_uses_package_tags_and_credential_free_exact_source_checks() {
     assert!(config.contains("name = \"helper\""));
     let text = fs::read_to_string(temp.path().join(".github/workflows/release-plz.yaml")).unwrap();
     let workflow: serde_yaml::Value = serde_yaml::from_str(&text).unwrap();
-    let qualify = serde_yaml::to_string(&workflow["jobs"]["qualify"]).unwrap();
+    let qualify = serde_yaml::to_string(&workflow["jobs"]["release-plz-qualify"]).unwrap();
     assert!(!qualify.contains("secrets."));
     assert!(qualify.contains("cargo test -p demo"));
     assert!(qualify.contains("cargo test -p helper"));
