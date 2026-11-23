@@ -643,6 +643,30 @@ fn github_crate_publish_triggers(prefix: crate::release_identity::TagPrefix) -> 
     )
 }
 
+#[cfg(test)]
+#[test]
+fn forgejo_nix_workspace_validation_uses_dev_shell_cargo() {
+    let workflow = publish_workspace_workflow(
+        Platform::Forgejo,
+        Runtime::Nix,
+        &ResolvedRunner {
+            name: None,
+            labels: vec!["nix-runner".to_owned()],
+        },
+        &CiOptions::default(),
+        &[("example".to_owned(), vec![])],
+        &[("example".to_owned(), "1.0.0".to_owned())],
+        None,
+    );
+    let (_, jobs) = workflow.split_once("\n  validate:\n").unwrap();
+    let (validation, _) = jobs.split_once("\n  publish-example:\n").unwrap();
+    assert!(!validation.contains("rustup"), "{validation}");
+    assert!(
+        validation.contains("$(nix develop -c cargo pkgid -p "),
+        "{validation}"
+    );
+}
+
 fn publish_workspace_workflow(
     platform: Platform,
     runtime: Runtime,
@@ -694,9 +718,21 @@ fn publish_workspace_workflow(
     w.push('\n');
     w.push_str("    timeout-minutes: 15\n");
     push_release_permissions(&mut w, platform);
+    push_job_env(&mut w, platform, runtime, &[], true);
     w.push_str("    steps:\n");
     push_event_checkout_step(&mut w, platform, Some(runner));
-    push_rust_setup_step(&mut w, platform);
+    if runtime == Runtime::Nix {
+        // Forgejo Nix runners supply Rust through the project's dev shell.
+        push_install_nix_step_with_cache(
+            &mut w,
+            platform,
+            &options.nix_substituters,
+            &options.nix_trusted_public_keys,
+            options.nix_setup_action_ref.as_ref(),
+        );
+    } else {
+        push_rust_setup_step(&mut w, platform);
+    }
     w.push_str("      - name: Validate signed release tag and lockstep versions\n");
     w.push_str("        env:\n          GITHUB_TOKEN: ${{ github.token }}\n");
     w.push_str("        run: |\n");
@@ -718,7 +754,9 @@ fn publish_workspace_workflow(
     w.push_str("          test \"$validated_sha\" = \"${GITHUB_SHA:?missing workflow event SHA}\" || { echo \"Signed tag commit does not match the workflow event SHA; refusing a moved tag\" >&2; exit 1; }\n");
     w.push_str("          git checkout --detach \"$validated_sha\"\n");
     for (name, version) in versions {
-        w.push_str("          test \"$(cargo pkgid -p ");
+        w.push_str("          test \"$(");
+        w.push_str(command_prefix(runtime));
+        w.push_str("cargo pkgid -p ");
         w.push_str(&shell_word(name));
         w.push_str(" | awk -F'[#@]' 'NF > 1 {print $NF}' | tail -n 1)\" = \"");
         w.push_str(if independent_package.is_some() {
