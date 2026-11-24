@@ -160,6 +160,8 @@ jobs:
           chmod 0755 "$binary"
           mv -- "$binary" "$bin/cosign"
           export PATH="$bin:$PATH"
+          test "$(command -v minisign)" = "$bin/minisign" || { echo "::error::PATH did not resolve minisign to the verified $bin/minisign" >&2; exit 1; }
+          test "$(command -v cosign)" = "$bin/cosign" || { echo "::error::PATH did not resolve cosign to the verified $bin/cosign" >&2; exit 1; }
           minisign -v
           cosign version
           printf '%s\n' "$bin" >> "$GITHUB_PATH"

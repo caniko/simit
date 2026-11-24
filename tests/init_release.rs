@@ -209,7 +209,7 @@ fn nix_bundle_release_workflow_is_byte_stable() {
     let workflow = render_release(BUNDLE_RELEASE);
     assert_eq!(
         format!("{:x}", Sha256::digest(&workflow)),
-        "94cf320003ae5d0c4981c106537da0ab964dbb7a20956bac84dc44846f9f0828"
+        "18245e3e038da1ab5efd16959e8765dbc27f2b259b05f39ab0014df22a006b0a"
     );
     let yaml: serde_yaml::Value = serde_yaml::from_str(&workflow).unwrap();
     let validate = serde_yaml::to_string(&yaml["jobs"]["validate"]).unwrap();

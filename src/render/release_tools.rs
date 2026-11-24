@@ -1,6 +1,6 @@
 //! Native Linux tools shared by the release publishers.
 
-use std::fmt::Write as _;
+use std::{collections::VecDeque, fmt::Write as _};
 
 const MINISIGN_VERSION: &str = "0.12";
 const MINISIGN_SHA256: &str = "9a599b48ba6eb7b1e80f12f36b94ceca7c00b7a5173c95c3efc88d9822957e73";
@@ -76,6 +76,15 @@ pub(super) fn push_setup(w: &mut String, commands: &[&str], minisign: bool, cosi
         .expect("write");
     }
     w.push_str("          export PATH=\"$bin:$PATH\"\n");
+    for (tool, enabled) in [("minisign", minisign), ("cosign", cosign)] {
+        if enabled {
+            writeln!(
+                w,
+                r#"          test "$(command -v {tool})" = "$bin/{tool}" || {{ echo "::error::PATH did not resolve {tool} to the verified $bin/{tool}" >&2; exit 1; }}"#
+            )
+            .expect("write");
+        }
+    }
     if minisign {
         w.push_str("          minisign -v\n");
     }
@@ -99,7 +108,7 @@ pub(super) fn command_uses_nix(run: &str) -> bool {
     while let Some(node) = nodes.pop() {
         if node.kind() == "command" {
             let mut cursor = node.walk();
-            let mut words = node
+            let mut words: VecDeque<_> = node
                 .child_by_field_name("name")
                 .into_iter()
                 .chain(node.children_by_field_name("argument", &mut cursor))
@@ -107,10 +116,30 @@ pub(super) fn command_uses_nix(run: &str) -> bool {
                     let mut literal = shlex::split(run.get(word.byte_range())?)?;
                     (literal.len() == 1).then(|| literal.remove(0))
                 })
-                .peekable();
-            'launch: while let Some(Some(word)) = words.next() {
-                let name = word.rsplit('/').next().unwrap_or(&word);
-                if name == "nix" || name.starts_with("nix-") {
+                .collect();
+            'launch: while let Some(Some(word)) = words.pop_front() {
+                let (dir, name) = word.rsplit_once('/').unwrap_or(("", &word));
+                if (!word.contains('/')
+                    || word.starts_with('/') && (dir.ends_with("/bin") || dir.ends_with("/sbin")))
+                    && matches!(
+                        name,
+                        "nix"
+                            | "nix-build"
+                            | "nix-shell"
+                            | "nix-instantiate"
+                            | "nix-store"
+                            | "nix-env"
+                            | "nix-prefetch-url"
+                            | "nix-copy-closure"
+                            | "nix-collect-garbage"
+                            | "nix-channel"
+                            | "nix-daemon"
+                            | "nix-hash"
+                            | "nix-eval-jobs"
+                            | "nix-fast-build"
+                            | "nixos-rebuild"
+                    )
+                {
                     return true;
                 }
                 let value_options: &[&str] = match name {
@@ -131,19 +160,19 @@ pub(super) fn command_uses_nix(run: &str) -> bool {
                     "stdbuf" => &["-i", "--input", "-o", "--output", "-e", "--error"],
                     "nohup" | "command" => &[],
                     "bash" | "sh" => {
-                        while let Some(Some(flag)) = words.next() {
+                        while let Some(Some(flag)) = words.pop_front() {
                             if matches!(
                                 flag.as_str(),
                                 "-o" | "+o" | "-O" | "+O" | "--rcfile" | "--init-file"
                             ) {
-                                words.next();
+                                words.pop_front();
                                 continue;
                             }
                             if !flag.starts_with('-') || flag == "--" {
                                 break;
                             }
                             if !flag.starts_with("--") && flag.contains('c') {
-                                if let Some(Some(script)) = words.next()
+                                if let Some(Some(script)) = words.pop_front()
                                     && command_uses_nix(&script)
                                 {
                                     return true;
@@ -155,10 +184,12 @@ pub(super) fn command_uses_nix(run: &str) -> bool {
                     }
                     _ => break,
                 };
-                while let Some(Some(option)) = words.next_if(|word| {
-                    word.as_deref()
-                        .is_some_and(|word| word.starts_with('-') && word != "-")
-                }) {
+                while words
+                    .front()
+                    .and_then(Option::as_deref)
+                    .is_some_and(|word| word.starts_with('-') && (word != "-" || name == "env"))
+                {
+                    let option = words.pop_front().flatten().expect("checked option");
                     if option == "--" {
                         break;
                     }
@@ -166,20 +197,33 @@ pub(super) fn command_uses_nix(run: &str) -> bool {
                         break 'launch;
                     }
                     if value_options.contains(&option.as_str()) {
-                        words.next();
+                        words.pop_front();
+                    } else if name == "env" {
+                        let payload = match option.as_str() {
+                            "-S" | "--split-string" => words.pop_front().flatten(),
+                            _ => option.strip_prefix("--split-string=").map(str::to_owned),
+                        };
+                        if let Some(payload) = payload {
+                            let Some(split) = shlex::split(&payload) else {
+                                break 'launch;
+                            };
+                            for word in split.into_iter().rev() {
+                                words.push_front(Some(word));
+                            }
+                        }
                     }
                 }
                 if matches!(name, "env" | "sudo") {
-                    if name == "env" {
-                        words.next_if(|word| word.as_deref() == Some("-"));
-                    }
                     while words
-                        .next_if(|word| word.as_deref().is_some_and(|word| word.contains('=')))
-                        .is_some()
-                    {}
+                        .front()
+                        .and_then(Option::as_deref)
+                        .is_some_and(|word| word.contains('='))
+                    {
+                        words.pop_front();
+                    }
                 }
                 if name == "timeout" {
-                    words.next(); // Duration, not the executable.
+                    words.pop_front(); // Duration, not the executable.
                 }
             }
         }
@@ -200,6 +244,9 @@ mod tests {
             "timeout --signal TERM --kill-after=10 -- 60 nix build .#x",
             "env FOO=1 nice -n 5 nix run .#x",
             "env -u FOO --chdir /tmp -- nix run .#x",
+            "env -S 'nix build'",
+            "env --split-string='-u FOO nix build'",
+            "env -S 'nix' build",
             r#"bash -lc "nix build .#x""#,
             "bash -o errexit -c 'timeout 60 nix build .#x'",
             "nohup time -p stdbuf -o L command -- exec sh -c 'nix build .#x'",
@@ -213,6 +260,8 @@ mod tests {
             "time -o nix echo build",
             "command -v nix",
             "env -- echo nix",
+            "env -S 'echo nix build'",
+            "env -S '-- echo nix build'",
         ] {
             assert!(!command_uses_nix(snippet), "{snippet}");
         }
@@ -225,6 +274,8 @@ mod tests {
             "if true; then nix-shell --run smoke; fi",
             "out=$(nix build --print-out-paths)",
             "ci=1 /run/current-system/sw/bin/nix eval .",
+            "/nix/store/abc-nix/bin/nix-hash ./artifact",
+            "nixos-rebuild build",
             "env CI=1 bash -lc 'nix develop -c cargo check'",
             "true && command -- nix-store --gc",
         ] {
@@ -235,6 +286,10 @@ mod tests {
             "echo 'nix build' && jq '.nix'",
             "command -v nix",
             "bash -c 'echo nix'",
+            "./ci/nix-free-smoke",
+            "./ci/nix-build",
+            "ci/nix-store",
+            "nix-free-smoke",
         ] {
             assert!(!command_uses_nix(snippet), "{snippet}");
         }
@@ -244,22 +299,28 @@ mod tests {
     fn native_release_tools_verify_downloads_before_using_them() {
         let mut setup = String::new();
         push_setup(&mut setup, &["git", "jq"], true, true);
-        for (verify, use_it, probe) in [
+        for (verify, use_it, tool, probe) in [
             (
                 "\"$archive\" | sha256sum --check --strict",
                 "tar -xzf",
+                "minisign",
                 "minisign -v",
             ),
             (
                 "\"$binary\" | sha256sum --check --strict",
                 "mv -- \"$binary\" \"$bin/cosign\"",
+                "cosign",
                 "cosign version",
             ),
         ] {
             assert!(setup.find(verify).unwrap() < setup.find(use_it).unwrap());
             let export = setup.find("export PATH=\"$bin:$PATH\"").unwrap();
             assert!(setup.find(use_it).unwrap() < export);
-            assert!(export < setup.find(probe).unwrap());
+            let resolution = setup
+                .find(&format!("test \"$(command -v {tool})\" = \"$bin/{tool}\""))
+                .expect("check exact tool resolution");
+            assert!(export < resolution);
+            assert!(resolution < setup.find(probe).unwrap());
             assert!(setup.find(probe).unwrap() < setup.find(">> \"$GITHUB_PATH\"").unwrap());
         }
         assert!(setup.contains("-- \"minisign-linux/$arch/minisign\""));
