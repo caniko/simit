@@ -150,7 +150,6 @@ jobs:
           download 'https://github.com/jedisct1/minisign/releases/download/0.12/minisign-0.12-linux.tar.gz' "$archive"
           printf '%s  %s\n' '9a599b48ba6eb7b1e80f12f36b94ceca7c00b7a5173c95c3efc88d9822957e73' "$archive" | sha256sum --check --strict
           tar -xzf "$archive" --strip-components=2 -C "$bin" -- "minisign-linux/$arch/minisign"
-          "$bin/minisign" -v
           case "$arch" in
             x86_64) target=amd64; sha256=424e2c97d0b45fd7a6b608a87f090f35633f4c23ece5f092d48bba11aaf4bbfa ;;
             aarch64) target=arm64; sha256=ade83b7aac62e131cacfe96d958948b2150cc9efec46a570a2649b8e27dedad2 ;;
@@ -160,7 +159,9 @@ jobs:
           printf '%s  %s\n' "$sha256" "$binary" | sha256sum --check --strict
           chmod 0755 "$binary"
           mv -- "$binary" "$bin/cosign"
-          "$bin/cosign" version
+          export PATH="$bin:$PATH"
+          minisign -v
+          cosign version
           printf '%s\n' "$bin" >> "$GITHUB_PATH"
       - name: Validate tag
         env:

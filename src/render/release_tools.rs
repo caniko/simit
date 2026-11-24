@@ -56,8 +56,7 @@ pub(super) fn push_setup(w: &mut String, commands: &[&str], minisign: bool, cosi
             r#"          archive="$bin/minisign.tar.gz"
           download 'https://github.com/jedisct1/minisign/releases/download/{MINISIGN_VERSION}/minisign-{MINISIGN_VERSION}-linux.tar.gz' "$archive"
           printf '%s  %s\n' '{MINISIGN_SHA256}' "$archive" | sha256sum --check --strict
-          tar -xzf "$archive" --strip-components=2 -C "$bin" -- "minisign-linux/$arch/minisign"
-          "$bin/minisign" -v"#
+          tar -xzf "$archive" --strip-components=2 -C "$bin" -- "minisign-linux/$arch/minisign""#
         )
         .expect("write");
     }
@@ -72,10 +71,16 @@ pub(super) fn push_setup(w: &mut String, commands: &[&str], minisign: bool, cosi
           download "https://github.com/sigstore/cosign/releases/download/{COSIGN_VERSION}/cosign-linux-$target" "$binary"
           printf '%s  %s\n' "$sha256" "$binary" | sha256sum --check --strict
           chmod 0755 "$binary"
-          mv -- "$binary" "$bin/cosign"
-          "$bin/cosign" version"#
+          mv -- "$binary" "$bin/cosign""#
         )
         .expect("write");
+    }
+    w.push_str("          export PATH=\"$bin:$PATH\"\n");
+    if minisign {
+        w.push_str("          minisign -v\n");
+    }
+    if cosign {
+        w.push_str("          cosign version\n");
     }
     w.push_str("          printf '%s\\n' \"$bin\" >> \"$GITHUB_PATH\"\n");
 }
@@ -243,16 +248,18 @@ mod tests {
             (
                 "\"$archive\" | sha256sum --check --strict",
                 "tar -xzf",
-                "\"$bin/minisign\" -v",
+                "minisign -v",
             ),
             (
                 "\"$binary\" | sha256sum --check --strict",
-                "chmod 0755",
-                "\"$bin/cosign\" version",
+                "mv -- \"$binary\" \"$bin/cosign\"",
+                "cosign version",
             ),
         ] {
             assert!(setup.find(verify).unwrap() < setup.find(use_it).unwrap());
-            assert!(setup.find(use_it).unwrap() < setup.find(probe).unwrap());
+            let export = setup.find("export PATH=\"$bin:$PATH\"").unwrap();
+            assert!(setup.find(use_it).unwrap() < export);
+            assert!(export < setup.find(probe).unwrap());
             assert!(setup.find(probe).unwrap() < setup.find(">> \"$GITHUB_PATH\"").unwrap());
         }
         assert!(setup.contains("-- \"minisign-linux/$arch/minisign\""));
