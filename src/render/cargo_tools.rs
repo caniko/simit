@@ -76,8 +76,8 @@ impl Tool {
                 ".tar.gz",
                 [
                     (
-                        "x86_64-unknown-linux-gnu",
-                        "de8843f9d4cd72ba7ff3995679536b8a5638ebc8f94848cb988c7549d9dc4e7d",
+                        "x86_64-unknown-linux-musl",
+                        "fbc4f0989a1b58bc23c335f8e1dc656f60efb854246aaa869a88543494e5b0ce",
                     ),
                     (
                         "aarch64-unknown-linux-gnu",
@@ -105,7 +105,17 @@ impl Tool {
                 Self::Deny => format!("{name}-{DENY_VERSION}-{target}"),
                 Self::Nextest => format!("{name}-{NEXTEST_VERSION}-{target}"),
             };
-            writeln!(script, "  {platform}) stem={stem}; sha256={sha256} ;;").expect("write");
+            if target == "aarch64-unknown-linux-gnu" {
+                writeln!(
+                    script,
+                    r#"  {platform})
+    test -x /lib/ld-linux-aarch64.so.1 || {{ echo "{name} on Linux/aarch64 requires glibc (/lib/ld-linux-aarch64.so.1); musl-only runners are unsupported. Use a glibc-based runner." >&2; exit 1; }}
+    stem={stem}; sha256={sha256} ;;"#
+                )
+                .expect("write");
+            } else {
+                writeln!(script, "  {platform}) stem={stem}; sha256={sha256} ;;").expect("write");
+            }
         }
         let member = match self {
             Self::Audit | Self::Deny => format!("$stem/{name}"),
@@ -121,8 +131,8 @@ archive="$bin/$stem{suffix}"
 curl -q --proto '=https' --proto-redir '=https' --tlsv1.2 -fsSL --retry 3 \
   --connect-timeout 10 --max-time 120 --max-filesize 200000000 -o "$archive" "{base_url}/$stem{suffix}"
 case "$kernel" in
-  Linux) printf '%s  %s\n' "$sha256" "$archive" | sha256sum --check --strict ;;
-  Darwin) printf '%s  %s\n' "$sha256" "$archive" | shasum -a 256 --check --strict ;;
+  Linux) printf '%s  %s\n' "$sha256" "$archive" | sha256sum -c - ;;
+  Darwin) printf '%s  %s\n' "$sha256" "$archive" | shasum -a 256 -c - ;;
 esac
 tar -xOzf "$archive" -- "{member}" > "$bin/{name}"
 rm -- "$archive"
@@ -138,8 +148,7 @@ PATH="$bin" {name} --version"#
 
     pub(super) fn push_actions(self, workflow: &mut String, step_name: &str) {
         writeln!(workflow, "      - name: {step_name}\n        run: |").expect("write");
-        let script =
-            self.installer("${RUNNER_TEMP:-${GITHUB_WORKSPACE:?}}/simit-cargo-tools.XXXXXXXX");
+        let script = self.installer("${RUNNER_TEMP:-${TMPDIR:-/tmp}}/simit-cargo-tools.XXXXXXXX");
         for line in script.lines() {
             writeln!(workflow, "          {line}").expect("write");
         }
@@ -166,6 +175,40 @@ mod tests {
     use sha2::{Digest, Sha256};
 
     use super::*;
+
+    #[test]
+    fn glibc_only_arm64_installers_fail_before_download_without_loader() {
+        let root = tempfile::tempdir().unwrap();
+        for (tool, name) in [
+            (Tool::Audit, "cargo-audit"),
+            (Tool::Nextest, "cargo-nextest"),
+        ] {
+            let script = tool.installer("$PWD/.simit-cargo-tools.XXXXXXXX");
+            assert!(script.contains("test -x /lib/ld-linux-aarch64.so.1"));
+            let script = script.replace("/lib/ld-linux-aarch64.so.1", "./missing-glibc-loader");
+            let out = Command::new("sh")
+                .args([
+                    "-c",
+                    &format!(
+                        "uname() {{ case \"$1\" in -s) echo Linux;; -m) echo aarch64;; esac; }}\n\
+                         curl() {{ echo 'unexpected download' >&2; return 1; }}\n{script}"
+                    ),
+                ])
+                .current_dir(root.path())
+                .env("HOME", "/homeless-shelter")
+                .output()
+                .unwrap();
+            assert!(!out.status.success());
+            let stderr = String::from_utf8_lossy(&out.stderr);
+            assert!(
+                stderr.contains(&format!("{name} on Linux/aarch64 requires glibc")),
+                "{stderr}"
+            );
+            assert!(stderr.contains("Use a glibc-based runner"), "{stderr}");
+            assert!(!stderr.contains("unexpected download"), "{stderr}");
+            assert_eq!(fs::read_dir(root.path()).unwrap().count(), 0);
+        }
+    }
 
     #[test]
     fn installer_verifies_before_extraction_and_publishes_only_on_success() {
@@ -204,10 +247,10 @@ tar() { echo 'extracting fixture' >&2; command tar "$@"; }
                 Tool::Nextest,
                 "cargo-nextest",
                 "0.9.100",
-                "cargo-nextest-0.9.100-x86_64-unknown-linux-gnu",
+                "cargo-nextest-0.9.100-x86_64-unknown-linux-musl",
                 ".tar.gz",
                 "cargo-nextest",
-                "de8843f9d4cd72ba7ff3995679536b8a5638ebc8f94848cb988c7549d9dc4e7d",
+                "fbc4f0989a1b58bc23c335f8e1dc656f60efb854246aaa869a88543494e5b0ce",
                 "https://github.com/nextest-rs/nextest/releases/download/cargo-nextest-0.9.100",
             ),
         ] {

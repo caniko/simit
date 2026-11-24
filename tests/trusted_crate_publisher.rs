@@ -347,7 +347,7 @@ fn coordinated_source_uses_verified_quality_tools_without_adding_them_to_the_pub
         ("cargo-deny", "cargo-deny deny check"),
     ] {
         let install = runs.iter().position(|run| {
-            run.contains("sha256sum --check --strict")
+            run.contains("sha256sum -c -")
                 && run.contains(&format!("test \"$(command -v {tool})\""))
         });
         let gate = runs.iter().position(|run| run.contains(command));

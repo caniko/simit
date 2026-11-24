@@ -3287,7 +3287,7 @@ fn crow_audit_provisions_database_in_its_own_step() {
             ),
             (
                 "sha256sum",
-                "#!/bin/sh\n[ \"$*\" = '--check --strict' ] && [ -z \"$FAIL_CHECKSUM\" ] || exit 48\ncat >/dev/null\n",
+                "#!/bin/sh\n[ \"$*\" = '-c -' ] && [ -z \"$FAIL_CHECKSUM\" ] || exit 48\ncat >/dev/null\n",
             ),
             (
                 "tar",
@@ -3440,7 +3440,7 @@ fn crow_prebuilt_cargo_tools_run_in_their_own_gate_containers() {
             assert!(!script.contains("GITHUB_PATH"));
             let mut remaining = script.as_str();
             for marker in [
-                "sha256sum --check --strict",
+                "sha256sum -c -",
                 "tar -xOzf",
                 &format!("test \"$(command -v {tool})\""),
                 &format!("PATH=\"$bin\" {tool} --version"),
@@ -7422,12 +7422,18 @@ fn assert_verified_cargo_tool(workflow: &str, tool: &str, version: &str) {
         .unwrap_or_else(|| panic!("missing verified installer for {tool}"));
     let resolve = format!("test \"$(command -v {tool})\" = \"$bin/{tool}\"");
     let probe = format!("PATH=\"$bin\" {tool} --version");
+    assert!(run.contains("mktemp -d \"${RUNNER_TEMP:-${TMPDIR:-/tmp}}/simit-cargo-tools."));
+    assert!(!run.contains("GITHUB_WORKSPACE"));
+    assert!(
+        !run.lines()
+            .any(|line| line.contains("sha256sum") && line.contains("--strict"))
+    );
     let mut remaining = run;
     for marker in [
         "Unsupported ",
         "-fsSL --retry 3",
-        "sha256sum --check --strict",
-        "shasum -a 256 --check --strict",
+        "sha256sum -c -",
+        "shasum -a 256 -c -",
         "tar -xOzf",
         &resolve,
         &probe,
