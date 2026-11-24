@@ -1159,6 +1159,7 @@ fn direct_publisher_rendering_validates_all_candidate_environment_names() {
                 _ => options.required_gates.push(RequiredGate {
                     id: "build".into(),
                     run: "cargo test".into(),
+                    runtime: None,
                     timeout_minutes: 1,
                     env: [(name.into(), "safe".into())].into(),
                     artifacts: None,

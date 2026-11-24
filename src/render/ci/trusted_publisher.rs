@@ -10,8 +10,7 @@ pub(super) const CANDIDATE_RUNNER: &str = "ubuntu-24.04";
 // Setup, the workspace lane and packaging; required gates add their deadlines.
 const CANDIDATE_JOB_MINUTES: u64 = 60;
 
-/// Validates a source/publisher pair whose first verify job runs `options`
-/// gates serially.
+/// Validates a source/publisher pair whose first verify job runs inherited gates serially.
 pub(super) fn validate_credential_free_source(workflow: &str, options: &CiOptions) -> Result<()> {
     crate::config::validate_required_gate_job_budget(
         &options.required_gates,
@@ -489,19 +488,7 @@ pub(super) fn publisher_file_with_namespace(
         // Fresh credential-free runner: candidate build scripts may execute here.
         // Publishing always re-admits on a separate hosted runner, never trusts
         // this job's filesystem, exports, output paths or candidate binaries.
-        w.push_str("      - name: Checkout original signed source for verification\n");
-        push_action_uses(
-            &mut w,
-            Platform::Github,
-            None,
-            "checkout",
-            CHECKOUT_VERSION,
-            CHECKOUT_COMPAT_VERSION,
-        );
-        w.push_str("        with:\n          ref: ${{ github.event.workflow_run.head_sha }}\n          path: .simit-release-source\n          persist-credentials: false\n");
-        if options.source_submodules {
-            w.push_str("          submodules: recursive\n");
-        }
+        push_candidate_checkout(&mut w, options.source_submodules);
         let directory = ".simit-release-source";
         let candidate_context = |w: &mut String| {
             push_candidate_context(w, runtime, &options.extra_env, directory);
@@ -516,23 +503,47 @@ pub(super) fn publisher_file_with_namespace(
         w.push_str(&format!("        run: {prefix}cargo publish --dry-run --locked --manifest-path \"$RUNNER_TEMP/verified-{id}/Cargo.toml\"\n"));
         // Every verify job checks out the same candidate commit, and each one
         // after the first depends on the first through its publish predecessor.
-        // The first verify job is the authoritative gate: running the same
-        // gates in each verify job would repeat identical work.
+        // Run gates once before the first publish. Explicit runtimes get a fresh
+        // runner and the same immutable source ref only after admission succeeds.
+        let mut publish_needs = vec![verify.clone()];
         if index == 0 {
-            for gate in &options.required_gates {
+            let (inline, separate): (Vec<_>, Vec<_>) = options
+                .required_gates
+                .iter()
+                .partition(|gate| gate.runtime.is_none());
+            for gate in inline.into_iter().chain(separate) {
+                let mut environment: BTreeMap<String, String> =
+                    options.extra_env.iter().cloned().collect();
+                environment.extend(gate.env.clone());
+                let environment = environment.into_iter().collect::<Vec<_>>();
+                if let Some(gate_runtime) = gate.runtime {
+                    let job = format!("gate-{}", sanitize_gate_id(&gate.id));
+                    w.push_str(&format!("  {job}:\n"));
+                    publish_needs.push(job);
+                    push_needs(&mut w, std::slice::from_ref(&verify));
+                    let timeout =
+                        gate.timeout_minutes + if gate.artifacts.is_some() { 15 } else { 0 };
+                    w.push_str(&format!("    runs-on: {CANDIDATE_RUNNER}\n    timeout-minutes: {timeout}\n    permissions:\n      contents: read\n"));
+                    push_gate_env(&mut w, Platform::Github, gate_runtime, &environment);
+                    w.push_str("    steps:\n");
+                    push_candidate_checkout(&mut w, options.source_submodules);
+                    push_gate_setup(
+                        &mut w,
+                        Platform::Github,
+                        gate_runtime,
+                        (&options.nix_substituters, &options.nix_trusted_public_keys),
+                        options.nix_setup_action_ref.as_ref(),
+                    );
+                }
                 w.push_str(&format!(
                     "      - name: Required gate {}\n        timeout-minutes: {}\n",
                     gate.id, gate.timeout_minutes
                 ));
-                let mut environment: BTreeMap<String, String> =
-                    options.extra_env.iter().cloned().collect();
-                environment.extend(gate.env.clone());
-                push_candidate_context(
-                    &mut w,
-                    runtime,
-                    &environment.into_iter().collect::<Vec<_>>(),
-                    directory,
-                );
+                if gate.runtime.is_some() {
+                    w.push_str(&format!("        working-directory: {directory}\n"));
+                } else {
+                    push_candidate_context(&mut w, runtime, &environment, directory);
+                }
                 if gate.artifacts.is_some() {
                     w.push_str(&format!(
                         "        id: simit-required-gate-{}\n",
@@ -550,7 +561,7 @@ pub(super) fn publisher_file_with_namespace(
             }
         }
         w.push_str(&format!("  {publish}:\n"));
-        push_needs(&mut w, std::slice::from_ref(&verify));
+        push_needs(&mut w, &publish_needs);
         w.push_str("    runs-on: ubuntu-24.04\n    timeout-minutes: 60\n    environment:\n      name: simit-crates-io\n    steps:\n");
         bootstrap(&mut w);
         w.push_str(&format!("      - name: Upload independently verified archive {name}\n        env:\n          GITHUB_TOKEN: ${{{{ github.token }}}}\n          CRATES_IO_API_TOKEN: ${{{{ secrets.CRATES_IO_API_TOKEN }}}}\n        run: .simit-publisher-engine/target/release/simit release publisher --publisher-stage publish --repo \"$GITHUB_REPOSITORY\" --package {} --source-workflow {} --publisher-workflow {}{reconstruction}{namespace_argument}\n", shell_word(name), shell_word(&source_path.to_string_lossy()), shell_word(&publisher_path.to_string_lossy())));
@@ -567,6 +578,22 @@ pub(super) fn publisher_file_with_namespace(
     GeneratedFile {
         relative_path: publisher_path,
         content: w,
+    }
+}
+
+fn push_candidate_checkout(w: &mut String, submodules: bool) {
+    w.push_str("      - name: Checkout original signed source for verification\n");
+    push_action_uses(
+        w,
+        Platform::Github,
+        None,
+        "checkout",
+        CHECKOUT_VERSION,
+        CHECKOUT_COMPAT_VERSION,
+    );
+    w.push_str("        with:\n          ref: ${{ github.event.workflow_run.head_sha }}\n          path: .simit-release-source\n          persist-credentials: false\n");
+    if submodules {
+        w.push_str("          submodules: recursive\n");
     }
 }
 

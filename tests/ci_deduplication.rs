@@ -177,6 +177,7 @@ fn member_workflows_run_repository_gates_once() {
         ("github", "nix", ""),
         ("github", "cargo", ""),
         ("github", "nix", "independent_lanes = true\n"),
+        ("github", "cargo", "independent_lanes = true\n"),
         (
             "forgejo",
             "nix",
@@ -198,7 +199,12 @@ fn member_workflows_run_repository_gates_once() {
         )
         .unwrap();
         fs::write(temp.path().join("flake.nix"), "{}\n").unwrap();
-        fs::write(temp.path().join("simit.toml"), format!("[ci]\nplatform = \"{platform}\"\nruntime = \"{runtime}\"\nrunner = \"atlas\"\nworkspace = true\nworkspace_strategy = \"members\"\nwith_audit = true\nwith_deny = true\nwith_docs = true\n{extra}required_gates = [{{ id = \"shared\", run = \"nix run .#shared-contract\" }}]\n")).unwrap();
+        let gate_runtime = if runtime == "cargo" && extra.contains("independent_lanes") {
+            "runtime = \"nix\", "
+        } else {
+            ""
+        };
+        fs::write(temp.path().join("simit.toml"), format!("[ci]\nplatform = \"{platform}\"\nruntime = \"{runtime}\"\nrunner = \"atlas\"\nworkspace = true\nworkspace_strategy = \"members\"\nwith_audit = true\nwith_deny = true\nwith_docs = true\n{extra}required_gates = [{{ id = \"shared\", {gate_runtime}run = \"nix run .#shared-contract\" }}]\n")).unwrap();
         generate(temp.path(), false);
         let workflows = ["first", "second"].map(|name| {
             fs::read_to_string(
@@ -232,6 +238,27 @@ fn member_workflows_run_repository_gates_once() {
         }
         generate(temp.path(), true);
     }
+}
+
+#[test]
+fn cargo_independent_lanes_preserve_prebuild_ownership_of_nix_installables() {
+    let temp = TempDir::new().unwrap();
+    project(temp.path(), "demo");
+    fs::write(temp.path().join("flake.nix"), "{}\n").unwrap();
+    fs::write(
+        temp.path().join("simit.toml"),
+        "[ci]\nplatform = 'github'\nruntime = 'cargo'\nindependent_lanes = true\nrunner = 'ubuntu-24.04'\nnix_builds = ['.#default']\n[prebuild]\nsystem_runners = { x86_64-linux = 'ubuntu-24.04' }\n",
+    )
+    .unwrap();
+    generate(temp.path(), false);
+    let workflows = temp.path().join(".github/workflows");
+    let prebuild = fs::read_to_string(workflows.join("prebuild.yaml")).unwrap();
+    assert!(prebuild.contains(".#default"));
+    assert!(!workflows.join("nix-builds.yaml").exists());
+    let ci = fs::read_to_string(workflows.join("ci.yaml")).unwrap();
+    assert!(!ci.contains("Install Nix"), "{ci}");
+    assert!(!ci.contains("nix flake check"), "{ci}");
+    generate(temp.path(), true);
 }
 
 #[test]

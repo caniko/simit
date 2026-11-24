@@ -58,6 +58,22 @@ fn validate_credentials(credentials: &crate::config::ReleasePlzConfig) -> Result
     Ok(())
 }
 
+pub(crate) fn validate_gate_runtimes(
+    gates: &[crate::config::RequiredGate],
+    runtime: Runtime,
+) -> Result<()> {
+    if let Some(gate) = gates.iter().find(|gate| {
+        gate.runtime
+            .is_some_and(|gate_runtime| gate_runtime != runtime.into())
+    }) {
+        bail!(
+            "release-plz runs required gate `{}` in the shared qualify job; omit the gate runtime, match [ci].runtime, or use a different publish_strategy",
+            gate.id
+        );
+    }
+    Ok(())
+}
+
 pub fn files(
     metadata: &Metadata,
     config: &ProjectConfig,
@@ -67,6 +83,7 @@ pub fn files(
     if !options.publish_crates {
         bail!("release-plz requires --publish-crates");
     }
+    validate_gate_runtimes(&options.required_gates, runtime)?;
     let packages: Vec<Package> = metadata
         .packages
         .iter()
@@ -892,9 +909,6 @@ fn workflow(
     prepare(&mut w);
     w.push_str("      - name: Qualify exact release revision\n        env:\n          SIMIT_RELEASE_SHA: ${{ needs.select.outputs.release_sha }}\n        run: git checkout --detach \"$SIMIT_RELEASE_SHA\"\n\n");
     ci::release_plz_setup(&mut w, Runtime::Cargo, options);
-    if runtime == Runtime::Nix {
-        ci::release_plz_setup(&mut w, runtime, options);
-    }
     ci::release_plz_checks(&mut w, runtime, packages, options);
     let selection = packages
         .iter()

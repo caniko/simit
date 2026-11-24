@@ -439,6 +439,34 @@ fn scoped_cleanup_owns_only_obsolete_builtin_primary_workflows() {
 }
 
 #[test]
+fn scoped_primary_matches_full_cargo_lanes_with_explicit_nix_work() {
+    let policy = "[ci]\nplatform = 'github'\nruntime = 'cargo'\nrunner = 'ubuntu-24.04'\npublish_crates = true\nindependent_lanes = true\nnix_setup_action_ref = '0123456789abcdef0123456789abcdef01234567'\nnix_builds = ['.#default']\nrequired_gates = [{ id = 'nix-contract', runtime = 'nix', run = 'nix develop -c cargo nextest run' }, { id = 'script', runtime = 'shell', run = './check.sh' }]\n";
+    let directory = fixture("rust", policy);
+    let root = directory.path();
+    let output = full(root, &[]);
+    assert!(output.status.success(), "{output:?}");
+    let before = snapshot(root);
+    let load = |file: &str| fs::read_to_string(root.join(".github/workflows").join(file)).unwrap();
+    let ci: serde_yaml::Value = serde_yaml::from_str(&load("ci.yaml")).unwrap();
+    let job = |id: &str| serde_yaml::to_string(&ci["jobs"][id]).unwrap();
+    assert!(!job("rust").contains("Install Nix"));
+    assert!(!job("rust").contains("nextest"));
+    assert!(ci["jobs"]["evaluation"].is_null());
+    assert!(ci["jobs"]["realization"].is_null());
+    let nix_setup =
+        "caniko/simit/.github/actions/nix-setup@0123456789abcdef0123456789abcdef01234567";
+    assert!(job("gate-nix-contract").contains(nix_setup));
+    assert!(!job("gate-script").contains("Install Rust"));
+    assert!(load("nix-builds.yaml").contains(nix_setup));
+    for options in [&["--check", "--diff"][..], &[]] {
+        let output = run(root, options);
+        assert!(output.status.success(), "{output:?}");
+    }
+    assert_eq!(snapshot(root), before);
+    assert!(full(root, &["--check", "--diff"]).status.success());
+}
+
+#[test]
 fn scoped_primary_matches_full_generation_with_independent_lanes_and_grouped_builds() {
     let policy = "[ci]\nplatform = 'github'\nprovider = 'actions'\nruntime = 'nix'\nrunner = 'ubuntu-24.04'\npublish_crates = true\nindependent_lanes = true\nnix_builds = ['.#default']\n[ci.nix_build]\ncapture_results = true\n[ci.nix_build.groups]\nmain = ['.#default']\n[review]\nrole = 'controller'\n";
     let directory = fixture("rust", policy);

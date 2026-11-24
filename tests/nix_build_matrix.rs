@@ -1168,6 +1168,76 @@ fn independent_rust_evaluation_and_realization_lanes_preserve_all_steps() {
 }
 
 #[test]
+fn cargo_independent_lanes_require_explicit_flake_checks_and_a_local_flake() {
+    let temp = project("");
+    fs::remove_file(temp.path().join("flake.nix")).unwrap();
+    fs::create_dir(temp.path().join("src")).unwrap();
+    fs::write(temp.path().join("src/lib.rs"), "pub fn client() {}\n").unwrap();
+    fs::write(
+        temp.path().join("Cargo.toml"),
+        "[package]\nname = 'client'\nversion = '0.1.0'\nedition = '2024'\n",
+    )
+    .unwrap();
+    let policy = "[ci]\nplatform = 'github'\nruntime = 'cargo'\nrunner = 'ubuntu-24.04'\nindependent_lanes = true\nnix_setup_action_ref = '0123456789abcdef0123456789abcdef01234567'\n";
+    let config = temp.path().join("simit.toml");
+    let ci = temp.path().join(".github/workflows/ci.yaml");
+    for (opt_in, flake) in [(true, false), (false, false), (false, true), (true, true)] {
+        if flake {
+            fs::write(temp.path().join("flake.nix"), "{}\n").unwrap();
+        }
+        fs::write(
+            &config,
+            format!(
+                "{policy}{}",
+                if opt_in {
+                    "nix_flake_check = true\n"
+                } else {
+                    ""
+                }
+            ),
+        )
+        .unwrap();
+        let output = generate(&temp, &[]);
+        if opt_in && !flake {
+            assert!(!output.status.success());
+            assert!(
+                String::from_utf8_lossy(&output.stderr)
+                    .contains("Cargo independent_lanes requires flake.nix")
+            );
+            assert!(!ci.exists());
+            continue;
+        }
+        assert!(output.status.success(), "{output:?}");
+        let persisted = fs::read_to_string(&config).unwrap();
+        assert!(persisted.contains("runtime = \"cargo\""), "{persisted}");
+        assert_eq!(persisted.contains("nix_flake_check = true"), opt_in);
+        let yaml: Value = serde_yaml::from_str(&fs::read_to_string(&ci).unwrap()).unwrap();
+        let jobs = &yaml["jobs"];
+        let rust = serde_yaml::to_string(&jobs["rust"]).unwrap();
+        assert!(rust.contains("cargo test"), "{rust}");
+        assert!(rust.contains("Install Rust"), "{rust}");
+        for unexpected in [
+            "Install Nix",
+            "nix-setup@",
+            "nix develop",
+            "nix flake",
+            "NIX_CONFIG",
+        ] {
+            assert!(!rust.contains(unexpected), "{rust}");
+        }
+        for job in ["evaluation", "realization"] {
+            assert_eq!(jobs[job].is_mapping(), opt_in);
+            if opt_in {
+                let nix = serde_yaml::to_string(&jobs[job]).unwrap();
+                assert!(nix.contains("caniko/simit/.github/actions/nix-setup@0123456789abcdef0123456789abcdef01234567"));
+            }
+        }
+        let checked = generate(&temp, &["--check", "--diff"]);
+        assert!(checked.status.success(), "{checked:?}");
+    }
+}
+
+#[test]
 fn independent_lanes_can_retire_realization_without_retiring_evaluation() {
     let temp = project(
         "independent_lanes = true\nnix_flake_check = false\ncheck_command = \"cargo test --locked\"",

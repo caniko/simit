@@ -16,6 +16,35 @@ fn write(root: &Path, path: &str, content: &str) {
     fs::write(path, content).unwrap();
 }
 
+#[test]
+fn component_checks_reject_non_nix_runtime_overrides() {
+    for (override_value, rejected) in [
+        ("", false),
+        (", runtime = 'nix'", false),
+        (", runtime = 'cargo'", true),
+        (", runtime = 'shell'", true),
+    ] {
+        let temp = TempDir::new().unwrap();
+        write(
+            temp.path(),
+            "simit.toml",
+            &format!(
+                "[monorepo]\nschema_version = 1\n[[monorepo.components]]\nid = 'docs'\npaths = ['docs']\nchecks = [{{id = 'contract', run = 'true'{override_value}}}]\n"
+            ),
+        );
+        let config = simit::config::ProjectConfig::load(temp.path());
+        if rejected {
+            let error = format!("{:#}", config.unwrap_err());
+            assert!(
+                error.contains("component docs check contract runs in Nix"),
+                "{error}"
+            );
+        } else {
+            config.unwrap();
+        }
+    }
+}
+
 fn fixture() -> TempDir {
     let temp = TempDir::new().unwrap();
     write(

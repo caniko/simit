@@ -391,6 +391,69 @@ fn required_gates_block_publication_on_the_validated_revision() {
 }
 
 #[test]
+fn explicit_gate_runtimes_are_isolated_and_block_both_publishers_on_the_validated_source() {
+    let sha = "0123456789abcdef0123456789abcdef01234567";
+    let dir = project(&format!(
+        "[ci]\nplatform='github'\nruntime='cargo'\nrunner='ubuntu-24.04'\npublish_crates=true\nnix_setup_action_ref='{sha}'\nrequired_gates=[{{ id='remote', runtime='nix', run='nix run github:caniko/simit -- --version' }}, {{ id='legacy', run='cargo test' }}, {{ id='native', runtime='cargo', run='cargo check' }}, {{ id='script', runtime='shell', run='./check.sh' }}]\n[release.github]\nrepo='example/player'\n[release.artifacts]\nrunner='ubuntu-24.04'\nprebuild_binaries=true\nsign=false\n"
+    ));
+    let binary: serde_yaml::Value = serde_yaml::from_str(&render(dir.path())).unwrap();
+    let output = common::simit()
+        .current_dir(dir.path())
+        .args(["init", "ci"])
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{output:?}");
+    let crate_publish: serde_yaml::Value = serde_yaml::from_str(
+        &fs::read_to_string(
+            dir.path()
+                .join(".github/workflows/trusted-publish-crate.yaml"),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    for (workflow, admitted_by, publish, ref_expr) in [
+        (&binary, "validate-tag", "validate", "${{ github.sha }}"),
+        (
+            &crate_publish,
+            "verify-player",
+            "publish-player",
+            "${{ github.event.workflow_run.head_sha }}",
+        ),
+    ] {
+        let jobs = &workflow["jobs"];
+        let admission = serde_yaml::to_string(&jobs[admitted_by]).unwrap();
+        assert!(admission.contains("Required gate legacy"));
+        assert!(!admission.contains("Install Nix"));
+        let needs = jobs[publish]["needs"].as_sequence().unwrap();
+        for id in ["gate-remote", "gate-native", "gate-script"] {
+            assert!(needs.iter().any(|need| need == id));
+            let job = &jobs[id];
+            assert!(job["needs"] == admitted_by || job["needs"][0] == admitted_by);
+            let steps = job["steps"].as_sequence().unwrap();
+            assert!(steps.iter().any(|step| step["with"]["ref"] == ref_expr));
+            let rendered = serde_yaml::to_string(job).unwrap();
+            assert_eq!(
+                rendered.contains(&format!("caniko/simit/.github/actions/nix-setup@{sha}")),
+                id == "gate-remote"
+            );
+            assert_eq!(rendered.contains("Install Rust"), id == "gate-native");
+            assert!(!rendered.contains("CRATES_IO_API_TOKEN"));
+        }
+    }
+    assert_eq!(binary["jobs"]["release"]["needs"], "validate");
+    assert!(
+        serde_yaml::to_string(&binary["jobs"]["validate-tag"])
+            .unwrap()
+            .contains("git verify-tag")
+    );
+    assert!(
+        serde_yaml::to_string(&crate_publish["jobs"]["verify-player"])
+            .unwrap()
+            .contains("--publisher-stage prepare")
+    );
+}
+
+#[test]
 fn release_artifact_jobs_do_not_reuse_required_gate_workspaces() {
     for platform in ["github", "codeberg"] {
         let dir = project(&format!(
