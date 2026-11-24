@@ -16,7 +16,7 @@ use std::fmt::Write as _;
 
 use crate::cli::Platform;
 use crate::config::{
-    AnnounceConfig, ArtifactsConfig, AtticConfig, ExtractAssetConfig, FlatpakConfig,
+    AnnounceConfig, ArtifactsConfig, AtticConfig, ExtractAssetConfig, FlatpakConfig, GateRuntime,
     NixSetupActionRef, PrebuildConfig, PypiReleaseConfig, ReleaseNotesSource, ReleaseProvider,
     ReleasePublishConfig, ReleasePublisherEnforcement, ReleasePublisherPolicy, RequiredGate,
     ResolvedApt, ResolvedAur, ResolvedChocolatey, ResolvedCopr, ResolvedHomebrew,
@@ -650,24 +650,18 @@ fn render_with_nix_setup(
                 w.push_str(not_republish);
                 let timeout = gate.timeout_minutes + if gate.artifacts.is_some() { 15 } else { 0 };
                 writeln!(w, "    needs: {tag_job}\n    permissions:\n      contents: read\n    timeout-minutes: {timeout}\n    runs-on: {}", inputs.runner).expect("write");
-                let preinstalled =
-                    runtime == crate::config::GateRuntime::Nix && inputs.preinstalled_nix;
+                let preinstalled = runtime == GateRuntime::Nix && inputs.preinstalled_nix;
                 if preinstalled {
                     push_preinstalled_nix_env(&mut w, inputs.artifacts);
                 }
                 w.push_str("    steps:\n");
                 push_checkout(&mut w, inputs.platform, inputs.runner, "${{ github.sha }}");
-                if !preinstalled {
-                    super::ci::push_gate_setup(
-                        &mut w,
-                        inputs.platform,
-                        runtime,
-                        (
-                            &inputs.artifacts.substituters,
-                            &inputs.artifacts.trusted_public_keys,
-                        ),
-                        nix_setup,
-                    );
+                match runtime {
+                    GateRuntime::Nix if !preinstalled => {
+                        push_install_nix(&mut w, inputs.platform, inputs.artifacts, nix_setup);
+                    }
+                    GateRuntime::Cargo => super::ci::push_rust_setup_step(&mut w, inputs.platform),
+                    GateRuntime::Nix | GateRuntime::Shell => {}
                 }
                 push_required_gate(&mut w, gate, inputs.platform, &runner);
             }
@@ -4764,6 +4758,14 @@ printf '%s' "$TEST_FLAKE_VERSION""#,
     }
 
     fn render_workflow(platform: Platform, artifacts: &ArtifactsConfig) -> String {
+        render_workflow_with_gates(platform, artifacts, &[])
+    }
+
+    fn render_workflow_with_gates(
+        platform: Platform,
+        artifacts: &ArtifactsConfig,
+        required_gates: &[crate::config::RequiredGate],
+    ) -> String {
         render(&ReleaseWorkflowInputs {
             platform,
             runner: "ubuntu-24.04",
@@ -4776,7 +4778,7 @@ printf '%s' "$TEST_FLAKE_VERSION""#,
             release: None,
             tag_prefix: crate::release_identity::TagPrefix::None,
             notes_source: None,
-            required_gates: &[],
+            required_gates,
             attic: None,
             aur: None,
             copr: None,
@@ -6080,6 +6082,34 @@ cat "$FAKE/code"
             .iter()
             .find(|s| s["name"].as_str() == Some(name))
             .unwrap_or_else(|| panic!("no step {name}"))
+    }
+
+    #[test]
+    fn hosted_explicit_nix_gate_uses_release_cache_authentication() {
+        let artifacts = ArtifactsConfig {
+            netrc_secret: Some("PRIVATE_CACHE_NETRC".to_owned()),
+            ..artifacts()
+        };
+        let gates: [crate::config::RequiredGate; 2] = [
+            toml_edit::de::from_str("id = 'private-cache'\nruntime = 'nix'\nrun = 'nix build'")
+                .unwrap(),
+            toml_edit::de::from_str("id = 'shell'\nruntime = 'shell'\nrun = 'true'").unwrap(),
+        ];
+        let workflow = render_workflow_with_gates(Platform::Github, &artifacts, &gates);
+        let yaml: serde_yaml::Value = serde_yaml::from_str(&workflow).unwrap();
+        let job = |id: &str| serde_yaml::to_string(&yaml["jobs"][id]).unwrap();
+        let inherited_setup = job("validate-tag");
+        let explicit_setup = job("gate-private-cache");
+        for marker in [
+            "secrets.PRIVATE_CACHE_NETRC",
+            crate::render::ci::NIX_NETRC_FILE_CONFIG,
+            "substituters = https://cache.example/c",
+            "trusted-public-keys = c:abc=",
+        ] {
+            assert!(inherited_setup.contains(marker), "{inherited_setup}");
+            assert!(explicit_setup.contains(marker), "{explicit_setup}");
+            assert!(!job("gate-shell").contains(marker));
+        }
     }
 
     #[test]

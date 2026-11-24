@@ -909,9 +909,6 @@ fn workflow(
     prepare(&mut w);
     w.push_str("      - name: Qualify exact release revision\n        env:\n          SIMIT_RELEASE_SHA: ${{ needs.select.outputs.release_sha }}\n        run: git checkout --detach \"$SIMIT_RELEASE_SHA\"\n\n");
     ci::release_plz_setup(&mut w, Runtime::Cargo, options);
-    if runtime == Runtime::Nix {
-        ci::release_plz_setup(&mut w, runtime, options);
-    }
     ci::release_plz_checks(&mut w, runtime, packages, options);
     let selection = packages
         .iter()

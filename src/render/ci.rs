@@ -541,7 +541,7 @@ fn files_for_scope(request: FilesRequest<'_>, primary_only: bool) -> Result<Vec<
             package,
             &runners.release,
             options.clone(),
-        );
+        )?;
         if platform == Platform::Github {
             trusted_publisher::validate_credential_free_source(&content, &options)?;
         }
@@ -585,7 +585,7 @@ pub fn publish_files(
     let source = GeneratedFile {
         relative_path: PathBuf::from(platform.workflow_dir())
             .join(workflow_file_name("publish-crate", Some(&package.name))),
-        content: publish_workflow(platform, runtime, package, runner, options.clone()),
+        content: publish_workflow(platform, runtime, package, runner, options.clone())?,
     };
     let mut files = vec![];
     if platform == Platform::Github {
@@ -3632,7 +3632,7 @@ pub(crate) fn push_gate_env(
     push_job_env(workflow, platform, env_runtime, env, true);
 }
 
-pub(crate) fn push_gate_setup(
+fn push_gate_setup(
     workflow: &mut String,
     platform: Platform,
     runtime: GateRuntime,
@@ -4029,7 +4029,15 @@ fn publish_workflow(
     package: &Package,
     runner: &ResolvedRunner,
     options: CiOptions,
-) -> String {
+) -> Result<String> {
+    if platform == Platform::Forgejo
+        && let Some(gate) = options.required_gates.first()
+    {
+        bail!(
+            "Forgejo crate publication does not run required gate `{}`; disable [ci].publish_crates or use GitHub Actions",
+            gate.id
+        );
+    }
     let candidate_runner = ResolvedRunner {
         name: None,
         labels: vec![trusted_publisher::CANDIDATE_RUNNER.to_owned()],
@@ -4175,7 +4183,7 @@ fn publish_workflow(
     if platform == Platform::Github {
         trim_trailing_blank_lines(&mut workflow);
     }
-    workflow
+    Ok(workflow)
 }
 
 fn artifacts_workflow(
@@ -5961,7 +5969,7 @@ fn rust_version_supports_trixie(rust_version: &str) -> bool {
     ) || matches!((major, minor), (Some(1), Some(minor)) if minor >= 93)
 }
 
-fn push_rust_setup_step(workflow: &mut String, platform: Platform) {
+pub(super) fn push_rust_setup_step(workflow: &mut String, platform: Platform) {
     match platform {
         Platform::Forgejo => {
             workflow.push_str("      - name: Install Rust components\n");
@@ -6377,24 +6385,31 @@ pub(crate) fn release_plz_checks(
     packages: &[Package],
     options: &CiOptions,
 ) {
+    let needs_nix = runtime == Runtime::Nix
+        || (options.independent_lanes && options.flake_check_command().is_some());
+    if needs_nix {
+        release_plz_setup(workflow, Runtime::Nix, options);
+    }
     push_required_env_step(workflow, &options.required_env);
     push_extra_setup_steps(workflow, &options.extra_setup);
     if runtime == Runtime::Nix {
         workflow.push_str(&format!("      - name: Format check\n        run: |\n          # Expand formatter variables inside the Nix shell.\n          # shellcheck disable=SC2016\n          nix develop -c {NIX_FORMAT_COMMAND}\n\n"));
-        push_nix_check_steps(workflow, options);
-        if !options.nix_builds.is_empty() {
-            workflow.push_str(
-                "      - name: Qualify declared Nix installables\n        run: nix build --no-link",
-            );
-            for installable in &options.nix_builds {
-                workflow.push(' ');
-                workflow.push_str(&shell_word(installable));
-            }
-            workflow.push_str("\n\n");
-        }
     } else {
         workflow
             .push_str("      - name: Format check\n        run: cargo fmt --all -- --check\n\n");
+    }
+    if needs_nix {
+        push_nix_check_steps(workflow, options);
+    }
+    if runtime == Runtime::Nix && !options.nix_builds.is_empty() {
+        workflow.push_str(
+            "      - name: Qualify declared Nix installables\n        run: nix build --no-link",
+        );
+        for installable in &options.nix_builds {
+            workflow.push(' ');
+            workflow.push_str(&shell_word(installable));
+        }
+        workflow.push_str("\n\n");
     }
     if runtime == Runtime::Nix && options.om_ci != OmCiMode::Off {
         push_om_ci_step(workflow, options);

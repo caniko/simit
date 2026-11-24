@@ -204,14 +204,14 @@ impl CiInference {
             .collect::<Vec<_>>()
             .join("\n");
         let required_gates = infer_required_gates(&all_content);
-        let all_content: String = lines_outside_gate_jobs(&all_content).collect();
+        let all_content: String = lines_outside_gates(&all_content).collect();
         let self_check = marked
             .iter()
             .find(|workflow| {
-                lines_outside_gate_jobs(&workflow.content)
+                lines_outside_gates(&workflow.content)
                     .any(|line| line.contains("cargo run -- init ci"))
             })
-            .map(|workflow| lines_outside_gate_jobs(&workflow.content).collect::<String>());
+            .map(|workflow| lines_outside_gates(&workflow.content).collect::<String>());
         let self_check_workspace = self_check
             .as_deref()
             .map(|content| content.contains(" --workspace"))
@@ -308,6 +308,7 @@ pub struct ResolvedCiInputs {
     pub with_nextest: bool,
     pub with_nix_cargo_cache: bool,
     pub nix_flake_check: bool,
+    default_nix_flake_check: bool,
     pub with_msrv: bool,
     pub with_audit: bool,
     pub with_deny: bool,
@@ -340,11 +341,12 @@ impl ResolvedCiInputs {
             auto_runtime(workspace_root)?
         };
         let cargo_lanes = runtime == Runtime::Cargo && cfg.ci.independent_lanes;
+        let default_nix_flake_check = !cargo_lanes;
         let nix_flake_check = cli
             .nix_flake_check
             .or(config.nix_flake_check)
             .or(inference.nix_flake_check.filter(|_| !cargo_lanes))
-            .unwrap_or(!cargo_lanes);
+            .unwrap_or(default_nix_flake_check);
         if cargo_lanes && nix_flake_check && !workspace_root.join("flake.nix").is_file() {
             bail!(
                 "[ci].nix_flake_check = true with Cargo independent_lanes requires flake.nix at the workspace root; omit it for native Rust CI only"
@@ -493,6 +495,7 @@ impl ResolvedCiInputs {
                 .unwrap_or(false),
             with_nix_cargo_cache,
             nix_flake_check,
+            default_nix_flake_check,
             with_msrv: cli
                 .with_msrv
                 .or(config.with_msrv)
@@ -537,6 +540,10 @@ impl ResolvedCiInputs {
                 .or_else(|| cfg.release.smoke.command.clone())
                 .or(inference.release_smoke_command),
         })
+    }
+
+    pub(crate) fn nix_flake_check_override(&self) -> Option<bool> {
+        (self.nix_flake_check != self.default_nix_flake_check).then_some(self.nix_flake_check)
     }
 
     pub fn ci_options(
@@ -632,11 +639,7 @@ impl ResolvedCiInputs {
         ci.unit_tests_only = self.unit_tests_only;
         ci.with_nextest = self.with_nextest;
         ci.with_nix_cargo_cache = self.with_nix_cargo_cache;
-        ci.nix_flake_check = if self.runtime == Runtime::Cargo && ci.independent_lanes {
-            self.nix_flake_check.then_some(true)
-        } else {
-            (!self.nix_flake_check).then_some(false)
-        };
+        ci.nix_flake_check = self.nix_flake_check_override();
         ci.with_msrv = self.with_msrv;
         ci.with_audit = self.with_audit;
         ci.with_deny = self.with_deny;
@@ -823,13 +826,18 @@ fn validate_config_runtime(runtime: Runtime, workspace_root: &Path) -> Result<()
 
 // Gate commands (e.g. a Nix gate using cargo-nextest) are not evidence of
 // project-wide runtime or tool settings.
-fn lines_outside_gate_jobs(content: &str) -> impl Iterator<Item = &str> {
-    let mut gate = false;
+fn lines_outside_gates(content: &str) -> impl Iterator<Item = &str> {
+    let (mut gate_job, mut gate_step) = (false, false);
     content.split_inclusive('\n').filter(move |line| {
         if let Some(key) = line.strip_prefix("  ").filter(|key| !key.starts_with(' ')) {
-            gate = key.starts_with("gate-") && key.trim_end().ends_with(':');
+            gate_job = key.starts_with("gate-") && key.trim_end().ends_with(':');
         }
-        !gate
+        if let Some(step) = line.strip_prefix("      - ") {
+            gate_step = step.starts_with("name: Required gate ");
+        } else if !line.trim().is_empty() && !line.starts_with("        ") {
+            gate_step = false;
+        }
+        !gate_job && !gate_step
     })
 }
 
@@ -852,7 +860,7 @@ fn infer_ci_runtime(marked: &[WorkflowSnapshot]) -> Result<Runtime> {
     };
 
     // Independent flake lanes and dedicated gate jobs do not select the Rust runtime.
-    let mut core = lines_outside_gate_jobs(&ci_workflow.content)
+    let mut core = lines_outside_gates(&ci_workflow.content)
         .take_while(|line| !matches!(*line, "  evaluation:\n" | "  realization:\n"));
     if core.any(|line| {
         matches!(

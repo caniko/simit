@@ -1119,7 +1119,8 @@ and production-output coverage before removing that lane.
 With `runtime = "cargo"`, `rust` uses native Cargo and does not install Nix.
 Set `nix_flake_check = true` and provide a root `flake.nix` to add the flake
 lanes. This opt-in is independent of explicit Nix gates, `nix-builds.yaml`,
-and `[prebuild]`.
+and `[prebuild]`. With release-plz, it also qualifies the selected release
+revision with Nix before publication.
 
 Native required contexts change from `test` to `rust`, `evaluation` and,
 when enabled, `realization` (with workspace member prefixes where applicable).
@@ -1492,7 +1493,8 @@ separate jobs in GitHub hosted releases and the trusted crate publisher.
 Release-plz qualifies gates in its shared job, so overrides there must match
 the project runtime. Crow CI and non-GitHub hosted releases do not support
 runtime overrides. Forgejo Actions uses preinstalled Nix, so a required Nix
-gate there requires Nix CI on a Nix runner.
+gate there requires Nix CI on a Nix runner. Forgejo crate publication does not
+run required gates, so Simit rejects combining them with `publish_crates = true`.
 
 `[[ci.manual_gates]]` takes the same fields but renders the gates into
 `manual-gates.yaml`, triggered only by `workflow_dispatch` (GitHub Actions

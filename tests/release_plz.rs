@@ -507,6 +507,67 @@ fn migration_rejects_a_new_competing_template_before_writing_outputs() {
 }
 
 #[test]
+fn release_plz_qualifies_opted_in_cargo_flake_checks_at_the_selected_revision() {
+    const NIX_SETUP_SHA: &str = "0123456789abcdef0123456789abcdef01234567";
+    for enabled in [false, true] {
+        let opt_in = if enabled {
+            "nix_flake_check = true\n"
+        } else {
+            ""
+        };
+        let temp = project(&format!(
+            "[ci]\nindependent_lanes = true\nnix_setup_action_ref = '{NIX_SETUP_SHA}'\n{opt_in}"
+        ));
+        if enabled {
+            fs::write(temp.path().join("flake.nix"), "{ outputs = _: {}; }\n").unwrap();
+        }
+        let output = init(temp.path(), &["--publish-crates"]);
+        assert!(output.status.success(), "{output:?}");
+        let workflow =
+            fs::read_to_string(temp.path().join(".github/workflows/release-plz.yaml")).unwrap();
+        let yaml: serde_yaml::Value = serde_yaml::from_str(&workflow).unwrap();
+        let qualify = serde_yaml::to_string(&yaml["jobs"]["release-plz-qualify"]).unwrap();
+        if enabled {
+            let checkout = qualify.find("git checkout --detach").unwrap();
+            let setup = qualify
+                .find(&format!(
+                    "caniko/simit/.github/actions/nix-setup@{NIX_SETUP_SHA}"
+                ))
+                .unwrap();
+            let flake = qualify.find("nix flake check").unwrap();
+            let archives = qualify.find("package --locked --allow-dirty").unwrap();
+            assert!(checkout < setup && setup < flake && flake < archives);
+        } else {
+            assert!(!qualify.contains("nix"), "{qualify}");
+        }
+        assert!(!qualify.contains("nix develop"), "{qualify}");
+    }
+}
+
+#[test]
+fn release_plz_inline_gate_does_not_narrow_the_regenerated_ci_test_suite() {
+    let temp = project(
+        "[ci]\n[[ci.required_gates]]\nid = 'lib-only'\nruntime = 'cargo'\nrun = 'cargo test --lib'\n",
+    );
+    let output = init(temp.path(), &["--publish-crates"]);
+    assert!(output.status.success(), "{output:?}");
+    let workflows = temp.path().join(".github/workflows");
+    let release = fs::read_to_string(workflows.join("release-plz.yaml")).unwrap();
+    assert!(release.contains("name: Required gate lib-only"));
+    let assert_full_suite = || {
+        let ci: serde_yaml::Value =
+            serde_yaml::from_str(&fs::read_to_string(workflows.join("ci.yaml")).unwrap()).unwrap();
+        let ordinary = serde_yaml::to_string(&ci["jobs"]["test"]).unwrap();
+        assert!(ordinary.contains("cargo test"), "{ordinary}");
+        assert!(!ordinary.contains(" --lib"), "{ordinary}");
+    };
+    assert_full_suite();
+    let output = init(temp.path(), &[]);
+    assert!(output.status.success(), "{output:?}");
+    assert_full_suite();
+}
+
+#[test]
 fn workspace_uses_package_tags_and_credential_free_exact_source_checks() {
     let temp = project(
         "[ci]\nworkspace = true\npublish_crates = true\npublish_strategy = \"release-plz\"\n[ci.release_plz]\napp_id_variable = \"RELEASE_APP_ID\"\napp_private_key_secret = \"RELEASE_APP_KEY\"\n",

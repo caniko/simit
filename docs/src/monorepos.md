@@ -115,7 +115,8 @@ Release qualification retains the same verification ownership.
 
 The root `devShells.<system>.ci` must supply Simit with this component support,
 Cargo, and the tools used by checks. Each command runs in that shell with its
-declared environment and timeout. `systems` can select native runners using
+declared environment and timeout. A component check's `runtime` must be omitted
+or set to `"nix"`. `systems` can select native runners using
 `[ci.nix_system_runners]`. Handwritten supplementary workflows are retained.
 
 Each component gets its own `component-<id>` job by default. Components that

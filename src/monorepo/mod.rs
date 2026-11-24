@@ -141,6 +141,16 @@ impl Config {
             let mut gates = BTreeSet::new();
             for gate in &component.checks {
                 validate_id(&gate.id)?;
+                if gate
+                    .runtime
+                    .is_some_and(|runtime| runtime != crate::config::GateRuntime::Nix)
+                {
+                    bail!(
+                        "component {} check {} runs in Nix; omit runtime or set runtime = \"nix\"",
+                        component.id,
+                        gate.id
+                    );
+                }
                 if !gates.insert(&gate.id) {
                     bail!("duplicate check {} in {}", gate.id, component.id);
                 }

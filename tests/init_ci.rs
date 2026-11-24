@@ -727,7 +727,7 @@ fn gate_runtime_validation_rejects_unknown_values_and_incompatible_shared_jobs()
             format!("[ci]\nruntime = 'cargo'\n{options}\n[[ci.required_gates]]\nid = 'contract'\nruntime = '{runtime}'\nrun = 'true'\n"),
         )
         .unwrap();
-        let output = simit()
+        let output = simit_with_user_config(temp.path())
             .current_dir(temp.path())
             .args(["init", "ci"])
             .output()
@@ -738,6 +738,64 @@ fn gate_runtime_validation_rejects_unknown_values_and_incompatible_shared_jobs()
             "{output:?}"
         );
     }
+}
+
+#[test]
+fn forgejo_crate_publication_rejects_required_gates_it_cannot_run() {
+    for (runtime, gate_runtime) in [("cargo", "shell"), ("cargo", "cargo"), ("nix", "nix")] {
+        let temp = init_package(true);
+        fs::write(
+            temp.path().join("simit.toml"),
+            format!(
+                "[ci]\nplatform = 'forgejo'\nprovider = 'actions'\nruntime = '{runtime}'\npublish_crates = true\n[[ci.required_gates]]\nid = 'contract'\nruntime = '{gate_runtime}'\nrun = 'true'\n"
+            ),
+        )
+        .unwrap();
+        let output = simit_with_user_config(temp.path())
+            .current_dir(temp.path())
+            .args(["init", "ci"])
+            .output()
+            .unwrap();
+        assert!(!output.status.success(), "{output:?}");
+        assert!(
+            String::from_utf8_lossy(&output.stderr)
+                .contains("Forgejo crate publication does not run required gate `contract`"),
+            "{output:?}"
+        );
+        assert!(!temp.path().join(".forgejo/workflows").exists());
+    }
+}
+
+#[test]
+fn cargo_independent_lane_regeneration_preserves_flake_check_opt_in() {
+    let temp = init_package(true);
+    fs::write(
+        temp.path().join("simit.toml"),
+        "[ci]\nplatform = 'github'\nruntime = 'cargo'\nindependent_lanes = true\n",
+    )
+    .unwrap();
+    let init = |flags: &[&str]| {
+        simit_with_user_config(temp.path())
+            .current_dir(temp.path())
+            .args(["init", "ci"])
+            .args(flags)
+            .output()
+            .unwrap()
+    };
+    let output = init(&[]);
+    assert!(output.status.success(), "{output:?}");
+
+    let output = init(&["--check", "--nix-flake-check=true"]);
+    assert!(!output.status.success(), "{output:?}");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let repair = stderr.split('`').nth(1).unwrap_or_default();
+    assert!(repair.starts_with("simit init ci "), "{stderr}");
+    assert!(repair.contains("--nix-flake-check=true"), "{stderr}");
+
+    let output = init(&repair.split_whitespace().skip(3).collect::<Vec<_>>());
+    assert!(output.status.success(), "{output:?}");
+    let output = init(&["--check"]);
+    assert!(output.status.success(), "{output:?}");
 }
 
 #[test]
