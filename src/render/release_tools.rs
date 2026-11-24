@@ -120,7 +120,10 @@ pub(super) fn command_uses_nix(run: &str) -> bool {
             'launch: while let Some(Some(word)) = words.pop_front() {
                 let (dir, name) = word.rsplit_once('/').unwrap_or(("", &word));
                 if (!word.contains('/')
-                    || word.starts_with('/') && (dir.ends_with("/bin") || dir.ends_with("/sbin")))
+                    || ["/", "~/", "$HOME/", "${HOME}/"]
+                        .iter()
+                        .any(|prefix| word.starts_with(prefix))
+                        && (dir.ends_with("/bin") || dir.ends_with("/sbin")))
                     && matches!(
                         name,
                         "nix"
@@ -201,7 +204,10 @@ pub(super) fn command_uses_nix(run: &str) -> bool {
                     } else if name == "env" {
                         let payload = match option.as_str() {
                             "-S" | "--split-string" => words.pop_front().flatten(),
-                            _ => option.strip_prefix("--split-string=").map(str::to_owned),
+                            _ => option
+                                .strip_prefix("--split-string=")
+                                .or_else(|| option.strip_prefix("-S"))
+                                .map(str::to_owned),
                         };
                         if let Some(payload) = payload {
                             let Some(split) = shlex::split(&payload) else {
@@ -245,6 +251,9 @@ mod tests {
             "env FOO=1 nice -n 5 nix run .#x",
             "env -u FOO --chdir /tmp -- nix run .#x",
             "env -S 'nix build'",
+            "env -S'nix build'",
+            "env -S\"nix build\"",
+            "env -Snix",
             "env --split-string='-u FOO nix build'",
             "env -S 'nix' build",
             r#"bash -lc "nix build .#x""#,
@@ -261,6 +270,7 @@ mod tests {
             "command -v nix",
             "env -- echo nix",
             "env -S 'echo nix build'",
+            "env -S'echo nix build'",
             "env -S '-- echo nix build'",
         ] {
             assert!(!command_uses_nix(snippet), "{snippet}");
@@ -275,6 +285,9 @@ mod tests {
             "out=$(nix build --print-out-paths)",
             "ci=1 /run/current-system/sw/bin/nix eval .",
             "/nix/store/abc-nix/bin/nix-hash ./artifact",
+            "~/.nix-profile/bin/nix build",
+            "$HOME/.nix-profile/bin/nix build",
+            "${HOME}/.nix-profile/bin/nix build",
             "nixos-rebuild build",
             "env CI=1 bash -lc 'nix develop -c cargo check'",
             "true && command -- nix-store --gc",
@@ -287,6 +300,7 @@ mod tests {
             "command -v nix",
             "bash -c 'echo nix'",
             "./ci/nix-free-smoke",
+            "~/.nix-profile/bin/nix-free-smoke",
             "./ci/nix-build",
             "ci/nix-store",
             "nix-free-smoke",
