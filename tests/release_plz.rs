@@ -17,6 +17,7 @@ fn project(config: &str) -> tempfile::TempDir {
 
 fn init(root: &Path, flags: &[&str]) -> std::process::Output {
     common::simit()
+        .env("XDG_CONFIG_HOME", root.join(".xdg"))
         .current_dir(root)
         .args(["init", "ci", "--platform", "github", "--runtime", "cargo"])
         .args(flags)
@@ -534,9 +535,19 @@ fn release_plz_qualifies_opted_in_cargo_flake_checks_at_the_selected_revision() 
                     "caniko/simit/.github/actions/nix-setup@{NIX_SETUP_SHA}"
                 ))
                 .unwrap();
-            let flake = qualify.find("nix flake check").unwrap();
+            let evaluation = qualify
+                .find("nix flake check --no-build --all-systems --no-update-lock-file")
+                .expect(&qualify);
+            let realization = qualify
+                .find("nix flake check --no-update-lock-file")
+                .unwrap();
             let archives = qualify.find("package --locked --allow-dirty").unwrap();
-            assert!(checkout < setup && setup < flake && flake < archives);
+            assert!(
+                checkout < setup
+                    && setup < evaluation
+                    && evaluation < realization
+                    && realization < archives
+            );
         } else {
             assert!(!qualify.contains("nix"), "{qualify}");
         }

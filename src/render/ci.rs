@@ -5893,13 +5893,17 @@ fn push_nix_ci_legacy_steps(
     push_nix_package_crate_step(workflow, package, options);
 }
 
-fn push_nix_check_steps(workflow: &mut String, options: &CiOptions) {
+fn push_flake_wiring_check_step(workflow: &mut String, options: &CiOptions) {
     if options.repository_checks && options.components.contains(&CiComponent::FlakeWiring) {
         workflow.push_str(&format!(
             "      - name: Check generated flake wiring\n        run: {}\n\n",
             super::flake_wiring_check()
         ));
     }
+}
+
+fn push_nix_check_steps(workflow: &mut String, options: &CiOptions) {
+    push_flake_wiring_check_step(workflow, options);
     if options.om_ci != OmCiMode::Replace
         && let Some(command) = options.flake_check_command()
     {
@@ -6385,8 +6389,11 @@ pub(crate) fn release_plz_checks(
     packages: &[Package],
     options: &CiOptions,
 ) {
-    let needs_nix = runtime == Runtime::Nix
-        || (options.independent_lanes && options.flake_check_command().is_some());
+    let evaluate_flake =
+        options.independent_lanes && independent_lanes::evaluation_enabled(runtime, options);
+    let realize_flake =
+        options.independent_lanes && independent_lanes::realization_enabled(options);
+    let needs_nix = runtime == Runtime::Nix || evaluate_flake || realize_flake;
     if needs_nix {
         release_plz_setup(workflow, Runtime::Nix, options);
     }
@@ -6399,7 +6406,17 @@ pub(crate) fn release_plz_checks(
             .push_str("      - name: Format check\n        run: cargo fmt --all -- --check\n\n");
     }
     if needs_nix {
-        push_nix_check_steps(workflow, options);
+        if options.independent_lanes {
+            push_flake_wiring_check_step(workflow, options);
+            if evaluate_flake {
+                workflow.push_str(independent_lanes::EVALUATION_STEP);
+            }
+            if realize_flake {
+                workflow.push_str(independent_lanes::REALIZATION_STEP);
+            }
+        } else {
+            push_nix_check_steps(workflow, options);
+        }
     }
     if runtime == Runtime::Nix && !options.nix_builds.is_empty() {
         workflow.push_str(

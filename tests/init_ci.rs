@@ -767,7 +767,7 @@ fn forgejo_crate_publication_rejects_required_gates_it_cannot_run() {
 }
 
 #[test]
-fn cargo_independent_lane_regeneration_preserves_flake_check_opt_in() {
+fn cargo_independent_lane_regeneration_preserves_flake_check_overrides() {
     let temp = init_package(true);
     fs::write(
         temp.path().join("simit.toml"),
@@ -785,17 +785,19 @@ fn cargo_independent_lane_regeneration_preserves_flake_check_opt_in() {
     let output = init(&[]);
     assert!(output.status.success(), "{output:?}");
 
-    let output = init(&["--check", "--nix-flake-check=true"]);
-    assert!(!output.status.success(), "{output:?}");
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    let repair = stderr.split('`').nth(1).unwrap_or_default();
-    assert!(repair.starts_with("simit init ci "), "{stderr}");
-    assert!(repair.contains("--nix-flake-check=true"), "{stderr}");
+    for flag in ["--nix-flake-check=true", "--nix-flake-check=false"] {
+        let output = init(&["--check", flag]);
+        assert!(!output.status.success(), "{output:?}");
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let repair = stderr.split('`').nth(1).unwrap_or_default();
+        assert!(repair.starts_with("simit init ci "), "{stderr}");
+        assert!(repair.split_whitespace().any(|arg| arg == flag), "{stderr}");
 
-    let output = init(&repair.split_whitespace().skip(3).collect::<Vec<_>>());
-    assert!(output.status.success(), "{output:?}");
-    let output = init(&["--check"]);
-    assert!(output.status.success(), "{output:?}");
+        let output = init(&repair.split_whitespace().skip(3).collect::<Vec<_>>());
+        assert!(output.status.success(), "{output:?}");
+        let output = init(&["--check"]);
+        assert!(output.status.success(), "{output:?}");
+    }
 }
 
 #[test]

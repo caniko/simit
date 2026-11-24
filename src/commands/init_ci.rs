@@ -2433,7 +2433,8 @@ pub(crate) fn render_regeneration_command(
     if resolved.with_nix_cargo_cache {
         args.push("--with-nix-cargo-cache".to_owned());
     }
-    if let Some(enabled) = resolved.nix_flake_check_override() {
+    if resolved.nix_flake_check_override().is_some() || command.nix_flake_check.is_some() {
+        let enabled = resolved.nix_flake_check;
         args.push(format!("--nix-flake-check={enabled}"));
     }
     if resolved.with_msrv {

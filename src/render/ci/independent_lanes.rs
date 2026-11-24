@@ -1,6 +1,23 @@
 //! Parallel lanes separate Rust checks from optional full-flake checks.
 use super::*;
 
+pub(super) const EVALUATION_STEP: &str = "      - name: Evaluate complete flake\n        run: nix flake check --no-build --all-systems --no-update-lock-file\n\n";
+pub(super) const REALIZATION_STEP: &str = "      - name: Realize complete flake checks\n        run: nix flake check --no-update-lock-file\n\n";
+
+pub(super) fn evaluation_enabled(runtime: Runtime, options: &CiOptions) -> bool {
+    // Nix projects retain evaluation even when realization is retired.
+    // Cargo projects must opt into flake checks explicitly.
+    options.repository_checks
+        && (runtime == Runtime::Nix || options.nix_flake_check)
+        && (options.components.is_empty()
+            || options.components.contains(&CiComponent::FlakeEvaluation)
+            || options.components.contains(&CiComponent::Checks))
+}
+
+pub(super) fn realization_enabled(options: &CiOptions) -> bool {
+    options.flake_check_command() == Some("nix flake check")
+}
+
 pub(super) fn render(
     platform: Platform,
     runtime: Runtime,
@@ -20,17 +37,10 @@ pub(super) fn render(
     push_independent_source_concurrency(&mut workflow);
     workflow.push_str("jobs:\n");
     let mut lanes = vec!["rust"];
-    // Nix projects retain evaluation even when realization is retired.
-    // Cargo projects must opt into flake checks explicitly.
-    if options.repository_checks
-        && (runtime == Runtime::Nix || options.nix_flake_check)
-        && (options.components.is_empty()
-            || options.components.contains(&CiComponent::FlakeEvaluation)
-            || options.components.contains(&CiComponent::Checks))
-    {
+    if evaluation_enabled(runtime, &options) {
         lanes.push("evaluation");
     }
-    if options.flake_check_command() == Some("nix flake check") {
+    if realization_enabled(&options) {
         lanes.push("realization");
     }
     for lane in lanes {
@@ -79,15 +89,21 @@ pub(super) fn render(
         push_nix_cargo_bin_path_step(&mut workflow);
         push_extra_setup_steps(&mut workflow, &options.extra_setup);
         match lane {
-            "evaluation" => workflow.push_str("      - name: Evaluate complete flake\n        run: nix flake check --no-build --all-systems --no-update-lock-file\n\n"),
-            "realization" => workflow.push_str("      - name: Realize complete flake checks\n        run: nix flake check --no-update-lock-file\n\n"),
+            "evaluation" => workflow.push_str(EVALUATION_STEP),
+            "realization" => workflow.push_str(REALIZATION_STEP),
             _ => {
                 let mut rust_options = options.clone();
                 rust_options.nix_flake_check = false;
                 if options.repository_checks && options.check_command.is_none() {
                     workflow.push_str(&format!("      - name: Format check\n        run: |\n          nix develop -c {NIX_FORMAT_COMMAND}\n\n"));
                 }
-                push_nix_ci_legacy_steps(&mut workflow, platform, package, self_check, &rust_options);
+                push_nix_ci_legacy_steps(
+                    &mut workflow,
+                    platform,
+                    package,
+                    self_check,
+                    &rust_options,
+                );
                 push_sccache_stats_step(&mut workflow, platform, Runtime::Nix);
             }
         }
