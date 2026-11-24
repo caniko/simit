@@ -109,7 +109,7 @@ impl Tool {
                 writeln!(
                     script,
                     r#"  {platform})
-    test -x /lib/ld-linux-aarch64.so.1 || {{ echo "{name} on Linux/aarch64 requires glibc (/lib/ld-linux-aarch64.so.1); musl-only runners are unsupported. Use a glibc-based runner." >&2; exit 1; }}
+    test -x /lib/ld-linux-aarch64.so.1 && (getconf GNU_LIBC_VERSION 2>/dev/null | grep -q '^glibc ' || LC_ALL=C ldd --version 2>&1 | grep -qiE 'glibc|gnu libc') || {{ echo "{name} on Linux/aarch64 requires glibc (/lib/ld-linux-aarch64.so.1); musl-only runners are unsupported. Use a glibc-based runner." >&2; exit 1; }}
     stem={stem}; sha256={sha256} ;;"#
                 )
                 .expect("write");
@@ -175,6 +175,21 @@ mod tests {
     use sha2::{Digest, Sha256};
 
     use super::*;
+
+    #[test]
+    fn rendered_arm64_gnu_installers_require_glibc_identity() {
+        for tool in [Tool::Audit, Tool::Nextest] {
+            let mut actions = String::new();
+            tool.push_actions(&mut actions, "Install tool");
+            let crow = tool.crow("true");
+            for installer in [&actions, &crow] {
+                assert!(installer.contains(
+                    "test -x /lib/ld-linux-aarch64.so.1 && (getconf GNU_LIBC_VERSION 2>/dev/null | grep -q '^glibc '"
+                ));
+            }
+            assert!(crow.contains(r#"kernel="$$(uname -s)""#));
+        }
+    }
 
     #[test]
     fn glibc_only_arm64_installers_fail_before_download_without_loader() {
