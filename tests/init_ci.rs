@@ -3283,18 +3283,20 @@ fn crow_audit_provisions_database_in_its_own_step() {
             ),
             (
                 "curl",
-                "#!/bin/sh\n[ -z \"$FAIL_DOWNLOAD\" ] || exit 46\n[ \"$1 $2\" = '-fL -o' ] || exit 47\ntouch \"$3\"\n",
+                "#!/bin/sh\n[ -z \"$FAIL_DOWNLOAD\" ] || exit 46\nwhile [ \"$#\" -gt 2 ] && [ \"$1\" != -o ]; do shift; done\n[ \"$1\" = -o ] && touch \"$2\" || exit 47\n",
             ),
             (
                 "sha256sum",
-                "#!/bin/sh\n[ \"$1\" = -c ] && [ -z \"$FAIL_CHECKSUM\" ] || exit 48\ncat >/dev/null\n",
+                "#!/bin/sh\n[ \"$*\" = '-c -' ] && [ -z \"$FAIL_CHECKSUM\" ] || exit 48\ncat >/dev/null\n",
             ),
             (
                 "tar",
-                "#!/bin/sh\n[ \"$1\" = -xzf ] && [ \"$3\" = -C ] && [ \"$5\" = --strip-components=1 ] || exit 49\ncp \"$FIXTURE_AUDIT\" \"$4/cargo-audit\"\n",
+                "#!/bin/sh\n[ \"$1\" = -xOzf ] && [ \"$3\" = -- ] && [ \"$4\" = cargo-audit-x86_64-unknown-linux-musl-v0.23.0/cargo-audit ] && [ \"$#\" = 4 ] || exit 49\ncat \"$FIXTURE_AUDIT\"\n",
             ),
-            // The step picks its download by `uname -m`; pin a supported Linux arch.
-            ("uname", "#!/bin/sh\necho x86_64\n"),
+            (
+                "uname",
+                "#!/bin/sh\ncase \"$1\" in -s) echo Linux;; -m) echo x86_64;; *) exit 1;; esac\n",
+            ),
             (
                 "nix",
                 "#!/bin/sh\n[ \"$1 $2 $3 $4 $5 $6 $7\" = 'shell --extra-experimental-features nix-command flakes nixpkgs#git nixpkgs#cargo-audit nixpkgs#cargo -c' ] || exit 45\nshift 7\nPATH=\"$NIX_BIN:$PATH\"\nexport PATH\nexec \"$@\"\n",
@@ -3309,7 +3311,7 @@ fn crow_audit_provisions_database_in_its_own_step() {
             fs::set_permissions(path, fs::Permissions::from_mode(0o755)).unwrap();
         }
         let audit_tool = nix_bin.join("cargo-audit");
-        fs::write(&audit_tool, "#!/bin/sh\n[ \"$1\" = audit ] && [ \"$2\" = --db ] && [ -f \"$3/fixture\" ] && [ \"$4\" = --no-fetch ] && [ \"$#\" = 4 ] || exit 43\n[ -z \"$FAIL_AUDIT\" ] || exit 44\n").unwrap();
+        fs::write(&audit_tool, "#!/bin/sh\nif [ \"$*\" = --version ]; then echo 'cargo-audit 0.23.0'; exit 0; fi\n[ \"$1\" = audit ] && [ \"$2\" = --db ] && [ -f \"$3/fixture\" ] && [ \"$4\" = --no-fetch ] && [ \"$#\" = 4 ] || exit 43\n[ -z \"$FAIL_AUDIT\" ] || exit 44\n").unwrap();
         fs::set_permissions(&audit_tool, fs::Permissions::from_mode(0o755)).unwrap();
         for (failure, expected, cargo_home, existing) in [
             ("", 0, false, false),
@@ -3371,6 +3373,84 @@ fn crow_audit_provisions_database_in_its_own_step() {
                 );
             }
             assert_eq!(fs::read_dir(tmp).unwrap().count(), 0);
+            assert!(fs::read_dir(root).unwrap().all(|entry| {
+                !entry
+                    .unwrap()
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with(".simit-cargo-tools.")
+            }));
+        }
+    }
+}
+
+#[test]
+fn crow_prebuilt_cargo_tools_run_in_their_own_gate_containers() {
+    for runtime in ["cargo", "nix"] {
+        let temp = init_package(true);
+        let root = temp.path();
+        fs::write(root.join("simit.toml"), format!("[ci]\nprovider = 'crow'\nplatform = 'forgejo'\nrunner = 'codefloe-global'\nruntime = '{runtime}'\nwith_audit = true\nwith_deny = true\nwith_nextest = true\n")).unwrap();
+        let output = simit()
+            .env("HOME", root)
+            .env("XDG_CONFIG_HOME", root.join("config"))
+            .current_dir(root)
+            .args(["init", "ci"])
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "{runtime}: {output:?}");
+        let content = read(&root.join(".crow/build.yaml"));
+        assert!(!content.contains("cargo install"));
+        let yaml: serde_yaml::Value = serde_yaml::from_str(&content).unwrap();
+        let steps = yaml["steps"].as_sequence().unwrap();
+        let command = |name: &str| {
+            let step = steps.iter().find(|step| step["name"] == name).unwrap();
+            let commands = step["commands"].as_sequence().unwrap();
+            assert_eq!(commands.len(), 1, "{name}");
+            commands[0].as_str().unwrap()
+        };
+        let nextest_check = steps.iter().any(|step| step["name"] == "nextest-tool");
+        if runtime == "nix" {
+            assert!(nextest_check);
+            assert!(!content.contains("simit-cargo-tools."));
+            assert_eq!(
+                command("nextest-tool"),
+                "nix develop -c cargo-nextest --version"
+            );
+            assert_eq!(
+                command("cargo-nextest"),
+                "nix develop -c cargo nextest run --all-features"
+            );
+            assert_eq!(
+                command("cargo-deny"),
+                "nix develop -c cargo deny check bans licenses sources"
+            );
+            continue;
+        }
+        assert!(!nextest_check);
+        for (tool, gate) in [
+            ("cargo-audit", "cargo-audit audit --db"),
+            ("cargo-deny", "cargo-deny deny check"),
+            ("cargo-nextest", "cargo-nextest nextest run"),
+        ] {
+            let raw = command(tool);
+            assert!(!raw.replace("$$", "").contains('$'), "{raw}");
+            let script = raw.replace("$$", "$");
+            assert!(script.contains("mktemp -d \"$PWD/.simit-cargo-tools."));
+            assert!(script.contains("trap 'rm -rf -- \"$bin\"' EXIT"));
+            assert!(!script.contains("GITHUB_PATH"));
+            let mut remaining = script.as_str();
+            for marker in [
+                "sha256sum -c -",
+                "tar -xOzf",
+                &format!("test \"$(command -v {tool})\""),
+                &format!("PATH=\"$bin\" {tool} --version"),
+                gate,
+            ] {
+                remaining = remaining
+                    .split_once(marker)
+                    .unwrap_or_else(|| panic!("missing or out of order: {marker}\n{script}"))
+                    .1;
+            }
         }
     }
 }
@@ -5361,6 +5441,7 @@ fn generates_github_plain_cargo_workflows() {
     let temp = init_package(true);
 
     let status = simit_with_user_config(temp.path())
+        .env("HOME", temp.path())
         .current_dir(temp.path())
         .args([
             "init",
@@ -5368,6 +5449,8 @@ fn generates_github_plain_cargo_workflows() {
             "--platform",
             "github",
             "--with-nextest",
+            "--with-audit",
+            "--with-deny",
             "--publish-crates",
             "--publish-strategy",
             "members",
@@ -5395,11 +5478,9 @@ fn generates_github_plain_cargo_workflows() {
         "save-if: ${{ github.ref == format('refs/heads/{0}', github.event.repository.default_branch) }}"
     ));
     assert!(!ci.contains("hashFiles('.forgejo/workflows/ci.yaml', '.github/workflows/ci.yaml')"));
-    assert!(ci.contains(
-        "command -v cargo-nextest >/dev/null 2>&1 || cargo install cargo-nextest --locked --version 0.9.100"
-    ));
+    assert_verified_cargo_tools(&ci);
     assert!(!ci.contains("&>/dev/null"));
-    assert!(ci.contains("run: cargo nextest run --all-features"));
+    assert!(ci.contains("run: cargo-nextest nextest run --all-features"));
     assert!(ci.contains("run: cargo package --allow-dirty --list"));
 
     let publish = read(&temp.path().join(".github/workflows/publish-crate.yaml"));
@@ -5425,9 +5506,7 @@ fn generates_github_plain_cargo_workflows() {
     assert!(
         !publish.contains("hashFiles('.forgejo/workflows/ci.yaml', '.github/workflows/ci.yaml')")
     );
-    assert!(publish.contains(
-        "command -v cargo-nextest >/dev/null 2>&1 || cargo install cargo-nextest --locked --version 0.9.100"
-    ));
+    assert_verified_cargo_tools(&publish);
     assert!(publish.contains("simit changelog release <version>"));
     assert!(publish.contains("run: cargo publish --dry-run"));
     assert!(
@@ -5442,6 +5521,7 @@ fn generates_github_plain_cargo_workflows() {
     );
     assert!(trusted.contains("workflow_run:"));
     assert!(trusted.contains("--publisher-stage publish"));
+    assert!(!trusted.contains("simit-cargo-tools."));
     assert!(trusted.contains(
         "already-published crates with matching checksums exit 0 after exact registry resolution"
     ));
@@ -5542,6 +5622,7 @@ fn forgejo_auto_runtime_uses_rust_container_even_when_flake_exists() {
     let temp = init_package(true);
 
     let status = simit_with_user_config(temp.path())
+        .env("HOME", temp.path())
         .current_dir(temp.path())
         .args([
             "init",
@@ -5549,6 +5630,8 @@ fn forgejo_auto_runtime_uses_rust_container_even_when_flake_exists() {
             "--platform",
             "forgejo",
             "--with-nextest",
+            "--with-audit",
+            "--with-deny",
             "--publish-crates",
         ])
         .status()
@@ -5571,13 +5654,11 @@ fn forgejo_auto_runtime_uses_rust_container_even_when_flake_exists() {
     assert!(ci.contains("path: ~/.cargo/bin"));
     assert!(ci.contains("hashFiles('.forgejo/workflows/*.yaml')"));
     assert!(!ci.contains("hashFiles('.forgejo/workflows/ci.yaml', '.github/workflows/ci.yaml')"));
-    assert!(ci.contains(
-        "command -v cargo-nextest >/dev/null 2>&1 || cargo install cargo-nextest --locked --version 0.9.100"
-    ));
+    assert_verified_cargo_tools(&ci);
     assert!(!ci.contains("&>/dev/null"));
     assert!(!ci.contains("run: apk add --no-cache git build-base"));
     assert!(ci.contains("run: rustup component add clippy rustfmt"));
-    assert!(ci.contains("run: cargo nextest run --all-features"));
+    assert!(ci.contains("run: cargo-nextest nextest run --all-features"));
     assert!(!ci.contains("uses: https://github.com/cachix/install-nix-action@v31"));
 
     let publish = read(&temp.path().join(".forgejo/workflows/publish-crate.yaml"));
@@ -5591,9 +5672,7 @@ fn forgejo_auto_runtime_uses_rust_container_even_when_flake_exists() {
     assert!(
         !publish.contains("hashFiles('.forgejo/workflows/ci.yaml', '.github/workflows/ci.yaml')")
     );
-    assert!(publish.contains(
-        "command -v cargo-nextest >/dev/null 2>&1 || cargo install cargo-nextest --locked --version 0.9.100"
-    ));
+    assert_verified_cargo_tools(&publish);
     assert!(
         publish.contains(r#"cargo pkgid -p demo | awk -F'[#@]' 'NF > 1 {print $NF}' | tail -n 1"#)
     );
@@ -7182,7 +7261,7 @@ with_audit = false
     assert!(status.success());
 
     let ci = read(&temp.path().join(".github/workflows/ci.yaml"));
-    assert!(ci.contains("cargo audit --db \"$db\" --no-fetch --stale"));
+    assert!(ci.contains("cargo-audit audit --db \"$db\" --no-fetch --stale"));
 
     let config = read(&temp.path().join("simit.toml"));
     assert!(config.contains("with_audit = true"));
@@ -7330,6 +7409,87 @@ fn old_init_ci_command_is_not_available() {
     assert!(stderr.contains("unrecognized subcommand 'init-ci'"));
 }
 
+fn assert_verified_cargo_tool(workflow: &str, tool: &str, version: &str) {
+    let job_file: serde_yaml::Value = serde_yaml::from_str(workflow).unwrap();
+    let run = job_file["jobs"]
+        .as_mapping()
+        .unwrap()
+        .values()
+        .filter_map(|job| job["steps"].as_sequence())
+        .flatten()
+        .filter_map(|step| step["run"].as_str())
+        .find(|run| run.contains(&format!("test \"$(command -v {tool})\"")))
+        .unwrap_or_else(|| panic!("missing verified installer for {tool}"));
+    let resolve = format!("test \"$(command -v {tool})\" = \"$bin/{tool}\"");
+    let probe = format!("PATH=\"$bin\" {tool} --version");
+    assert!(run.contains("mktemp -d \"${RUNNER_TEMP:-${TMPDIR:-/tmp}}/simit-cargo-tools."));
+    assert!(!run.contains("GITHUB_WORKSPACE"));
+    assert!(
+        !run.lines()
+            .any(|line| line.contains("sha256sum") && line.contains("--strict"))
+    );
+    let mut remaining = run;
+    for marker in [
+        "Unsupported ",
+        "-fsSL --retry 3",
+        "sha256sum -c -",
+        "shasum -a 256 -c -",
+        "tar -xOzf",
+        &resolve,
+        &probe,
+        ">> \"$GITHUB_PATH\"",
+    ] {
+        remaining = remaining
+            .split_once(marker)
+            .unwrap_or_else(|| panic!("missing or out of order: {marker}\n{run}"))
+            .1;
+    }
+    assert!(run.contains(version));
+    assert!(!run.contains("--strip-components"));
+    assert!(!workflow.contains(&format!("cargo install {tool}")));
+}
+
+fn assert_verified_cargo_tools(workflow: &str) {
+    for (tool, version) in [
+        ("cargo-audit", "0.23.0"),
+        ("cargo-deny", "0.18.3"),
+        ("cargo-nextest", "0.9.100"),
+    ] {
+        assert_verified_cargo_tool(workflow, tool, version);
+    }
+    assert!(!workflow.contains("cargo install"));
+}
+
+#[test]
+fn release_plz_migration_accepts_prebuilt_cargo_tools() {
+    let temp = init_package(false);
+    let generate = |args: &[&str]| {
+        let output = simit()
+            .env("HOME", temp.path())
+            .env("XDG_CONFIG_HOME", temp.path().join("config"))
+            .current_dir(temp.path())
+            .args(["init", "ci", "--platform", "github", "--runtime", "cargo"])
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "{output:?}");
+    };
+    generate(&["--with-nextest", "--with-audit", "--with-deny"]);
+    // Keep a project-owned copy so migration audits the installer commands
+    // instead of skipping the generated workflow it is about to replace.
+    let workflows = temp.path().join(".github/workflows");
+    let mut ci: serde_yaml::Value =
+        serde_yaml::from_str(&read(&workflows.join("ci.yaml"))).unwrap();
+    ci["name"] = "Project Cargo workflow".into();
+    fs::write(
+        workflows.join("project-cargo.yaml"),
+        serde_yaml::to_string(&ci).unwrap(),
+    )
+    .unwrap();
+    generate(&["--publish-crates", "--publish-strategy", "release-plz"]);
+    generate(&["--check", "--diff"]);
+}
+
 #[test]
 fn optional_strict_flags_render_expected_steps() {
     let temp = init_package(false);
@@ -7351,18 +7511,14 @@ fn optional_strict_flags_render_expected_steps() {
     assert!(status.success());
 
     let ci = read(&temp.path().join(".forgejo/workflows/ci.yaml"));
-    assert!(ci.contains(
-        "run: command -v cargo-audit >/dev/null 2>&1 || cargo install cargo-audit --locked"
-    ));
+    assert_verified_cargo_tool(&ci, "cargo-audit", "0.23.0");
     assert!(ci.contains("      - name: Fetch RustSec advisory database"));
     assert!(ci.contains(
         "git -c http.lowSpeedLimit=1024 -c http.lowSpeedTime=30 clone --depth 1 https://github.com/RustSec/advisory-db.git \"$db\""
     ));
-    assert!(ci.contains("cargo audit --db \"$db\" --no-fetch --stale"));
-    assert!(ci.contains(
-        "run: command -v cargo-deny >/dev/null 2>&1 || cargo install cargo-deny --locked --version 0.18.3"
-    ));
-    assert!(ci.contains("run: cargo deny check bans licenses sources"));
+    assert!(ci.contains("cargo-audit audit --db \"$db\" --no-fetch --stale"));
+    assert_verified_cargo_tool(&ci, "cargo-deny", "0.18.3");
+    assert!(ci.contains("run: cargo-deny deny check bans licenses sources"));
     assert!(ci.contains("rustup toolchain install 1.85 --profile minimal"));
     assert!(ci.contains("cargo +1.85 check --all-targets --all-features"));
     assert!(ci.contains("run: cargo doc --no-deps --all-features"));

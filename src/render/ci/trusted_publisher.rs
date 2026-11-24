@@ -309,7 +309,7 @@ pub(super) fn source_workflow_with_namespace(
         push_audit_step(&mut w, runtime);
     }
     if options.with_deny {
-        push_deny_step(&mut w, command_prefix(runtime));
+        push_deny_step(&mut w, runtime);
     }
     for name in names {
         let prefix = command_prefix(runtime);

@@ -16,7 +16,7 @@ use crate::config::{
 use crate::project::GeneratedFile;
 use crate::user_config::{ResolvedCiRunners, ResolvedRunner};
 
-use super::release_tools;
+use super::{cargo_tools::Tool, release_tools};
 
 pub mod custody;
 mod independent_lanes;
@@ -103,8 +103,6 @@ pub(crate) fn workflow_preamble_lines(content: &str) -> impl Iterator<Item = &st
         }
     })
 }
-pub(super) const CARGO_NEXTEST_VERSION: &str = "0.9.100";
-const CARGO_DENY_VERSION: &str = "0.18.3";
 const CARGO_DENY_POLICY_CHECKS: &str = "bans licenses sources";
 // Custom/legacy Nix shells may expose rustfmt without a treefmt wrapper.
 // Prefer the complete project formatter, and never mask its failure. Custom
@@ -6077,17 +6075,20 @@ fn push_test_steps(
 ) {
     let prefix = command_prefix(runtime);
     let targets = unit_test_target_args(package, options);
+    // Cargo may prefer an off-PATH $CARGO_HOME/bin; invoke the verified tool directly.
+    let nextest = match runtime {
+        Runtime::Cargo => "cargo-nextest nextest run",
+        Runtime::Nix => "cargo nextest run",
+    };
     if options.with_nextest {
-        workflow.push_str("      - name: Check nextest tool\n");
-        workflow.push_str("        run: ");
         if runtime == Runtime::Cargo {
-            workflow.push_str("command -v cargo-nextest >/dev/null 2>&1 || cargo install cargo-nextest --locked --version ");
-            workflow.push_str(CARGO_NEXTEST_VERSION);
+            Tool::Nextest.push_actions(workflow, "Check nextest tool");
         } else {
+            workflow.push_str("      - name: Check nextest tool\n");
+            workflow.push_str("        run: ");
             workflow.push_str(command_prefix(runtime));
-            workflow.push_str("cargo-nextest --version");
+            workflow.push_str("cargo-nextest --version\n\n");
         }
-        workflow.push_str("\n\n");
         workflow.push_str(if options.all_features {
             "      - name: Test all features\n"
         } else {
@@ -6095,7 +6096,7 @@ fn push_test_steps(
         });
         workflow.push_str("        run: ");
         workflow.push_str(prefix);
-        workflow.push_str("cargo nextest run");
+        workflow.push_str(nextest);
         push_package_selector(workflow, package, options);
         workflow.push_str(targets);
         if options.all_features {
@@ -6123,7 +6124,7 @@ fn push_test_steps(
         workflow.push_str("        run: ");
         workflow.push_str(prefix);
         workflow.push_str(if options.with_nextest {
-            "cargo nextest run"
+            nextest
         } else {
             "cargo test"
         });
@@ -6206,11 +6207,7 @@ fn push_quality_tool_install_steps(workflow: &mut String, runtime: Runtime, opti
     let prefix = command_prefix(runtime);
     if options.with_audit {
         if runtime == Runtime::Cargo {
-            workflow.push_str("      - name: Install cargo-audit\n");
-            workflow.push_str("        run: ");
-            workflow.push_str(
-                "command -v cargo-audit >/dev/null 2>&1 || cargo install cargo-audit --locked\n\n",
-            );
+            Tool::Audit.push_actions(workflow, "Install cargo-audit");
         } else {
             workflow.push_str("      - name: Check cargo-audit tool\n");
             workflow.push_str("        run: ");
@@ -6220,11 +6217,7 @@ fn push_quality_tool_install_steps(workflow: &mut String, runtime: Runtime, opti
     }
     if options.with_deny {
         if runtime == Runtime::Cargo {
-            workflow.push_str("      - name: Install cargo-deny\n");
-            workflow.push_str("        run: ");
-            workflow.push_str("command -v cargo-deny >/dev/null 2>&1 || cargo install cargo-deny --locked --version ");
-            workflow.push_str(CARGO_DENY_VERSION);
-            workflow.push_str("\n\n");
+            Tool::Deny.push_actions(workflow, "Install cargo-deny");
         } else {
             workflow.push_str("      - name: Check cargo-deny tool\n");
             workflow.push_str("        run: ");
@@ -6235,11 +6228,14 @@ fn push_quality_tool_install_steps(workflow: &mut String, runtime: Runtime, opti
     }
 }
 
-fn push_deny_step(workflow: &mut String, prefix: &str) {
+fn push_deny_step(workflow: &mut String, runtime: Runtime) {
     workflow.push_str("      - name: Deny dependency policy\n");
     workflow.push_str("        run: ");
-    workflow.push_str(prefix);
-    workflow.push_str("cargo deny check ");
+    workflow.push_str(command_prefix(runtime));
+    workflow.push_str(match runtime {
+        Runtime::Cargo => "cargo-deny deny check ",
+        Runtime::Nix => "cargo deny check ",
+    });
     workflow.push_str(CARGO_DENY_POLICY_CHECKS);
     workflow.push_str("\n\n");
 }
@@ -6309,7 +6305,7 @@ fn push_quality_ci_steps(workflow: &mut String, runtime: Runtime, options: &CiOp
         push_audit_step(workflow, runtime);
     }
     if options.repository_checks && options.with_deny {
-        push_deny_step(workflow, command_prefix(runtime));
+        push_deny_step(workflow, runtime);
     }
 }
 
@@ -6319,14 +6315,13 @@ fn push_optional_publish_steps(
     package: &Package,
     options: &CiOptions,
 ) {
-    let prefix = command_prefix(runtime);
     push_msrv_step(workflow, runtime, package, options);
     if options.with_audit {
         push_audit_database_step(workflow);
         push_audit_step(workflow, runtime);
     }
     if options.with_deny {
-        push_deny_step(workflow, prefix);
+        push_deny_step(workflow, runtime);
     }
     if options.with_docs {
         workflow.push_str("      - name: Build docs\n");
@@ -6351,7 +6346,10 @@ fn push_audit_step(workflow: &mut String, runtime: Runtime) {
     workflow.push_str("          db=\"${CARGO_HOME:-$HOME/.cargo}/advisory-db\"\n");
     workflow.push_str("          ");
     workflow.push_str(command_prefix(runtime));
-    workflow.push_str("cargo audit --db \"$db\" --no-fetch --stale\n\n");
+    workflow.push_str(match runtime {
+        Runtime::Cargo => "cargo-audit audit --db \"$db\" --no-fetch --stale\n\n",
+        Runtime::Nix => "cargo audit --db \"$db\" --no-fetch --stale\n\n",
+    });
 }
 
 fn push_package_selector(workflow: &mut String, package: &Package, options: &CiOptions) {

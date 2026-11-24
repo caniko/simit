@@ -1,4 +1,5 @@
 pub mod apt_conf;
+mod cargo_tools;
 pub mod chocolatey_nuspec;
 pub mod ci;
 pub mod copr_makefile;

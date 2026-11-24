@@ -151,21 +151,30 @@ fn split_quality_tools_are_installed_and_run_in_their_selected_job() {
         let docs = serde_yaml::to_string(&yaml["jobs"]["docs"]).unwrap();
         for command in [
             if runtime == "cargo" {
-                "cargo install cargo-audit"
+                "https://github.com/rustsec/rustsec/releases/download/cargo-audit/v0.23.0/"
             } else {
                 "cargo-audit --version"
             },
-            "cargo audit --",
             if runtime == "cargo" {
-                "cargo install cargo-deny"
+                "cargo-audit audit --"
+            } else {
+                "cargo audit --"
+            },
+            if runtime == "cargo" {
+                "https://github.com/EmbarkStudios/cargo-deny/releases/download/0.18.3/"
             } else {
                 "cargo-deny --version"
             },
-            "cargo deny check",
+            if runtime == "cargo" {
+                "cargo-deny deny check"
+            } else {
+                "cargo deny check"
+            },
         ] {
             assert!(quality.contains(command), "{runtime}: {quality}");
             assert!(!docs.contains(command), "{runtime}: {docs}");
         }
+        assert!(!workflow.contains("cargo install"));
         assert!(docs.contains("cargo doc"));
         generate(temp.path(), true);
     }
@@ -204,7 +213,8 @@ fn member_workflows_run_repository_gates_once() {
         } else {
             ""
         };
-        fs::write(temp.path().join("simit.toml"), format!("[ci]\nplatform = \"{platform}\"\nruntime = \"{runtime}\"\nrunner = \"atlas\"\nworkspace = true\nworkspace_strategy = \"members\"\nwith_audit = true\nwith_deny = true\nwith_docs = true\n{extra}required_gates = [{{ id = \"shared\", {gate_runtime}run = \"nix run .#shared-contract\" }}]\n")).unwrap();
+        let nextest = runtime == "cargo";
+        fs::write(temp.path().join("simit.toml"), format!("[ci]\nplatform = \"{platform}\"\nruntime = \"{runtime}\"\nrunner = \"atlas\"\nworkspace = true\nworkspace_strategy = \"members\"\nwith_audit = true\nwith_deny = true\nwith_docs = true\nwith_nextest = {nextest}\n{extra}required_gates = [{{ id = \"shared\", {gate_runtime}run = \"nix run .#shared-contract\" }}]\n")).unwrap();
         generate(temp.path(), false);
         let workflows = ["first", "second"].map(|name| {
             fs::read_to_string(
@@ -222,17 +232,32 @@ fn member_workflows_run_repository_gates_once() {
         assert_eq!(joined.matches("name: Format check").count(), 1);
         assert_eq!(joined.matches("run: nix run .#shared-contract").count(), 1);
         assert_eq!(
-            joined.matches("cargo audit --").count(),
+            joined.matches("audit --db").count(),
             1,
             "{platform}/{runtime} {extra}: {joined}"
         );
         assert_eq!(
-            joined.matches("cargo deny check").count(),
+            joined.matches("deny check bans licenses sources").count(),
             1,
             "{platform}/{runtime} {extra}: {joined}"
         );
+        for tool in ["cargo-audit", "cargo-deny"] {
+            assert_eq!(
+                joined
+                    .matches(&format!("test \"$(command -v {tool})\""))
+                    .count(),
+                usize::from(runtime == "cargo"),
+                "{platform}/{runtime} {extra}: {tool}"
+            );
+        }
+        assert!(!joined.contains("cargo install"));
         for (name, workflow) in ["first", "second"].into_iter().zip(workflows) {
-            assert!(workflow.contains(&format!("cargo test -p {name}")));
+            if nextest {
+                assert!(workflow.contains(&format!("cargo-nextest nextest run -p {name}")));
+                assert!(workflow.contains("test \"$(command -v cargo-nextest)\""));
+            } else {
+                assert!(workflow.contains(&format!("cargo test -p {name}")));
+            }
             assert!(workflow.contains(&format!("cargo clippy -p {name}")));
             assert!(workflow.contains(&format!("cargo doc -p {name}")));
         }
@@ -276,7 +301,7 @@ fn actions_nextest_retains_doctests_without_repeating_the_test_harness() {
         assert!(
             workflow
                 .lines()
-                .any(|line| line.contains("cargo nextest run") && line.contains(features))
+                .any(|line| line.contains("cargo-nextest nextest run") && line.contains(features))
         );
         assert!(
             workflow
@@ -313,8 +338,8 @@ fn crow_nextest_replaces_tests_and_retains_doctests_and_feature_modes() {
     fs::write(temp.path().join("simit.toml"), "[ci]\nplatform = \"forgejo\"\nprovider = \"crow\"\nruntime = \"cargo\"\nrunner = \"atlas\"\nwith_nextest = true\n").unwrap();
     generate(temp.path(), false);
     let workflow = fs::read_to_string(temp.path().join(".crow/build.yaml")).unwrap();
-    assert!(workflow.contains("cargo nextest run --all-features"));
-    assert!(workflow.contains("cargo nextest run --no-default-features"));
+    assert!(workflow.contains("cargo-nextest nextest run --all-features"));
+    assert!(workflow.contains("cargo-nextest nextest run --no-default-features"));
     assert!(workflow.contains("cargo test --doc --all-features"));
     assert!(workflow.contains("cargo test --doc --no-default-features"));
     assert!(
@@ -458,7 +483,7 @@ fn nextest_does_not_add_invalid_binary_or_disabled_library_doctests() {
             fs::write(temp.path().join("simit.toml"), format!("[ci]\nplatform = \"{platform}\"\nprovider = \"{provider}\"\nruntime = \"cargo\"\nrunner = \"atlas\"\nwith_nextest = true\nunit_tests_only = {}\n", kind == "unit-only")).unwrap();
             generate(temp.path(), false);
             let workflow = fs::read_to_string(temp.path().join(path)).unwrap();
-            assert!(workflow.contains("cargo nextest run"));
+            assert!(workflow.contains("cargo-nextest nextest run"));
             assert!(!workflow.contains("cargo test --doc"), "{kind}: {workflow}");
             generate(temp.path(), true);
         }
@@ -487,7 +512,11 @@ fn aggregate_nextest_includes_library_doctests_when_the_first_member_is_a_binary
     generate(temp.path(), false);
     let workflow = fs::read_to_string(temp.path().join(".github/workflows/ci.yaml")).unwrap();
     assert!(workflow.contains("cargo test --doc --workspace --all-features"));
-    for command in ["cargo nextest run", "cargo test --doc", "cargo clippy"] {
+    for command in [
+        "cargo-nextest nextest run",
+        "cargo test --doc",
+        "cargo clippy",
+    ] {
         assert!(
             workflow.lines().any(|line| line.contains(command)
                 && line.contains("--workspace")
@@ -735,7 +764,7 @@ fn unit_only_tests_select_valid_targets_across_providers_and_harnesses() {
                 let commands: Vec<_> = workflow
                     .lines()
                     .filter(|line| {
-                        line.contains("cargo test") || line.contains("cargo nextest run")
+                        line.contains("cargo test") || line.contains("cargo-nextest nextest run")
                     })
                     .collect();
                 assert_eq!(commands.len(), 2, "{workflow}");
@@ -815,7 +844,7 @@ fn aggregate_unit_test_selection_uses_all_selected_members() {
             "--bins"
         };
         assert!(
-            workflow.contains(&format!("cargo nextest run --workspace {target}")),
+            workflow.contains(&format!("cargo-nextest nextest run --workspace {target}")),
             "{workflow}"
         );
     }

@@ -69,22 +69,32 @@ fn publisher_project(mode: &str) -> TempDir {
     fs::write(
         temp.path().join("simit.toml"),
         format!(
-            "[ci]\nplatform='github'\nprovider='actions'\nruntime='cargo'\nrunner='ubuntu-latest'\npublish_crates=true\nworkspace={workspace}\npublish_strategy='{}'\n",
+            "[ci]\nplatform='github'\nprovider='actions'\nruntime='cargo'\nrunner='ubuntu-latest'\npublish_crates=true\nworkspace={workspace}\npublish_strategy='{}'\n{}",
             if mode == "coordinated" {
                 "coordinated"
             } else {
                 "members"
             }
+            ,
+            if mode == "coordinated" {
+                "with_audit=true\nwith_deny=true\n"
+            } else {
+                ""
+            }
         ),
     )
     .unwrap();
     let output = common::simit()
+        .env("HOME", temp.path())
+        .env("XDG_CONFIG_HOME", temp.path().join("config"))
         .current_dir(temp.path())
         .args(["init", "ci"])
         .output()
         .unwrap();
     assert!(output.status.success(), "{mode}: {output:?}");
     let check = common::simit()
+        .env("HOME", temp.path())
+        .env("XDG_CONFIG_HOME", temp.path().join("config"))
         .current_dir(temp.path())
         .args(["init", "ci", "--check", "--diff"])
         .output()
@@ -318,6 +328,37 @@ fn retained_archive_builds_use_an_explicit_target_directory_without_jq() {
             assert!(text.contains("$RUNNER_TEMP/simit-package-target/package/"));
         }
     }
+}
+
+#[test]
+fn coordinated_source_uses_verified_quality_tools_without_adding_them_to_the_publisher() {
+    let temp = publisher_project("coordinated");
+    let workflows = temp.path().join(".github/workflows");
+    let source = fs::read_to_string(workflows.join("publish-workspace.yaml")).unwrap();
+    let yaml: Value = serde_yaml::from_str(&source).unwrap();
+    let runs: Vec<_> = yaml["jobs"]["build"]["steps"]
+        .as_sequence()
+        .unwrap()
+        .iter()
+        .filter_map(|step| step["run"].as_str())
+        .collect();
+    for (tool, command) in [
+        ("cargo-audit", "cargo-audit audit --db"),
+        ("cargo-deny", "cargo-deny deny check"),
+    ] {
+        let install = runs.iter().position(|run| {
+            run.contains("sha256sum -c -")
+                && run.contains(&format!("test \"$(command -v {tool})\""))
+        });
+        let gate = runs.iter().position(|run| run.contains(command));
+        assert!(
+            matches!((install, gate), (Some(i), Some(g)) if i < g),
+            "{tool}"
+        );
+    }
+    assert!(!source.contains("cargo install"));
+    let trusted = fs::read_to_string(workflows.join("trusted-publish-workspace.yaml")).unwrap();
+    assert!(!trusted.contains("simit-cargo-tools."));
 }
 
 #[test]

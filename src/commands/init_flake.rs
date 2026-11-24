@@ -327,7 +327,8 @@ fn resolve_audit_tools(
         audit: true,
         deny: cfg.ci.with_deny
             || workspace_root.join("deny.toml").exists()
-            || existing_ci_contains(workspace_root, "cargo deny check")?,
+            || existing_ci_contains(workspace_root, "cargo deny check")?
+            || existing_ci_contains(workspace_root, "cargo-deny deny check")?,
         pyo3: cargo::has_pyo3_dep(&metadata.packages),
     })
 }
