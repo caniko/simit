@@ -590,10 +590,12 @@ fn render_with_nix_setup(
     let separate_validation =
         github_prebuild || !inputs.required_gates.is_empty() || bundle_matrix || native_cargo;
     let validation_nix = inputs.artifacts.version_attr.is_some()
-        || inputs
-            .artifacts
-            .validation_nix
-            .unwrap_or(!native_cargo || !inputs.required_gates.is_empty());
+        || inputs.required_gates.iter().any(|gate| {
+            inputs
+                .artifacts
+                .validation_nix
+                .unwrap_or_else(|| shlex::Shlex::new(&gate.run).next().as_deref() == Some("nix"))
+        });
     if separate_validation {
         // No reusable build or Attic credential is admitted before event-bound
         // signed-tag validation. Every job checks out the same immutable SHA.
@@ -4217,7 +4219,10 @@ esac"#,
             ),
             (
                 "nix",
-                "test -f verified || exit 96; touch evaluated; printf '0.1.0'",
+                r#"test -f verified && [ "$1" = eval ] && [ "$2" = --raw ] || exit 96
+case "$3" in */*#demo.version) ;; *) exit 97;; esac
+touch evaluated
+printf '%s' "$TEST_FLAKE_VERSION""#,
             ),
         ] {
             let path = bin.join(name);
@@ -4246,12 +4251,13 @@ esac"#,
             .map(|line| line.strip_prefix("          ").unwrap_or(line))
             .collect::<Vec<_>>()
             .join("\n");
-        for (key_available, tag_accepted, checkout, event, accepted) in [
+        for (key_available, tag_accepted, checkout, event, flake_version, evaluated) in [
             (
                 "0",
                 "1",
                 "verified-tag-commit",
                 "verified-tag-commit",
+                "0.1.0",
                 false,
             ),
             (
@@ -4259,13 +4265,44 @@ esac"#,
                 "0",
                 "verified-tag-commit",
                 "verified-tag-commit",
+                "0.1.0",
                 false,
             ),
-            ("1", "1", "different-checkout", "verified-tag-commit", false),
-            ("1", "1", "verified-tag-commit", "different-event", false),
-            ("1", "1", "verified-tag-commit", "verified-tag-commit", true),
+            (
+                "1",
+                "1",
+                "different-checkout",
+                "verified-tag-commit",
+                "0.1.0",
+                false,
+            ),
+            (
+                "1",
+                "1",
+                "verified-tag-commit",
+                "different-event",
+                "0.1.0",
+                false,
+            ),
+            (
+                "1",
+                "1",
+                "verified-tag-commit",
+                "verified-tag-commit",
+                "0.2.0",
+                true,
+            ),
+            (
+                "1",
+                "1",
+                "verified-tag-commit",
+                "verified-tag-commit",
+                "0.1.0",
+                true,
+            ),
         ] {
             let _ = fs::remove_file(temp.path().join("tag-fetched"));
+            let _ = fs::remove_file(temp.path().join("evaluated"));
             let output = Command::new("bash")
                 .current_dir(temp.path())
                 .args(["-c", &script])
@@ -4277,10 +4314,12 @@ esac"#,
                 .env("TEST_CHECKOUT_SHA", checkout)
                 .env("TEST_KEY_AVAILABLE", key_available)
                 .env("TEST_TAG_ACCEPTED", tag_accepted)
+                .env("TEST_FLAKE_VERSION", flake_version)
                 .output()
                 .unwrap();
+            let accepted = evaluated && flake_version == "0.1.0";
             assert_eq!(output.status.success(), accepted, "{output:?}");
-            assert_eq!(temp.path().join("evaluated").exists(), accepted);
+            assert_eq!(temp.path().join("evaluated").exists(), evaluated);
             assert_eq!(temp.path().join("checked-out").exists(), accepted);
         }
     }

@@ -643,6 +643,30 @@ fn github_crate_publish_triggers(prefix: crate::release_identity::TagPrefix) -> 
     )
 }
 
+#[cfg(test)]
+#[test]
+fn forgejo_nix_workspace_validation_uses_dev_shell_cargo() {
+    let workflow = publish_workspace_workflow(
+        Platform::Forgejo,
+        Runtime::Nix,
+        &ResolvedRunner {
+            name: None,
+            labels: vec!["nix-runner".to_owned()],
+        },
+        &CiOptions::default(),
+        &[("example".to_owned(), vec![])],
+        &[("example".to_owned(), "1.0.0".to_owned())],
+        None,
+    );
+    let (_, jobs) = workflow.split_once("\n  validate:\n").unwrap();
+    let (validation, _) = jobs.split_once("\n  publish-example:\n").unwrap();
+    assert!(!validation.contains("rustup"), "{validation}");
+    assert!(
+        validation.contains("$(nix develop -c cargo pkgid -p "),
+        "{validation}"
+    );
+}
+
 fn publish_workspace_workflow(
     platform: Platform,
     runtime: Runtime,
@@ -698,6 +722,7 @@ fn publish_workspace_workflow(
     w.push_str("    steps:\n");
     push_event_checkout_step(&mut w, platform, Some(runner));
     if runtime == Runtime::Nix {
+        // Forgejo Nix runners supply Rust through the project's dev shell.
         push_install_nix_step_with_cache(
             &mut w,
             platform,
@@ -3979,7 +4004,28 @@ fn publish_workflow(
         push_provider_concurrency(&mut workflow, platform);
     }
     workflow.push_str("jobs:\n");
+    let validate_in_separate_job = runtime == Runtime::Nix;
+    if validate_in_separate_job {
+        workflow.push_str("  validate:\n");
+        push_job_github_read_permissions(&mut workflow, platform);
+        workflow.push_str(&format!("    runs-on: {}\n", runs_on(runner)));
+        workflow.push_str("    timeout-minutes: 15\n");
+        push_container(&mut workflow, platform, Runtime::Cargo, package);
+        workflow.push_str("    steps:\n");
+        push_event_checkout_step(&mut workflow, platform, Some(runner));
+        if platform == Platform::Github {
+            push_rust_setup_step(&mut workflow, platform);
+        }
+        workflow.push_str(&validate_release_tag_step(
+            Some(&package.name),
+            None,
+            options.tag_prefix,
+        ));
+    }
     workflow.push_str("  publish:\n");
+    if validate_in_separate_job {
+        workflow.push_str("    needs: validate\n");
+    }
     if platform == Platform::Github {
         push_job_github_read_permissions(&mut workflow, platform);
     } else {
@@ -4007,12 +4053,6 @@ fn publish_workflow(
                 options.nix_setup_action_ref.as_ref(),
             );
             push_nix_cargo_bin_path_step(&mut workflow);
-            workflow.push_str(&validate_release_tag_step_with_prefix(
-                Some(command_prefix(runtime)),
-                Some(&package.name),
-                None,
-                options.tag_prefix,
-            ));
             push_extra_setup_steps(&mut workflow, &options.extra_setup);
             match options.om_ci {
                 OmCiMode::Off => {
@@ -4043,8 +4083,7 @@ fn publish_workflow(
         Runtime::Cargo => {
             push_rust_setup_step(&mut workflow, platform);
             push_rust_cache_steps(&mut workflow, platform, runner);
-            workflow.push_str(&validate_release_tag_step_with_prefix(
-                Some(command_prefix(runtime)),
+            workflow.push_str(&validate_release_tag_step(
                 Some(&package.name),
                 None,
                 options.tag_prefix,
@@ -4104,12 +4143,7 @@ fn artifacts_workflow(
         workflow.push_str(&runs_on(&runners.release));
         workflow.push_str("\n    steps:\n");
         push_event_checkout_step(&mut workflow, platform, Some(&runners.release));
-        workflow.push_str(&validate_release_tag_step_with_prefix(
-            None,
-            None,
-            None,
-            options.tag_prefix,
-        ));
+        workflow.push_str(&validate_release_tag_step(None, None, options.tag_prefix));
     }
     workflow.push_str("  ");
     workflow.push_str(linux_job_name);
@@ -4126,12 +4160,7 @@ fn artifacts_workflow(
     workflow.push_str("    steps:\n");
     push_event_checkout_step(&mut workflow, platform, Some(&runners.release));
     push_required_env_step(&mut workflow, &options.required_env);
-    workflow.push_str(&validate_release_tag_step_with_prefix(
-        None,
-        None,
-        None,
-        options.tag_prefix,
-    ));
+    workflow.push_str(&validate_release_tag_step(None, None, options.tag_prefix));
     match runtime {
         Runtime::Nix => {
             push_install_nix_step(
@@ -6545,8 +6574,7 @@ fn release_trust_root_steps() -> String {
     )
 }
 
-fn validate_release_tag_step_with_prefix(
-    cargo_command_prefix: Option<&str>,
+fn validate_release_tag_step(
     package_name: Option<&str>,
     namespace: Option<&str>,
     prefix: crate::release_identity::TagPrefix,
@@ -6563,14 +6591,12 @@ fn validate_release_tag_step_with_prefix(
     } else {
         "$tag"
     };
-    let version_check = if let (Some(cargo_command_prefix), Some(package_name)) =
-        (cargo_command_prefix, package_name)
-    {
+    let version_check = if let Some(package_name) = package_name {
         let package_name = shell_word(package_name);
         format!(
             r#"
           # cargo pkgid scopes the version lookup to the crate this workflow publishes.
-          version="$({cargo_command_prefix}cargo pkgid -p {package_name} | awk -F'[#@]' 'NF > 1 {{print $NF}}' | tail -n 1)"
+          version="$(cargo pkgid -p {package_name} | awk -F'[#@]' 'NF > 1 {{print $NF}}' | tail -n 1)"
           if [ -z "$version" ]; then
             echo "Could not read package version from cargo pkgid" >&2
             exit 1

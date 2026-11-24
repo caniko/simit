@@ -176,6 +176,19 @@ fn manifest_argument(options: &CiOptions) -> String {
         .unwrap_or_default()
 }
 
+fn tag_version_expression(
+    namespace: Option<&str>,
+    prefix: crate::release_identity::TagPrefix,
+) -> String {
+    match namespace {
+        Some(package) => format!("${{GITHUB_REF_NAME#{package}/v}}"),
+        None if prefix == crate::release_identity::TagPrefix::V => {
+            "${GITHUB_REF_NAME#v}".to_owned()
+        }
+        None => "${GITHUB_REF_NAME}".to_owned(),
+    }
+}
+
 fn archive_steps_with_packaging(
     name: &str,
     runtime: Runtime,
@@ -186,16 +199,7 @@ fn archive_steps_with_packaging(
 ) -> String {
     let prefix = command_prefix(runtime);
     let quoted = shell_word(name);
-    let version_expression = namespace.map_or_else(
-        || {
-            if tag_prefix == crate::release_identity::TagPrefix::None {
-                "${GITHUB_REF_NAME}".to_owned()
-            } else {
-                format!("${{GITHUB_REF_NAME#{}}}", tag_prefix.as_str())
-            }
-        },
-        |package| format!("${{GITHUB_REF_NAME#{package}/v}}"),
-    );
+    let version_expression = tag_version_expression(namespace, tag_prefix);
     let packaging = if package {
         format!(
             "          {prefix}cargo package --locked{manifest} --allow-dirty --no-verify -p {quoted} --target-dir \"$RUNNER_TEMP/simit-package-target\"\n"
@@ -204,7 +208,7 @@ fn archive_steps_with_packaging(
         String::new()
     };
     let mut w = format!(
-        "      - name: Build immutable archive {name}\n        run: |\n          set -euo pipefail\n          version=\"{version_expression}\"\n          test \"$({prefix}cargo pkgid --locked{manifest} -p {quoted} | awk -F'[#@]' 'NF > 1 {{print $NF}}' | tail -n 1)\" = \"$version\"\n{packaging}          mkdir -p \"$RUNNER_TEMP/simit-crates/{name}\"\n          cp \"$RUNNER_TEMP/simit-package-target/package/{name}-$version.crate\" \"$RUNNER_TEMP/simit-crates/{name}/\"\n          size=\"$(wc -c < \"$RUNNER_TEMP/simit-crates/{name}/{name}-$version.crate\")\"\n          test \"$size\" -le {limit} || {{ echo \"crate {name} archive is $size bytes, over the crates.io upload limit of {limit} bytes (10 MiB)\" >&2; exit 1; }}\n",
+        "      - name: Build immutable archive {name}\n        run: |\n          set -euo pipefail\n          version=\"{version_expression}\"\n{packaging}          mkdir -p \"$RUNNER_TEMP/simit-crates/{name}\"\n          cp \"$RUNNER_TEMP/simit-package-target/package/{name}-$version.crate\" \"$RUNNER_TEMP/simit-crates/{name}/\"\n          size=\"$(wc -c < \"$RUNNER_TEMP/simit-crates/{name}/{name}-$version.crate\")\"\n          test \"$size\" -le {limit} || {{ echo \"crate {name} archive is $size bytes, over the crates.io upload limit of {limit} bytes (10 MiB)\" >&2; exit 1; }}\n",
         limit = crate::release_publisher::archive::MAX_CRATES_IO_UPLOAD_BYTES
     );
     w.push_str(&format!(
@@ -256,7 +260,28 @@ pub(super) fn source_workflow_with_namespace(
         });
         w.push_str(&github_crate_publish_triggers(options.tag_prefix));
     }
-    w.push_str("permissions:\n  contents: read\n\nconcurrency:\n  group: ${{ github.workflow_ref }}-${{ github.ref }}\n  cancel-in-progress: false\n\njobs:\n  build:\n    runs-on: ");
+    w.push_str("permissions:\n  contents: read\n\nconcurrency:\n  group: ${{ github.workflow_ref }}-${{ github.ref }}\n  cancel-in-progress: false\n\njobs:\n  validate:\n    runs-on: ");
+    w.push_str(CANDIDATE_RUNNER);
+    w.push_str("\n    timeout-minutes: 15\n    steps:\n");
+    push_event_checkout_step(&mut w, Platform::Github, None);
+    w.push_str(&validate_release_tag_step(
+        None,
+        namespace,
+        options.tag_prefix,
+    ));
+    push_rust_setup_step(&mut w, Platform::Github);
+    let manifest = manifest_argument(options);
+    w.push_str("      - name: Validate Cargo package versions\n        run: |\n          set -euo pipefail\n");
+    let version = tag_version_expression(namespace, options.tag_prefix);
+    w.push_str(&format!("          version=\"{version}\"\n"));
+    for name in names {
+        let name = shell_word(name);
+        w.push_str(&format!(
+            "          test \"$(cargo pkgid --locked{manifest} -p {name} | awk -F'[#@]' 'NF > 1 {{print $NF}}' | tail -n 1)\" = \"$version\" || {{ echo \"Cargo package {name} does not match release version $version\" >&2; exit 1; }}\n"
+        ));
+    }
+
+    w.push_str("\n  build:\n    needs: validate\n    runs-on: ");
     w.push_str(CANDIDATE_RUNNER);
     // The source build runs no gates; the first trusted verify job owns them.
     w.push_str(&format!("\n    timeout-minutes: {CANDIDATE_JOB_MINUTES}\n"));
@@ -274,12 +299,6 @@ pub(super) fn source_workflow_with_namespace(
     } else {
         push_rust_setup_step(&mut w, Platform::Github);
     }
-    w.push_str(&validate_release_tag_step_with_prefix(
-        None,
-        None,
-        namespace,
-        options.tag_prefix,
-    ));
     push_required_env_step(&mut w, &options.required_env);
     push_extra_setup_steps(&mut w, &options.extra_setup);
     if options.om_ci != OmCiMode::Off {
@@ -293,7 +312,6 @@ pub(super) fn source_workflow_with_namespace(
     if options.with_deny {
         push_deny_step(&mut w, command_prefix(runtime));
     }
-    let manifest = manifest_argument(options);
     for name in names {
         let prefix = command_prefix(runtime);
         let quoted = shell_word(name);
