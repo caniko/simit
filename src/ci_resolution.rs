@@ -240,6 +240,9 @@ impl CiInference {
             .or_else(|| workspace.map(|_| WorkspaceStrategy::Members));
 
         let runtime = infer_ci_runtime(marked)?;
+        let nextest_run = |line: &str| {
+            line.contains("cargo nextest run") || line.contains("cargo-nextest nextest run")
+        };
         Ok(Self {
             runtime: Some(runtime),
             runner: infer_primary_runner_label(marked, "ci"),
@@ -249,12 +252,12 @@ impl CiInference {
             packages,
             all_features: Some(all_content.contains("--all-features")),
             unit_tests_only: Some(all_content.lines().any(|line| {
-                (line.contains("cargo test") || line.contains("cargo nextest run"))
+                (line.contains("cargo test") || nextest_run(line))
                     && (line.contains(" --lib") || line.contains(" --bins"))
             })),
             // Keep these markers in sync with the emitting sites in
             // src/render/ci.rs: optional tool steps, om-ci, and artifact files.
-            with_nextest: Some(all_content.contains("cargo nextest run")),
+            with_nextest: Some(nextest_run(&all_content)),
             with_nix_cargo_cache: Some(
                 all_content.contains("name: Cache Nix Cargo registry + target"),
             ),
@@ -262,11 +265,15 @@ impl CiInference {
                 && all_content.contains("name: Project checks"))
             .then(|| all_content.contains("nix flake check")),
             with_msrv: Some(all_content.contains("      - name: Check MSRV\n")),
-            // GitHub runs `cargo audit`; Crow calls the binary in a `cargo-audit` step.
             with_audit: Some(
-                all_content.contains("cargo audit") || marked.iter().any(crow_audit_step),
+                all_content.contains("cargo audit")
+                    || all_content.contains("cargo-audit audit")
+                    || marked.iter().any(crow_audit_step),
             ),
-            with_deny: Some(all_content.contains("cargo deny check")),
+            with_deny: Some(
+                all_content.contains("cargo deny check")
+                    || all_content.contains("cargo-deny deny check"),
+            ),
             with_docs: Some(all_content.contains("cargo doc --no-deps --all-features")),
             with_artifacts: Some(marked.iter().any(|workflow| {
                 workflow_name(&workflow.relative_path) == Some("release-artifacts")

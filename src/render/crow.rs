@@ -21,14 +21,9 @@ use crate::render::ci::{
 use crate::render::release_workflow::ReleaseWorkflowInputs;
 use crate::user_config::{ResolvedCiRunners, ResolvedRunner};
 
-use super::ci;
+use super::{cargo_tools::Tool, ci};
 
 const DEFAULT_CROW_NIX_IMAGE: &str = "ghcr.io/cachix/devenv:latest";
-const CARGO_AUDIT_VERSION: &str = "0.23.0";
-const CARGO_AUDIT_X86_64_SHA256: &str =
-    "4f01c74ed84b2dffd0b1d37012a62cdf2a92c96e25bdf8eec7fcc0d4d3eb7811";
-const CARGO_AUDIT_AARCH64_SHA256: &str =
-    "00eff3158429b9629abe8748e971f29f99ee53d4cff54a25072cbb15167bdda8";
 
 pub struct FilesRequest<'a> {
     pub format: CrowWorkflowFormat,
@@ -305,16 +300,12 @@ fn build_workflow(
             ));
         }
         if options.om_ci != OmCiMode::Replace {
-            if options.with_nextest {
-                let command = if runtime == Runtime::Cargo {
-                    format!(
-                        "command -v cargo-nextest >/dev/null 2>&1 || cargo install cargo-nextest --locked --version {}",
-                        ci::CARGO_NEXTEST_VERSION
-                    )
-                } else {
-                    format!("{prefix}cargo-nextest --version")
-                };
-                steps.push(step("nextest-tool", image, command));
+            if options.with_nextest && runtime == Runtime::Nix {
+                steps.push(step(
+                    "nextest-tool",
+                    image,
+                    format!("{prefix}cargo-nextest --version"),
+                ));
             }
             let selector = package_selector(package, options);
             let mut modes = vec![if options.all_features {
@@ -326,10 +317,10 @@ fn build_workflow(
                 modes.push(" --no-default-features");
             }
             for (index, features) in modes.into_iter().enumerate() {
-                let harness = if options.with_nextest {
-                    "cargo nextest run"
-                } else {
-                    "cargo test"
+                let harness = match (options.with_nextest, runtime) {
+                    (true, Runtime::Cargo) => "cargo-nextest nextest run",
+                    (true, Runtime::Nix) => "cargo nextest run",
+                    (false, _) => "cargo test",
                 };
                 let name = if options.with_nextest {
                     "cargo-nextest"
@@ -342,11 +333,13 @@ fn build_workflow(
                     format!("{name}-no-default-features")
                 };
                 let targets = ci::unit_test_target_args(package, options);
-                steps.push(step(
-                    &name,
-                    image,
-                    format!("{prefix}{harness}{features}{selector}{targets}"),
-                ));
+                let test = format!("{prefix}{harness}{features}{selector}{targets}");
+                let command = if options.with_nextest && runtime == Runtime::Cargo {
+                    Tool::Nextest.crow(&test)
+                } else {
+                    test
+                };
+                steps.push(step(&name, image, command));
                 if options.with_nextest && !options.unit_tests_only && package.has_doctests() {
                     steps.push(step(
                         format!("{name}-doctests"),
@@ -386,37 +379,25 @@ fn build_workflow(
             ));
         }
         if options.repository_checks && options.with_audit {
-            let tools = if runtime == Runtime::Nix {
-                "nix shell --extra-experimental-features 'nix-command flakes' nixpkgs#git nixpkgs#cargo-audit nixpkgs#cargo -c "
-            } else {
-                ""
-            };
-            let install = if runtime == Runtime::Cargo {
+            let clone = "git -c http.lowSpeedLimit=1024 -c http.lowSpeedTime=30 clone --depth 1 https://github.com/RustSec/advisory-db.git";
+            let command = if runtime == Runtime::Nix {
+                let tools = "nix shell --extra-experimental-features 'nix-command flakes' nixpkgs#git nixpkgs#cargo-audit nixpkgs#cargo -c ";
                 format!(
-                    "case $$(uname -m) in x86_64) target=x86_64-unknown-linux-musl; sha256={CARGO_AUDIT_X86_64_SHA256} ;; aarch64) target=aarch64-unknown-linux-gnu; sha256={CARGO_AUDIT_AARCH64_SHA256} ;; *) echo 'unsupported cargo-audit architecture' >&2; exit 1 ;; esac && curl -fL -o \"$$tmp/audit.tgz\" \"https://github.com/rustsec/rustsec/releases/download/cargo-audit/v{CARGO_AUDIT_VERSION}/cargo-audit-$$target-v{CARGO_AUDIT_VERSION}.tgz\" && printf '%s  %s\\n' \"$$sha256\" \"$$tmp/audit.tgz\" | sha256sum -c && tar -xzf \"$$tmp/audit.tgz\" -C \"$$tmp\" --strip-components=1 && "
+                    "tmp=$$(mktemp -d) && trap 'rm -rf \"$$tmp\"' EXIT && {tools}{clone} \"$$tmp/advisory-db\" && {tools}cargo-audit audit --db \"$$tmp/advisory-db\" --no-fetch"
                 )
             } else {
-                String::new()
+                Tool::Audit.crow(&format!(
+                    "{clone} \"$bin/advisory-db\"\ncargo-audit audit --db \"$bin/advisory-db\" --no-fetch"
+                ))
             };
-            let audit = if runtime == Runtime::Cargo {
-                "\"$$tmp/cargo-audit\""
-            } else {
-                "cargo-audit"
-            };
-            steps.push(step(
-                "cargo-audit",
-                image,
-                format!(
-                    "tmp=$$(mktemp -d) && trap 'rm -rf \"$$tmp\"' EXIT && {install}{tools}git -c http.lowSpeedLimit=1024 -c http.lowSpeedTime=30 clone --depth 1 https://github.com/RustSec/advisory-db.git \"$$tmp/advisory-db\" && {tools}{audit} audit --db \"$$tmp/advisory-db\" --no-fetch"
-                ),
-            ));
+            steps.push(step("cargo-audit", image, command));
         }
         if options.repository_checks && options.with_deny {
-            steps.push(step(
-                "cargo-deny",
-                image,
-                format!("{prefix}cargo deny check bans licenses sources"),
-            ));
+            let command = match runtime {
+                Runtime::Cargo => Tool::Deny.crow("cargo-deny deny check bans licenses sources"),
+                Runtime::Nix => format!("{prefix}cargo deny check bans licenses sources"),
+            };
+            steps.push(step("cargo-deny", image, command));
         }
         if options.repository_checks && options.om_ci != OmCiMode::Off {
             steps.push(
