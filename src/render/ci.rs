@@ -16,6 +16,8 @@ use crate::config::{
 use crate::project::GeneratedFile;
 use crate::user_config::{ResolvedCiRunners, ResolvedRunner};
 
+use super::release_tools;
+
 pub mod custody;
 mod independent_lanes;
 use crate::config::GateRuntime;
@@ -4246,6 +4248,27 @@ fn artifacts_workflow(
             workflow.push_str("        run: nix build\n\n");
         }
         Runtime::Cargo => {
+            let needs_nix = options.homebrew.is_some()
+                || options
+                    .extra_setup
+                    .iter()
+                    .map(String::as_str)
+                    .chain(options.release_smoke_command.as_deref())
+                    .any(release_tools::command_uses_nix);
+            if needs_nix {
+                workflow.push_str("      - name: Install Nix\n        uses: ");
+                if platform == Platform::Forgejo {
+                    workflow.push_str(&immutable_action_ref(
+                        INSTALL_NIX_ACTION_URL,
+                        INSTALL_NIX_ACTION_VERSION,
+                    ));
+                } else {
+                    workflow.push_str(&github_nix_setup_action_ref(
+                        options.nix_setup_action_ref.as_ref(),
+                    ));
+                }
+                workflow.push_str("\n\n");
+            }
             push_rust_setup_step(&mut workflow, platform);
             push_rust_cache_steps(&mut workflow, platform, &runners.release);
             push_extra_setup_steps(&mut workflow, &options.extra_setup);
@@ -4253,20 +4276,14 @@ fn artifacts_workflow(
             workflow.push_str("        run: cargo build --release --locked");
             push_package_selector(&mut workflow, package, options);
             workflow.push_str("\n\n");
-            workflow.push_str("      - name: Install Nix release tools\n");
-            workflow.push_str("        uses: ");
-            let version = INSTALL_NIX_ACTION_VERSION;
-            if platform == Platform::Forgejo {
-                workflow.push_str(&immutable_action_ref(INSTALL_NIX_ACTION_URL, version));
-            } else {
-                workflow.push_str(&github_nix_setup_action_ref(
-                    options.nix_setup_action_ref.as_ref(),
-                ));
-            }
-            workflow.push_str("\n\n");
             push_sccache_stats_step(&mut workflow, platform, runtime);
         }
     }
+    if platform == Platform::Forgejo && runtime == Runtime::Cargo {
+        // The generated Debian Rust container does not ship jq.
+        workflow.push_str("      - name: Install jq in the Rust container\n        run: |\n          set -euo pipefail\n          if ! command -v jq >/dev/null; then\n            apt-get update\n            apt-get install -y --no-install-recommends jq\n          fi\n\n");
+    }
+    release_tools::push_setup(&mut workflow, &["git", "jq"], true, true);
     push_release_integrity_steps(&mut workflow, platform);
     if let Some(command) = options.release_smoke_command.as_deref() {
         push_release_smoke_step(&mut workflow, command, options.tag_prefix);
@@ -4312,7 +4329,7 @@ fn push_windows_build_job(
     }
     workflow.push_str("    steps:\n");
     push_event_checkout_step(workflow, platform, Some(windows_runner));
-    push_windows_rust_setup_step(workflow, platform);
+    push_stable_rust_setup_step(workflow, platform);
     workflow.push_str("      - name: Install Windows target\n");
     workflow.push_str("        run: rustup target add ${{ matrix.target }}\n\n");
     workflow.push_str("      - name: Build release binary\n");
@@ -4360,7 +4377,7 @@ fn push_windows_publish_job(
     workflow.push_str("          pattern: windows-*\n");
     workflow.push_str("          path: release\n");
     workflow.push_str("          merge-multiple: true\n\n");
-    push_windows_rust_setup_step(workflow, platform);
+    push_stable_rust_setup_step(workflow, platform);
     workflow.push_str("      - name: Install simit\n");
     workflow.push_str(&format!(
         "        run: {}\n\n",
@@ -4398,7 +4415,7 @@ fn windows_matrix(options: &CiOptions) -> Vec<WindowsMatrixRow> {
     rows
 }
 
-fn push_windows_rust_setup_step(workflow: &mut String, platform: Platform) {
+pub(super) fn push_stable_rust_setup_step(workflow: &mut String, platform: Platform) {
     match platform {
         Platform::Github => {
             workflow.push_str("      - name: Install Rust\n");
@@ -4903,26 +4920,21 @@ fn push_release_integrity_steps(workflow: &mut String, platform: Platform) {
     workflow.push_str("          minisign_key=\"$(mktemp)\"\n");
     workflow.push_str("          oidc_token=\"$(mktemp)\"\n");
     workflow.push_str("          cosign_key=\"$(mktemp)\"\n");
-    workflow.push_str("          export oidc_token cosign_key\n");
     workflow.push_str(
         "          cleanup() { rm -f \"$minisign_key\" \"$oidc_token\" \"$cosign_key\"; }\n",
     );
     workflow.push_str("          trap cleanup EXIT\n");
     workflow.push_str("          printf '%s' \"$MINISIGN_SECRET_KEY\" > \"$minisign_key\"\n");
     workflow.push_str("          printf '%s\\n' \"$MINISIGN_PASSWORD\" |\n");
-    workflow.push_str("            nix shell nixpkgs#minisign -c minisign -S \\\n");
+    workflow.push_str("            minisign -S \\\n");
     workflow.push_str("              -s \"$minisign_key\" \\\n");
     workflow.push_str("              -m release/SHA256SUMS.txt \\\n");
     workflow.push_str("              -x release/SHA256SUMS.txt.minisig \\\n");
     workflow.push_str("              -c \"untrusted comment: ${GITHUB_REF_NAME:-${FORGE_REF_NAME:-${CODEBERG_REF_NAME:-release}}} SHA256SUMS signature\"\n");
-    workflow.push_str("          nix shell nixpkgs#minisign -c minisign -V \\\n");
+    workflow.push_str("          minisign -V \\\n");
     workflow.push_str("            -m release/SHA256SUMS.txt \\\n");
     workflow.push_str("            -x release/SHA256SUMS.txt.minisig \\\n");
     workflow.push_str("            -p keys/minisign.pub\n\n");
-    workflow.push_str(
-        "          nix shell nixpkgs#cosign nixpkgs#curl nixpkgs#jq -c bash <<'SCRIPT'\n",
-    );
-    workflow.push_str("          set -euo pipefail\n");
     workflow.push_str(
         "          tag=\"${GITHUB_REF_NAME:-${FORGE_REF_NAME:-${CODEBERG_REF_NAME:-}}}\"\n",
     );
@@ -4983,8 +4995,7 @@ fn push_release_integrity_steps(workflow: &mut String, platform: Platform) {
     workflow.push_str("            test -s \"${file}.cosign.bundle\"\n");
     workflow.push_str("            test -s \"${file}.intoto.bundle\"\n");
     workflow.push_str("            rm -f \"$predicate\"\n");
-    workflow.push_str("          done\n");
-    workflow.push_str("          SCRIPT\n\n");
+    workflow.push_str("          done\n\n");
 }
 
 fn push_release_smoke_step(

@@ -661,6 +661,14 @@ with `--platform github`. It uploads artifacts to Codeberg when
 `[release.codeberg]` is present or to GitHub when `[release.github]` is present,
 then publishes every configured channel.
 
+Cargo release artifacts, promotion, and republish use the runner's `git`,
+`sha256sum`, and, when needed, `curl`, `jq`, and `tar`. Signing uses
+checksum-pinned minisign and Cosign on Linux x86-64 or arm64; republish only
+needs minisign. Nix is set up only for jobs that use it, such as flake builds
+or publishers that still run in a Nix environment. If a custom command needs
+Nix, invoke it explicitly in the configured shell command (for example,
+`nix develop -c ./scripts/smoke`) so the generator can detect it.
+
 Changelog candidates can be drafted independently with
 `simit changelog draft [--base-ref REF] [--dry-run]`. Set
 `[release.changelog] auto_draft = true` to run the same fail-closed drafting

@@ -3584,6 +3584,11 @@ impl ProjectConfig {
                 token_secret,
             )?;
         }
+        if self.release.artifacts.minisign_pub.contains("${{") {
+            bail!(
+                "simit project config: [release.artifacts].minisign_pub must not contain Actions expressions"
+            );
+        }
         self.release.artifacts.validate_extract()?;
         self.release.artifacts.validate_cargo()?;
         self.release.artifacts.validate_release_bundles()?;
@@ -6824,6 +6829,18 @@ mod windows_signing_tests {
 #[cfg(test)]
 mod release_bundle_tests {
     use super::*;
+
+    #[test]
+    fn minisign_public_key_rejects_actions_expressions() {
+        let config: ProjectConfig = toml_edit::de::from_str(
+            r#"[release.artifacts]
+minisign_pub = "keys/${{ github.ref_name }}.pub"
+"#,
+        )
+        .unwrap();
+        let err = config.validate_common().unwrap_err().to_string();
+        assert!(err.contains("[release.artifacts].minisign_pub"), "{err}");
+    }
 
     fn parse(toml: &str) -> Result<ArtifactsConfig> {
         let artifacts: ArtifactsConfig = toml_edit::de::from_str(toml)?;

@@ -7606,6 +7606,82 @@ fn github_chocolatey_flag_resolves_when_config_is_present() {
 }
 
 #[test]
+fn cargo_release_artifacts_set_up_nix_only_for_configured_nix_commands() {
+    for (platform, config, needs_nix) in [
+        ("github", "", false),
+        ("forgejo", "", false),
+        (
+            "github",
+            "[release.smoke]\ncommand = 'scripts/smoke'",
+            false,
+        ),
+        (
+            "github",
+            "[release.smoke]\ncommand = 'env CI=1 nix run .#smoke --'",
+            true,
+        ),
+        (
+            "github",
+            "[ci]\nextra_setup = ['if true; then nix-shell --run true; fi']",
+            true,
+        ),
+    ] {
+        let temp = init_package(true);
+        fs::write(temp.path().join("simit.toml"), config).unwrap();
+        let output = simit_with_user_config(temp.path())
+            .env("HOME", temp.path())
+            .current_dir(temp.path())
+            .args([
+                "init",
+                "ci",
+                "--platform",
+                platform,
+                "--runtime",
+                "cargo",
+                "--with-artifacts",
+            ])
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let workflow = read(
+            &temp
+                .path()
+                .join(format!(".{platform}/workflows/release-artifacts.yaml")),
+        );
+        assert_yaml_parses(&workflow);
+        assert_eq!(
+            workflow.contains("install-nix-action@"),
+            needs_nix,
+            "{config}"
+        );
+        assert_release_integrity_steps(&workflow);
+        assert!(workflow.contains("minisign-0.12-linux.tar.gz"));
+        assert!(workflow.contains("/cosign/releases/download/v3.1.4/cosign-linux-"));
+        assert_eq!(
+            workflow.contains("apt-get install -y --no-install-recommends jq"),
+            platform == "forgejo"
+        );
+        assert!(!workflow.contains("nixpkgs#minisign"));
+        assert!(!workflow.contains("nixpkgs#cosign"));
+        let find = |needle| workflow.find(needle).unwrap();
+        assert!(find("> release/SHA256SUMS.txt") < find("minisign -S"));
+        assert!(find("minisign -S") < find("minisign -V"));
+        assert!(find("minisign -V") < find("cosign sign-blob"));
+        assert!(workflow.contains("cosign sign-blob --yes --key \"$cosign_key\""));
+        assert!(workflow.contains("cosign attest-blob --yes --key \"$cosign_key\""));
+        if !needs_nix {
+            for marker in ["nix ", "nix-shell", "NIX_CONFIG"] {
+                assert!(!workflow.contains(marker), "{marker} in {workflow}");
+            }
+        }
+    }
+}
+
+#[test]
 fn release_artifact_workflow_runs_configured_smoke_before_publish() {
     let temp = init_package(true);
     write_release_smoke_config(temp.path());

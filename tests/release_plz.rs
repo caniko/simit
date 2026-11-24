@@ -17,12 +17,42 @@ fn project(config: &str) -> tempfile::TempDir {
 
 fn init(root: &Path, flags: &[&str]) -> std::process::Output {
     common::simit()
+        .env("HOME", root)
         .env("XDG_CONFIG_HOME", root.join(".xdg"))
         .current_dir(root)
         .args(["init", "ci", "--platform", "github", "--runtime", "cargo"])
         .args(flags)
         .output()
         .unwrap()
+}
+
+#[test]
+fn ci_check_accepts_generated_release_with_native_signing_tools() {
+    let temp = project(
+        "[release.github]\nrepo = \"example/demo\"\n\
+         [release.artifacts]\nprebuild_binaries = true\nsign = true\n",
+    );
+    let root = temp.path();
+    let output = init(root, &["--publish-crates"]);
+    assert!(output.status.success(), "{output:?}");
+    let output = common::simit()
+        .env("HOME", root)
+        .env("XDG_CONFIG_HOME", root.join(".xdg"))
+        .current_dir(root)
+        .args(["init", "release", "--platform", "github"])
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{output:?}");
+    let release = fs::read_to_string(root.join(".github/workflows/release.yml")).unwrap();
+    assert!(release.contains("/minisign/releases/download/"));
+    assert!(release.contains("/cosign/releases/download/"));
+
+    let output = init(root, &["--check", "--diff"]);
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
 }
 
 #[test]

@@ -127,6 +127,44 @@ jobs:
           git config --global --add url.https://github.com/.insteadOf ssh://git@github.com/
           git config --global --add url.https://github.com/.insteadOf git@github.com:
 
+      - name: Set up native release tools
+        run: |
+          set -euo pipefail
+          for tool in curl git jq sha256sum tar uname; do
+            command -v "$tool" >/dev/null || { echo "::error::Required release tool not found: $tool" >&2; exit 1; }
+          done
+          kernel="$(uname -s)"
+          arch="$(uname -m)"
+          case "$kernel/$arch" in
+            Linux/x86_64|Linux/amd64) arch=x86_64 ;;
+            Linux/aarch64|Linux/arm64) arch=aarch64 ;;
+            *) echo "::error::Unsupported release tool platform: $kernel/$arch" >&2; exit 1 ;;
+          esac
+          bin="$(mktemp -d "$RUNNER_TEMP/simit-release-tools.XXXXXXXX")"
+          trap 'rm -f -- "$bin/minisign.tar.gz" "$bin/cosign.download"' EXIT
+          download() {
+            curl -q --proto '=https' --proto-redir '=https' --tlsv1.2 -fsSL --retry 3 \
+              --connect-timeout 10 --max-time 120 --max-filesize 200000000 -o "$2" "$1"
+          }
+          archive="$bin/minisign.tar.gz"
+          download 'https://github.com/jedisct1/minisign/releases/download/0.12/minisign-0.12-linux.tar.gz' "$archive"
+          printf '%s  %s\n' '9a599b48ba6eb7b1e80f12f36b94ceca7c00b7a5173c95c3efc88d9822957e73' "$archive" | sha256sum --check --strict
+          tar -xzf "$archive" --strip-components=2 -C "$bin" -- "minisign-linux/$arch/minisign"
+          case "$arch" in
+            x86_64) target=amd64; sha256=424e2c97d0b45fd7a6b608a87f090f35633f4c23ece5f092d48bba11aaf4bbfa ;;
+            aarch64) target=arm64; sha256=ade83b7aac62e131cacfe96d958948b2150cc9efec46a570a2649b8e27dedad2 ;;
+          esac
+          binary="$bin/cosign.download"
+          download "https://github.com/sigstore/cosign/releases/download/v3.1.4/cosign-linux-$target" "$binary"
+          printf '%s  %s\n' "$sha256" "$binary" | sha256sum --check --strict
+          chmod 0755 "$binary"
+          mv -- "$binary" "$bin/cosign"
+          export PATH="$bin:$PATH"
+          test "$(command -v minisign)" = "$bin/minisign" || { echo "::error::PATH did not resolve minisign to the verified $bin/minisign" >&2; exit 1; }
+          test "$(command -v cosign)" = "$bin/cosign" || { echo "::error::PATH did not resolve cosign to the verified $bin/cosign" >&2; exit 1; }
+          minisign -v
+          cosign version
+          printf '%s\n' "$bin" >> "$GITHUB_PATH"
       - name: Validate tag
         env:
           GITHUB_TOKEN: ${{ github.token }}
@@ -209,15 +247,15 @@ jobs:
             printf 'Missing release credentials:%s\n' "$missing" >&2
             exit 1
           fi
-          test -s keys/minisign.pub
+          test -s 'keys/minisign.pub'
           umask 077
           minisign_key="$(mktemp)"; minisign_probe="$(mktemp)"; minisign_sig="${minisign_probe}.minisig"
           trap 'rm -f "$minisign_key" "$minisign_probe" "$minisign_sig"' EXIT
           printf '%s' "$MINISIGN_SECRET_KEY" > "$minisign_key"
           printf 'simit release credentials probe\n' > "$minisign_probe"
           printf '%s\n' "$MINISIGN_PASSWORD" | \
-            nix shell nixpkgs#minisign -c minisign -S -s "$minisign_key" -m "$minisign_probe" -x "$minisign_sig"
-          nix shell nixpkgs#minisign -c minisign -V -m "$minisign_probe" -x "$minisign_sig" -p keys/minisign.pub
+            minisign -S -s "$minisign_key" -m "$minisign_probe" -x "$minisign_sig"
+          minisign -V -m "$minisign_probe" -x "$minisign_sig" -p 'keys/minisign.pub'
       - name: Build release artifacts
         run: |
           set -euo pipefail
@@ -275,20 +313,17 @@ jobs:
         run: |
           set -euo pipefail
           . ./release-env
-          test -s keys/minisign.pub
+          test -s 'keys/minisign.pub'
           test -n "${MINISIGN_SECRET_KEY:-}"
           test -n "${MINISIGN_PASSWORD:-}"
           umask 077
-          minisign_key="$(mktemp)"; oidc_token="$(mktemp)"; cosign_key="$(mktemp)"; export oidc_token cosign_key
+          minisign_key="$(mktemp)"; oidc_token="$(mktemp)"; cosign_key="$(mktemp)"
           trap 'rm -f "$minisign_key" "$oidc_token" "$cosign_key"' EXIT
           printf '%s' "$MINISIGN_SECRET_KEY" > "$minisign_key"
           printf '%s\n' "$MINISIGN_PASSWORD" | \
-            nix shell nixpkgs#minisign -c minisign -S -s "$minisign_key" -m release/SHA256SUMS.txt -x release/SHA256SUMS.txt.minisig
-          nix shell nixpkgs#minisign -c minisign -V -m release/SHA256SUMS.txt -x release/SHA256SUMS.txt.minisig -p keys/minisign.pub
+            minisign -S -s "$minisign_key" -m release/SHA256SUMS.txt -x release/SHA256SUMS.txt.minisig
+          minisign -V -m release/SHA256SUMS.txt -x release/SHA256SUMS.txt.minisig -p 'keys/minisign.pub'
 
-          nix shell nixpkgs#cosign nixpkgs#curl nixpkgs#jq -c bash <<'SCRIPT'
-          set -euo pipefail
-          . ./release-env
           repo_url="https://github.com/caniko/simit"
           git_sha="$(git rev-parse HEAD)"
           workflow_sha="$(sha256sum .github/workflows/release.yml | awk '{print $1}')"
@@ -309,7 +344,6 @@ jobs:
             test -s "${file}.intoto.bundle"
             rm -f "$predicate"
           done < <(printf '%s\n' "${files[@]}" | LC_ALL=C sort -u)
-          SCRIPT
       - name: Publish GitHub release
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -318,9 +352,6 @@ jobs:
         run: |
           set -euo pipefail
           test -n "$GITHUB_TOKEN"
-          . ./release-env
-          nix shell nixpkgs#curl nixpkgs#jq -c bash <<'SCRIPT'
-          set -euo pipefail
           . ./release-env
           release_payload=$(jq -n --arg tag "$TAG" --arg name "$TAG" --arg branch "trunk" --argjson prerelease "$IS_PRERELEASE" --rawfile body release-notes.md '{tag_name: $tag, target_commitish: $branch, name: $name, body: $body, draft: false, prerelease: $prerelease}')
           status=$(curl -sS -o release.json -w '%{http_code}' -H "Authorization: Bearer $GITHUB_TOKEN" -H 'Accept: application/vnd.github+json' -H 'X-GitHub-Api-Version: 2022-11-28' -d "$release_payload" "$GITHUB_API/repos/$GITHUB_REPO/releases")
@@ -344,4 +375,3 @@ jobs:
             if [ -n "$asset_id" ]; then curl -sS --fail -X DELETE -H "Authorization: Bearer $GITHUB_TOKEN" -H 'Accept: application/vnd.github+json' "$GITHUB_API/repos/$GITHUB_REPO/releases/assets/$asset_id"; fi
             curl -sS --fail -H "Authorization: Bearer $GITHUB_TOKEN" -H 'Accept: application/vnd.github+json' -H 'Content-Type: application/octet-stream' --data-binary "@$file" "$upload_url?name=$name" > /dev/null
           done < <(printf '%s\n' "${files[@]}" | LC_ALL=C sort -u)
-          SCRIPT
