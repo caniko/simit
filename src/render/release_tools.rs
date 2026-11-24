@@ -104,27 +104,36 @@ pub(super) fn command_uses_nix(run: &str) -> bool {
                 })
                 .peekable();
             'launch: while let Some(Some(word)) = words.next() {
-                match word.rsplit('/').next().unwrap_or(&word) {
-                    "nix" | "nix-shell" | "nix-build" | "nix-env" | "nix-store"
-                    | "nix-instantiate" | "nix-channel" | "nix-copy-closure"
-                    | "nix-prefetch-url" => return true,
-                    "env" | "command" | "exec" | "sudo" => {
-                        while let Some(Some(option)) = words.next_if(|word| {
-                            word.as_deref()
-                                .is_some_and(|word| word.starts_with('-') || word.contains('='))
-                        }) {
-                            match option.as_str() {
-                                "-u" | "--unset" | "-g" | "--group" | "--user" | "-C"
-                                | "--chdir" | "-a" => {
-                                    words.next();
-                                }
-                                "-v" | "-V" if word == "command" => break 'launch,
-                                _ => {}
-                            }
-                        }
-                    }
+                let name = word.rsplit('/').next().unwrap_or(&word);
+                if name == "nix" || name.starts_with("nix-") {
+                    return true;
+                }
+                let value_options: &[&str] = match name {
+                    "timeout" => &["-k", "--kill-after", "-s", "--signal"],
+                    "env" => &[
+                        "-u",
+                        "--unset",
+                        "-C",
+                        "--chdir",
+                        "-a",
+                        "--argv0",
+                        "--env0-from",
+                    ],
+                    "nice" => &["-n", "--adjustment"],
+                    "time" => &["-f", "--format", "-o", "--output"],
+                    "exec" => &["-a"],
+                    "sudo" => &["-u", "--user", "-g", "--group", "-C", "--chdir"],
+                    "stdbuf" => &["-i", "--input", "-o", "--output", "-e", "--error"],
+                    "nohup" | "command" => &[],
                     "bash" | "sh" => {
                         while let Some(Some(flag)) = words.next() {
+                            if matches!(
+                                flag.as_str(),
+                                "-o" | "+o" | "-O" | "+O" | "--rcfile" | "--init-file"
+                            ) {
+                                words.next();
+                                continue;
+                            }
                             if !flag.starts_with('-') || flag == "--" {
                                 break;
                             }
@@ -140,6 +149,32 @@ pub(super) fn command_uses_nix(run: &str) -> bool {
                         break;
                     }
                     _ => break,
+                };
+                while let Some(Some(option)) = words.next_if(|word| {
+                    word.as_deref()
+                        .is_some_and(|word| word.starts_with('-') && word != "-")
+                }) {
+                    if option == "--" {
+                        break;
+                    }
+                    if name == "command" && (option.contains('v') || option.contains('V')) {
+                        break 'launch;
+                    }
+                    if value_options.contains(&option.as_str()) {
+                        words.next();
+                    }
+                }
+                if matches!(name, "env" | "sudo") {
+                    if name == "env" {
+                        words.next_if(|word| word.as_deref() == Some("-"));
+                    }
+                    while words
+                        .next_if(|word| word.as_deref().is_some_and(|word| word.contains('=')))
+                        .is_some()
+                    {}
+                }
+                if name == "timeout" {
+                    words.next(); // Duration, not the executable.
                 }
             }
         }
@@ -151,6 +186,32 @@ pub(super) fn command_uses_nix(run: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn configured_commands_detect_nix_through_wrappers() {
+        for snippet in [
+            "timeout 60 nix build .#bundle",
+            "timeout -k 10 60 nix eval .#x",
+            "timeout --signal TERM --kill-after=10 -- 60 nix build .#x",
+            "env FOO=1 nice -n 5 nix run .#x",
+            "env -u FOO --chdir /tmp -- nix run .#x",
+            r#"bash -lc "nix build .#x""#,
+            "bash -o errexit -c 'timeout 60 nix build .#x'",
+            "nohup time -p stdbuf -o L command -- exec sh -c 'nix build .#x'",
+        ] {
+            assert!(command_uses_nix(snippet), "{snippet}");
+        }
+        for snippet in [
+            "timeout 60 ./bin/app --nix-mode",
+            "env -u nix timeout 60 echo nix",
+            "env -a nix echo build",
+            "time -o nix echo build",
+            "command -v nix",
+            "env -- echo nix",
+        ] {
+            assert!(!command_uses_nix(snippet), "{snippet}");
+        }
+    }
 
     #[test]
     fn configured_commands_detect_executable_nix_not_literal_data() {

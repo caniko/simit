@@ -1040,9 +1040,8 @@ fn republish_assets(inputs: &ReleaseWorkflowInputs<'_>, channel: &str) -> Vec<St
     }
 }
 
-/// Gate every step of a rendered channel on the channel being selected.
-fn gate_channel_steps(steps: &str, channel: &str) -> String {
-    let cond = format!("steps.republish.outputs.{channel} == 'true'");
+/// Add a condition to each rendered step, preserving any existing condition.
+fn gate_steps(steps: &str, cond: &str) -> String {
     let mut out = String::new();
     for (i, chunk) in steps.split("      - name:").enumerate() {
         if i == 0 {
@@ -1151,7 +1150,7 @@ fn push_republish_job(
     writeln!(
         w,
         "          test -s {pub_key}\n          minisign -V -m release/SHA256SUMS.txt -x release/SHA256SUMS.txt.minisig -p {pub_key}",
-        pub_key = inputs.artifacts.minisign_pub
+        pub_key = shell_quote(&inputs.artifacts.minisign_pub)
     )
     .expect("write");
     w.push_str("          need=()\n");
@@ -1183,7 +1182,10 @@ fn push_republish_job(
     let mut channel_steps = |channel: &str, f: &dyn Fn(&mut String)| {
         let mut steps = String::new();
         f(&mut steps);
-        w.push_str(&gate_channel_steps(&steps, channel));
+        w.push_str(&gate_steps(
+            &steps,
+            &format!("steps.republish.outputs.{channel} == 'true'"),
+        ));
     };
     if let Some(aur) = inputs.aur {
         channel_steps("aur", &|s| push_publish_aur(s, aur, activated_remote));
@@ -1709,7 +1711,8 @@ fn push_release_credentials_preflight(
     w.push_str("            exit 1\n");
     w.push_str("          fi\n");
     if inputs.artifacts.sign {
-        writeln!(w, "          test -s {}", inputs.artifacts.minisign_pub).expect("write");
+        let pub_key = shell_quote(&inputs.artifacts.minisign_pub);
+        writeln!(w, "          test -s {pub_key}").expect("write");
         w.push_str("          umask 077\n");
         w.push_str("          minisign_key=\"$(mktemp)\"; minisign_probe=\"$(mktemp)\"; minisign_sig=\"${minisign_probe}.minisig\"\n");
         w.push_str(
@@ -1721,8 +1724,7 @@ fn push_release_credentials_preflight(
         w.push_str("            minisign -S -s \"$minisign_key\" -m \"$minisign_probe\" -x \"$minisign_sig\"\n");
         writeln!(
             w,
-            "          minisign -V -m \"$minisign_probe\" -x \"$minisign_sig\" -p {}",
-            inputs.artifacts.minisign_pub
+            "          minisign -V -m \"$minisign_probe\" -x \"$minisign_sig\" -p {pub_key}",
         )
         .expect("write");
     }
@@ -2151,7 +2153,8 @@ fn push_sign(
     w.push_str("          COSIGN_PRIVATE_KEY: ${{ secrets.COSIGN_PRIVATE_KEY }}\n");
     w.push_str("          COSIGN_PASSWORD: ${{ secrets.COSIGN_PASSWORD }}\n");
     w.push_str("        run: |\n          set -euo pipefail\n          . ./release-env\n");
-    writeln!(w, "          test -s {}", artifacts.minisign_pub).expect("write");
+    let pub_key = shell_quote(&artifacts.minisign_pub);
+    writeln!(w, "          test -s {pub_key}").expect("write");
     w.push_str("          test -n \"${MINISIGN_SECRET_KEY:-}\"\n          test -n \"${MINISIGN_PASSWORD:-}\"\n");
     w.push_str("          umask 077\n          minisign_key=\"$(mktemp)\"; oidc_token=\"$(mktemp)\"; cosign_key=\"$(mktemp)\"\n");
     w.push_str("          trap 'rm -f \"$minisign_key\" \"$oidc_token\" \"$cosign_key\"' EXIT\n");
@@ -2160,8 +2163,7 @@ fn push_sign(
     w.push_str("            minisign -S -s \"$minisign_key\" -m release/SHA256SUMS.txt -x release/SHA256SUMS.txt.minisig\n");
     writeln!(
         w,
-        "          minisign -V -m release/SHA256SUMS.txt -x release/SHA256SUMS.txt.minisig -p {}\n",
-        artifacts.minisign_pub
+        "          minisign -V -m release/SHA256SUMS.txt -x release/SHA256SUMS.txt.minisig -p {pub_key}\n",
     )
     .expect("write");
 
@@ -2925,21 +2927,14 @@ fn push_publish_homebrew(
 }
 
 fn push_publish_scoop(w: &mut String, platform: Platform, scoop: &ResolvedScoop, soft_skip: bool) {
-    super::ci::push_stable_rust_setup_step(w, platform);
-    writeln!(
-        w,
-        "      - name: Install Simit for Scoop\n        run: {} --root \"$RUNNER_TEMP/simit-scoop\"",
-        super::simit_cargo_install()
-    )
-    .expect("write");
-    w.push_str("      - name: Publish Scoop bucket\n        env:\n");
-    writeln!(
-        w,
+    let token_env = format!(
         "          SCOOP_BUCKET_TOKEN: ${{{{ secrets.{} }}}}",
         scoop.bucket_token_secret
-    )
-    .expect("write");
-    writeln!(w, "          SCOOP_BUCKET_URL: {}", scoop.bucket_url).expect("write");
+    );
+    w.push_str(
+        "      - name: Decide whether to publish Scoop\n        id: scoop_gate\n        env:\n",
+    );
+    writeln!(w, "{token_env}").expect("write");
     w.push_str("        run: |\n          set -euo pipefail\n");
     push_stable_guard(w, "Scoop bucket update");
     if soft_skip {
@@ -2962,13 +2957,39 @@ fn push_publish_scoop(w: &mut String, platform: Platform, scoop: &ResolvedScoop,
             writeln!(w, "          test -s \"release/{arm64_zip}\"").expect("write");
         }
     }
-    w.push_str("          \"$RUNNER_TEMP/simit-scoop/bin/simit\" dist scoop bump --version \"$VERSION\" --bucket-url \"$SCOOP_BUCKET_URL\" --bucket-token-env SCOOP_BUCKET_TOKEN --work-dir scoop-bucket \\\n");
-    writeln!(w, "            --archive \"x64=release/{x64_zip}\" \\").expect("write");
+    w.push_str("          printf 'enabled=true\\n' >> \"$GITHUB_OUTPUT\"\n");
+
+    // Build Simit without the Scoop credential, and only if publishing can proceed.
+    let mut steps = String::new();
+    super::ci::push_stable_rust_setup_step(&mut steps, platform);
+    writeln!(
+        steps,
+        "      - name: Install Simit for Scoop\n        run: {} --root \"$RUNNER_TEMP/simit-scoop\"",
+        super::simit_cargo_install()
+    )
+    .expect("write");
+    writeln!(
+        steps,
+        "      - name: Publish Scoop bucket\n        env:\n{token_env}\n          SCOOP_BUCKET_URL: {}",
+        scoop.bucket_url
+    )
+    .expect("write");
+    steps.push_str("        run: |\n          set -euo pipefail\n          . ./release-env\n");
+    steps.push_str("          \"$RUNNER_TEMP/simit-scoop/bin/simit\" dist scoop bump --version \"$VERSION\" --bucket-url \"$SCOOP_BUCKET_URL\" --bucket-token-env SCOOP_BUCKET_TOKEN --work-dir scoop-bucket \\\n");
+    writeln!(steps, "            --archive \"x64=release/{x64_zip}\" \\").expect("write");
     if scoop.architectures.arm64 {
         let arm64_zip = scoop_windows_archive(scoop, "aarch64");
-        writeln!(w, "            --archive \"arm64=release/{arm64_zip}\" \\").expect("write");
+        writeln!(
+            steps,
+            "            --archive \"arm64=release/{arm64_zip}\" \\"
+        )
+        .expect("write");
     }
-    w.push_str("            --push\n");
+    steps.push_str("            --push\n");
+    w.push_str(&gate_steps(
+        &steps,
+        "steps.scoop_gate.outputs.enabled == 'true'",
+    ));
 }
 
 /// Uploads the wheels the release build left in `release/`; nothing is built
@@ -6093,6 +6114,7 @@ cat "$FAKE/code"
         };
         let artifacts = ArtifactsConfig {
             sign,
+            minisign_pub: "keys/release key.pub".into(),
             ..artifacts()
         };
         let mut inputs = ReleaseWorkflowInputs {
@@ -6138,6 +6160,69 @@ cat "$FAKE/code"
             .iter()
             .find(|s| s["name"].as_str() == Some(name))
             .unwrap_or_else(|| panic!("no step {name}"))
+    }
+
+    #[test]
+    fn minisign_public_key_paths_are_shell_quoted() {
+        let (workflow, _) = republish_doc(false, true, |_| {});
+        assert_eq!(
+            workflow.matches("test -s 'keys/release key.pub'").count(),
+            3
+        );
+        assert_eq!(workflow.matches(" -p 'keys/release key.pub'").count(), 3);
+    }
+
+    #[test]
+    fn scoop_checks_skip_conditions_before_installing_rust_and_simit() {
+        for (platform, soft_skip) in [(Platform::Forgejo, true), (Platform::Github, false)] {
+            let mut workflow = String::new();
+            push_publish_scoop(&mut workflow, platform, &scoop(), soft_skip);
+            let selected = "steps.republish.outputs.scoop == 'true'";
+            let workflow = gate_steps(&workflow, selected);
+            let steps: Vec<serde_yaml::Value> = serde_yaml::from_str(&workflow).unwrap();
+            assert_eq!(steps.len(), 4, "{workflow}");
+            assert_eq!(steps[0]["id"].as_str(), Some("scoop_gate"));
+            assert_eq!(steps[0]["if"].as_str(), Some(selected));
+            let script = steps[0]["run"].as_str().unwrap();
+            let at = |marker| {
+                script
+                    .find(marker)
+                    .unwrap_or_else(|| panic!("missing {marker}"))
+            };
+            let enable = at(">> \"$GITHUB_OUTPUT\"");
+            assert!(at("skipping Scoop bucket update") < enable);
+            if soft_skip {
+                assert!(at("publisher_missing scoop 'SCOOP_BUCKET_TOKEN unset'") < enable);
+                assert!(at("publisher_missing scoop \"missing release/") < enable);
+                assert!(
+                    steps[1]["run"]
+                        .as_str()
+                        .unwrap()
+                        .contains("rustup toolchain install")
+                );
+            } else {
+                assert!(at("SCOOP_BUCKET_TOKEN is required") < enable);
+                assert!(
+                    steps[1]["uses"]
+                        .as_str()
+                        .unwrap()
+                        .starts_with("dtolnay/rust-toolchain@")
+                );
+            }
+            let condition = format!("{selected} && (steps.scoop_gate.outputs.enabled == 'true')");
+            for step in &steps[1..] {
+                assert_eq!(step["if"].as_str(), Some(condition.as_str()));
+            }
+            assert!(steps[1]["env"].is_null());
+            assert!(steps[2]["env"].is_null());
+            assert!(steps[2]["run"].as_str().unwrap().contains("cargo install"));
+            assert!(
+                steps[3]["run"]
+                    .as_str()
+                    .unwrap()
+                    .contains("dist scoop bump")
+            );
+        }
     }
 
     #[test]
@@ -6443,7 +6528,7 @@ cat "$FAKE/code"
             .as_str()
             .unwrap()
             .to_owned();
-        assert!(script.contains("minisign -V -m release/SHA256SUMS.txt -x release/SHA256SUMS.txt.minisig -p keys/minisign.pub"));
+        assert!(script.contains("minisign -V -m release/SHA256SUMS.txt -x release/SHA256SUMS.txt.minisig -p 'keys/release key.pub'"));
         assert!(script.contains("sha256sum -c --strict ../release-selected.sums"));
         assert!(script.contains("*,winget,*) need+=(\"sorrel-${VERSION}-x86_64-windows.zip\")"));
         assert!(script.contains("need+=(\"*.whl\")"));
@@ -6546,7 +6631,7 @@ cat "$FAKE/code"
             std::fs::create_dir_all(p.join("assets")).unwrap();
             std::fs::create_dir_all(p.join("bin")).unwrap();
             std::fs::create_dir_all(p.join("keys")).unwrap();
-            std::fs::write(p.join("keys/minisign.pub"), "pub").unwrap();
+            std::fs::write(p.join("keys/release key.pub"), "pub").unwrap();
             std::fs::write(
                 p.join("release-env"),
                 "TAG=1.2.3\nVERSION=1.2.3\nIS_PRERELEASE=false\n",
