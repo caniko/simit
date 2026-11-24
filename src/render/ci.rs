@@ -18,6 +18,7 @@ use crate::user_config::{ResolvedCiRunners, ResolvedRunner};
 
 pub mod custody;
 mod independent_lanes;
+use crate::config::GateRuntime;
 pub mod local;
 mod nix_dependencies;
 mod nix_groups;
@@ -451,12 +452,24 @@ fn files_for_scope(request: FilesRequest<'_>, primary_only: bool) -> Result<Vec<
     if request.options.independent_lanes
         && (request.platform != Platform::Github
             || request.provider != CiProvider::Actions
-            || request.runtime != Runtime::Nix
             || !request.step_runners.is_empty()
             || request.options.om_ci != OmCiMode::Off)
     {
         bail!(
-            "[ci].independent_lanes requires GitHub Actions Rust/Nix without step_runners or om_ci"
+            "[ci].independent_lanes requires GitHub Actions Rust CI without step_runners or om_ci"
+        );
+    }
+    if request.platform == Platform::Forgejo
+        && request.runtime == Runtime::Cargo
+        && let Some(gate) = request
+            .options
+            .required_gates
+            .iter()
+            .find(|gate| gate.runtime == Some(GateRuntime::Nix))
+    {
+        bail!(
+            "required gate `{}` needs Nix, but Forgejo Cargo CI does not set up Nix; use GitHub Actions or run Forgejo with [ci].runtime = \"nix\" on a Nix runner",
+            gate.id
         );
     }
     if request.provider == CiProvider::Crow {
@@ -777,6 +790,7 @@ fn publish_workspace_workflow(
     // Required gates as prerequisite jobs (exact revision, failure blocks publish).
     let mut previous = "validate".to_owned();
     for gate in &options.required_gates {
+        let gate_runtime = gate.runtime.unwrap_or_else(|| runtime.into());
         let job = format!("gate-{}", sanitize_gate_id(&gate.id));
         w.push_str(&format!("  {job}:\n"));
         w.push_str(&format!("    needs: [{previous}]\n"));
@@ -788,26 +802,21 @@ fn publish_workspace_workflow(
         let mut gate_env: std::collections::BTreeMap<String, String> =
             options.extra_env.iter().cloned().collect();
         gate_env.extend(gate.env.clone());
-        push_job_env(
+        push_gate_env(
             &mut w,
             platform,
-            runtime,
+            gate_runtime,
             &gate_env.into_iter().collect::<Vec<_>>(),
-            true,
         );
         w.push_str("    steps:\n");
         push_event_checkout_step(&mut w, platform, Some(runner));
-        if runtime == Runtime::Nix {
-            push_install_nix_step_with_cache(
-                &mut w,
-                platform,
-                &options.nix_substituters,
-                &options.nix_trusted_public_keys,
-                options.nix_setup_action_ref.as_ref(),
-            );
-        } else {
-            push_rust_setup_step(&mut w, platform);
-        }
+        push_gate_setup(
+            &mut w,
+            platform,
+            gate_runtime,
+            (&options.nix_substituters, &options.nix_trusted_public_keys),
+            options.nix_setup_action_ref.as_ref(),
+        );
         w.push_str("      - name: Required gate ");
         w.push_str(&gate.id);
         w.push_str("\n        run: ");
@@ -3012,7 +3021,7 @@ fn ci_workflow(
     step_runners: &BTreeMap<String, ResolvedRunner>,
 ) -> String {
     if options.independent_lanes {
-        independent_lanes::render(platform, package, self_check, runners, options)
+        independent_lanes::render(platform, runtime, package, self_check, runners, options)
     } else if step_runners.is_empty() {
         ci_workflow_single_job(platform, runtime, package, self_check, runners, options)
     } else {
@@ -3127,29 +3136,14 @@ fn ci_workflow_single_job(
             }
         }
         Runtime::Cargo => {
-            push_rust_setup_step(&mut workflow, platform);
-            push_rust_cache_steps(&mut workflow, platform, &runners.ci);
-            push_extra_setup_steps(&mut workflow, &options.extra_setup);
-            if let Some(command) = options.check_command.as_deref() {
-                workflow.push_str(&project_check_step_yaml(runtime, command));
-            } else {
-                if options.repository_checks {
-                    workflow.push_str(
-                        "      - name: Format check\n        run: cargo fmt --all -- --check\n\n",
-                    );
-                }
-                push_test_steps(&mut workflow, runtime, package, &options);
-                push_quality_ci_steps(&mut workflow, runtime, &options);
-                push_optional_ci_steps(&mut workflow, runtime, package, &options);
-                if self_check.enabled {
-                    push_self_check_steps(&mut workflow, platform, runtime, self_check, &options);
-                }
-                push_clippy_steps(&mut workflow, runtime, package, &options);
-                push_package_crate_step(&mut workflow, package, &options);
-            }
-            if options.check_command.is_some() && self_check.enabled {
-                push_self_check_steps(&mut workflow, platform, runtime, self_check, &options);
-            }
+            push_cargo_ci_steps(
+                &mut workflow,
+                platform,
+                package,
+                self_check,
+                &runners.ci,
+                &options,
+            );
         }
     }
 
@@ -3171,6 +3165,39 @@ fn ci_workflow_single_job(
         options.package_scoped.then_some(package.name.as_str()),
     );
     workflow
+}
+
+fn push_cargo_ci_steps(
+    workflow: &mut String,
+    platform: Platform,
+    package: &Package,
+    self_check: SelfCheckOptions<'_>,
+    runner: &ResolvedRunner,
+    options: &CiOptions,
+) {
+    let runtime = Runtime::Cargo;
+    push_rust_setup_step(workflow, platform);
+    push_rust_cache_steps(workflow, platform, runner);
+    push_extra_setup_steps(workflow, &options.extra_setup);
+    if let Some(command) = options.check_command.as_deref() {
+        workflow.push_str(&project_check_step_yaml(runtime, command));
+        if self_check.enabled {
+            push_self_check_steps(workflow, platform, runtime, self_check, options);
+        }
+        return;
+    }
+    if options.repository_checks {
+        workflow
+            .push_str("      - name: Format check\n        run: cargo fmt --all -- --check\n\n");
+    }
+    push_test_steps(workflow, runtime, package, options);
+    push_quality_ci_steps(workflow, runtime, options);
+    push_optional_ci_steps(workflow, runtime, package, options);
+    if self_check.enabled {
+        push_self_check_steps(workflow, platform, runtime, self_check, options);
+    }
+    push_clippy_steps(workflow, runtime, package, options);
+    push_package_crate_step(workflow, package, options);
 }
 
 fn runner_for_step<'a>(
@@ -3527,6 +3554,7 @@ fn push_required_gate_jobs(
         return;
     }
     for gate in &options.required_gates {
+        let gate_runtime = gate.runtime.unwrap_or_else(|| runtime.into());
         let job = format!("gate-{}", sanitize_gate_id(&gate.id));
         trim_trailing_blank_lines(workflow);
         workflow.push_str(&format!("\n  {job}:\n"));
@@ -3548,12 +3576,14 @@ fn push_required_gate_jobs(
         let mut gate_env: std::collections::BTreeMap<String, String> =
             options.extra_env.iter().cloned().collect();
         gate_env.extend(gate.env.clone());
-        push_job_env(
+        if gate.runtime == Some(GateRuntime::Cargo) {
+            push_container(workflow, platform, Runtime::Cargo, package);
+        }
+        push_gate_env(
             workflow,
             platform,
-            runtime,
+            gate_runtime,
             &gate_env.into_iter().collect::<Vec<_>>(),
-            true,
         );
         workflow.push_str("    steps:\n");
         if options.independent_lanes {
@@ -3561,17 +3591,16 @@ fn push_required_gate_jobs(
         } else {
             push_checkout_step(workflow, platform, &runners.ci);
         }
-        if runtime == Runtime::Nix {
-            push_install_nix_step_with_cache(
-                workflow,
-                platform,
+        push_gate_setup(
+            workflow,
+            platform,
+            gate_runtime,
+            (
                 &options.ci_nix_substituters,
                 &options.ci_nix_trusted_public_keys,
-                options.nix_setup_action_ref.as_ref(),
-            );
-        } else {
-            push_rust_setup_step(workflow, platform);
-        }
+            ),
+            options.nix_setup_action_ref.as_ref(),
+        );
         workflow.push_str("      - name: Required gate ");
         workflow.push_str(&gate.id);
         workflow.push('\n');
@@ -3586,6 +3615,40 @@ fn push_required_gate_jobs(
         workflow.push_str(&gate.run);
         workflow.push('\n');
         push_required_gate_artifacts(workflow, gate, Some(&runners.ci), "", ("", ""));
+    }
+}
+
+pub(crate) fn push_gate_env(
+    workflow: &mut String,
+    platform: Platform,
+    runtime: GateRuntime,
+    env: &[(String, String)],
+) {
+    let env_runtime = if runtime == GateRuntime::Nix {
+        Runtime::Nix
+    } else {
+        Runtime::Cargo
+    };
+    push_job_env(workflow, platform, env_runtime, env, true);
+}
+
+pub(crate) fn push_gate_setup(
+    workflow: &mut String,
+    platform: Platform,
+    runtime: GateRuntime,
+    nix_cache: (&[String], &[String]),
+    nix_setup: Option<&NixSetupActionRef>,
+) {
+    match runtime {
+        GateRuntime::Nix => push_install_nix_step_with_cache(
+            workflow,
+            platform,
+            nix_cache.0,
+            nix_cache.1,
+            nix_setup,
+        ),
+        GateRuntime::Cargo => push_rust_setup_step(workflow, platform),
+        GateRuntime::Shell => {}
     }
 }
 
@@ -3747,6 +3810,7 @@ pub(crate) fn target_smokes_file_with_nix_setup(
         let gate = crate::config::RequiredGate {
             id: smoke.id.clone(),
             run: smoke.run.clone(),
+            runtime: None,
             timeout_minutes: smoke.timeout_minutes,
             env: smoke.env.clone(),
             artifacts: smoke.artifacts.clone(),

@@ -589,8 +589,12 @@ fn render_with_nix_setup(
     let native_cargo = !inputs.artifacts.cargo.is_empty();
     let separate_validation =
         github_prebuild || !inputs.required_gates.is_empty() || bundle_matrix || native_cargo;
+    let (inline_gates, separate_gates): (Vec<_>, Vec<_>) = inputs
+        .required_gates
+        .iter()
+        .partition(|gate| gate.runtime.is_none());
     let validation_nix = inputs.artifacts.version_attr.is_some()
-        || inputs.required_gates.iter().any(|gate| {
+        || inline_gates.iter().any(|gate| {
             inputs
                 .artifacts
                 .validation_nix
@@ -599,17 +603,18 @@ fn render_with_nix_setup(
     if separate_validation {
         // No reusable build or Attic credential is admitted before event-bound
         // signed-tag validation. Every job checks out the same immutable SHA.
-        w.push_str("  validate:\n");
+        let tag_job = if separate_gates.is_empty() {
+            "validate"
+        } else {
+            "validate-tag"
+        };
+        writeln!(w, "  {tag_job}:").expect("write");
         w.push_str(not_republish);
         w.push_str("    permissions:\n      contents: read\n");
         writeln!(
             w,
             "    timeout-minutes: {}",
-            if inputs.required_gates.is_empty() {
-                30
-            } else {
-                360
-            }
+            if inline_gates.is_empty() { 30 } else { 360 }
         )
         .expect("write");
         writeln!(w, "    runs-on: {}", inputs.runner).expect("write");
@@ -628,12 +633,58 @@ fn render_with_nix_setup(
             notes_source,
             false,
         );
-        push_required_gates(
-            &mut w,
-            inputs.required_gates,
-            inputs.platform,
-            inputs.runner,
-        );
+        let runner = crate::user_config::ResolvedRunner {
+            name: None,
+            labels: vec![inputs.runner.to_owned()],
+        };
+        for gate in inline_gates {
+            push_required_gate(&mut w, gate, inputs.platform, &runner);
+        }
+        if !separate_gates.is_empty() {
+            let mut checks = vec![tag_job.to_owned()];
+            for gate in separate_gates {
+                let runtime = gate.runtime.expect("explicit gate runtime");
+                let job = format!("gate-{}", super::ci::sanitize_gate_id(&gate.id));
+                writeln!(w, "  {job}:").expect("write");
+                checks.push(job);
+                w.push_str(not_republish);
+                let timeout = gate.timeout_minutes + if gate.artifacts.is_some() { 15 } else { 0 };
+                writeln!(w, "    needs: {tag_job}\n    permissions:\n      contents: read\n    timeout-minutes: {timeout}\n    runs-on: {}", inputs.runner).expect("write");
+                let preinstalled =
+                    runtime == crate::config::GateRuntime::Nix && inputs.preinstalled_nix;
+                if preinstalled {
+                    push_preinstalled_nix_env(&mut w, inputs.artifacts);
+                }
+                w.push_str("    steps:\n");
+                push_checkout(&mut w, inputs.platform, inputs.runner, "${{ github.sha }}");
+                if !preinstalled {
+                    super::ci::push_gate_setup(
+                        &mut w,
+                        inputs.platform,
+                        runtime,
+                        (
+                            &inputs.artifacts.substituters,
+                            &inputs.artifacts.trusted_public_keys,
+                        ),
+                        nix_setup,
+                    );
+                }
+                push_required_gate(&mut w, gate, inputs.platform, &runner);
+            }
+            // All existing artifact and publish paths already depend on `validate`.
+            w.push_str("  validate:\n");
+            w.push_str(not_republish);
+            w.push_str("    needs:\n");
+            for check in checks {
+                writeln!(w, "      - {check}").expect("write");
+            }
+            writeln!(
+                w,
+                "    permissions: {{}}\n    runs-on: {}\n    steps:\n      - run: 'true'",
+                inputs.runner
+            )
+            .expect("write");
+        }
     }
     if github_prebuild {
         w.push_str("  prebuild:\n    needs: validate\n");
@@ -1506,50 +1557,43 @@ fn push_release_notes(
     }
 }
 
-fn push_required_gates(w: &mut String, gates: &[RequiredGate], platform: Platform, runner: &str) {
-    let runner = crate::user_config::ResolvedRunner {
-        name: None,
-        labels: vec![runner.to_owned()],
-    };
-    for gate in gates {
-        writeln!(
-            w,
-            "      - name: Required gate {}\n        timeout-minutes: {}",
-            gate.id, gate.timeout_minutes
-        )
-        .expect("write");
-        if !gate.env.is_empty() {
-            w.push_str("        env:\n");
-            for (key, value) in &gate.env {
-                writeln!(
-                    w,
-                    "          {key}: {}",
-                    serde_json::to_string(value).expect("string")
-                )
-                .expect("write");
-            }
-        }
-        if gate.artifacts.is_some() {
+fn push_required_gate(
+    w: &mut String,
+    gate: &RequiredGate,
+    platform: Platform,
+    runner: &crate::user_config::ResolvedRunner,
+) {
+    writeln!(
+        w,
+        "      - name: Required gate {}\n        timeout-minutes: {}",
+        gate.id, gate.timeout_minutes
+    )
+    .expect("write");
+    if !gate.env.is_empty() {
+        w.push_str("        env:\n");
+        for (key, value) in &gate.env {
             writeln!(
                 w,
-                "        id: simit-required-gate-{}",
-                crate::render::ci::sanitize_gate_id(&gate.id)
+                "          {key}: {}",
+                serde_json::to_string(value).expect("string")
             )
             .expect("write");
         }
-        w.push_str("        run: |\n          set -euo pipefail\n");
-        for line in gate.run.lines() {
-            writeln!(w, "          {line}").expect("write");
-        }
-        if platform == Platform::Github {
-            crate::render::ci::push_required_gate_artifacts(
-                w,
-                gate,
-                Some(&runner),
-                "",
-                ("gate.", ""),
-            );
-        }
+    }
+    if gate.artifacts.is_some() {
+        writeln!(
+            w,
+            "        id: simit-required-gate-{}",
+            crate::render::ci::sanitize_gate_id(&gate.id)
+        )
+        .expect("write");
+    }
+    w.push_str("        run: |\n          set -euo pipefail\n");
+    for line in gate.run.lines() {
+        writeln!(w, "          {line}").expect("write");
+    }
+    if platform == Platform::Github {
+        crate::render::ci::push_required_gate_artifacts(w, gate, Some(runner), "", ("gate.", ""));
     }
 }
 

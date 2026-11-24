@@ -81,6 +81,18 @@ pub fn release_backend(
     let backend = CiBackend::from_parts(provider, platform)?;
     cfg.ci
         .validate_required_gate_artifacts_backend(provider, platform)?;
+    if (provider != CiProvider::Actions || platform != Platform::Github)
+        && let Some(gate) = cfg
+            .ci
+            .required_gates
+            .iter()
+            .find(|gate| gate.runtime.is_some())
+    {
+        bail!(
+            "hosted release runtime overrides for required gate `{}` require GitHub Actions; omit the gate runtime to retain legacy release validation",
+            gate.id
+        );
+    }
     if !cfg.release.artifacts.cargo.is_empty()
         && (provider != CiProvider::Actions || platform == Platform::Gitlab)
     {
@@ -191,15 +203,22 @@ impl CiInference {
             .map(|workflow| workflow.content.as_str())
             .collect::<Vec<_>>()
             .join("\n");
+        let required_gates = infer_required_gates(&all_content);
+        let all_content: String = lines_outside_gate_jobs(&all_content).collect();
         let self_check = marked
             .iter()
-            .find(|workflow| workflow.content.contains("cargo run -- init ci"));
+            .find(|workflow| {
+                lines_outside_gate_jobs(&workflow.content)
+                    .any(|line| line.contains("cargo run -- init ci"))
+            })
+            .map(|workflow| lines_outside_gate_jobs(&workflow.content).collect::<String>());
         let self_check_workspace = self_check
-            .map(|workflow| workflow.content.contains(" --workspace"))
+            .as_deref()
+            .map(|content| content.contains(" --workspace"))
             .unwrap_or(false);
-        let self_check_packages = self_check.map_or_else(Vec::new, |workflow| {
-            infer_self_check_packages(&workflow.content)
-        });
+        let self_check_packages = self_check
+            .as_deref()
+            .map_or_else(Vec::new, infer_self_check_packages);
         let suffix_packages = marked
             .iter()
             .filter_map(|workflow| workflow_suffix(&workflow.relative_path))
@@ -264,7 +283,7 @@ impl CiInference {
                 )
             })),
             publish_strategy: Some(infer_publish_strategy(marked)),
-            required_gates: Some(infer_required_gates(&all_content)),
+            required_gates: Some(required_gates),
             om_ci: Some(infer_om_ci_mode(&all_content)),
             omnix_ref: infer_omnix_ref(&all_content),
             release_smoke_command: infer_release_smoke_command(&all_content),
@@ -320,6 +339,17 @@ impl ResolvedCiInputs {
         } else {
             auto_runtime(workspace_root)?
         };
+        let cargo_lanes = runtime == Runtime::Cargo && cfg.ci.independent_lanes;
+        let nix_flake_check = cli
+            .nix_flake_check
+            .or(config.nix_flake_check)
+            .or(inference.nix_flake_check.filter(|_| !cargo_lanes))
+            .unwrap_or(!cargo_lanes);
+        if cargo_lanes && nix_flake_check && !workspace_root.join("flake.nix").is_file() {
+            bail!(
+                "[ci].nix_flake_check = true with Cargo independent_lanes requires flake.nix at the workspace root; omit it for native Rust CI only"
+            );
+        }
 
         let replace_om_ci = cli
             .with_om_ci
@@ -414,6 +444,14 @@ impl ResolvedCiInputs {
         } else {
             cfg.ci.required_gates.clone()
         };
+        let publish_crates = cli
+            .publish_crates
+            .or(config.publish_crates)
+            .or(inference.publish_crates)
+            .unwrap_or(false);
+        if publish_crates && publish_strategy == crate::config::PublishStrategy::ReleasePlz {
+            crate::render::release_plz::validate_gate_runtimes(&required_gates, runtime)?;
+        }
 
         Ok(Self {
             runtime,
@@ -454,11 +492,7 @@ impl ResolvedCiInputs {
                 .or(inference.with_nextest)
                 .unwrap_or(false),
             with_nix_cargo_cache,
-            nix_flake_check: cli
-                .nix_flake_check
-                .or(config.nix_flake_check)
-                .or(inference.nix_flake_check)
-                .unwrap_or(true),
+            nix_flake_check,
             with_msrv: cli
                 .with_msrv
                 .or(config.with_msrv)
@@ -489,11 +523,7 @@ impl ResolvedCiInputs {
                 .or(config.with_pypi_publish)
                 .or(inference.with_pypi_publish)
                 .unwrap_or(false),
-            publish_crates: cli
-                .publish_crates
-                .or(config.publish_crates)
-                .or(inference.publish_crates)
-                .unwrap_or(false),
+            publish_crates,
             om_ci,
             omnix_ref: cli
                 .omnix_ref
@@ -585,7 +615,10 @@ impl ResolvedCiInputs {
     ) -> CiConfig {
         let mut ci = cfg.ci.clone();
         ci.platform = Some(platform);
-        ci.runtime = (self.runtime != Runtime::Cargo).then_some(self.runtime);
+        // Independent Cargo lanes can coexist with a meaningful flake. Keep the
+        // runtime choice even when there is no generated workflow to infer from.
+        ci.runtime =
+            (self.runtime != Runtime::Cargo || ci.independent_lanes).then_some(self.runtime);
         // Native system runners replace the single runner, and config
         // validation rejects both together.
         ci.runner = runner.filter(|_| ci.nix_system_runners.is_empty());
@@ -599,7 +632,11 @@ impl ResolvedCiInputs {
         ci.unit_tests_only = self.unit_tests_only;
         ci.with_nextest = self.with_nextest;
         ci.with_nix_cargo_cache = self.with_nix_cargo_cache;
-        ci.nix_flake_check = (!self.nix_flake_check).then_some(false);
+        ci.nix_flake_check = if self.runtime == Runtime::Cargo && ci.independent_lanes {
+            self.nix_flake_check.then_some(true)
+        } else {
+            (!self.nix_flake_check).then_some(false)
+        };
         ci.with_msrv = self.with_msrv;
         ci.with_audit = self.with_audit;
         ci.with_deny = self.with_deny;
@@ -784,6 +821,18 @@ fn validate_config_runtime(runtime: Runtime, workspace_root: &Path) -> Result<()
     Ok(())
 }
 
+// Gate commands (e.g. a Nix gate using cargo-nextest) are not evidence of
+// project-wide runtime or tool settings.
+fn lines_outside_gate_jobs(content: &str) -> impl Iterator<Item = &str> {
+    let mut gate = false;
+    content.split_inclusive('\n').filter(move |line| {
+        if let Some(key) = line.strip_prefix("  ").filter(|key| !key.starts_with(' ')) {
+            gate = key.starts_with("gate-") && key.trim_end().ends_with(':');
+        }
+        !gate
+    })
+}
+
 fn infer_ci_runtime(marked: &[WorkflowSnapshot]) -> Result<Runtime> {
     let Some(ci_workflow) = marked
         .iter()
@@ -802,13 +851,16 @@ fn infer_ci_runtime(marked: &[WorkflowSnapshot]) -> Result<Runtime> {
         return Ok(Runtime::Cargo);
     };
 
-    if ci_workflow.content.contains("      - name: Install Nix\n")
-        || ci_workflow.content.contains("run: nix flake check")
-        || ci_workflow.content.contains("run: nix develop -c cargo")
-        || ci_workflow
-            .content
-            .contains("      - name: Build package\n")
-    {
+    // Independent flake lanes and dedicated gate jobs do not select the Rust runtime.
+    let mut core = lines_outside_gate_jobs(&ci_workflow.content)
+        .take_while(|line| !matches!(*line, "  evaluation:\n" | "  realization:\n"));
+    if core.any(|line| {
+        matches!(
+            line,
+            "      - name: Install Nix\n" | "      - name: Build package\n"
+        ) || line.contains("run: nix flake check")
+            || line.contains("run: nix develop -c cargo")
+    }) {
         Ok(Runtime::Nix)
     } else {
         Ok(Runtime::Cargo)
@@ -992,6 +1044,7 @@ fn infer_required_gates(content: &str) -> Vec<crate::config::RequiredGate> {
         gates.push(crate::config::RequiredGate {
             id: id.to_owned(),
             run,
+            runtime: None,
             timeout_minutes,
             env: BTreeMap::new(),
             artifacts: None,

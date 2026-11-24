@@ -1,8 +1,9 @@
-//! Parallel lanes preserve the legacy Rust checks and full-flake realization.
+//! Parallel lanes separate Rust checks from optional full-flake checks.
 use super::*;
 
 pub(super) fn render(
     platform: Platform,
+    runtime: Runtime,
     package: &Package,
     self_check: SelfCheckOptions<'_>,
     runners: &ResolvedCiRunners,
@@ -19,8 +20,10 @@ pub(super) fn render(
     push_independent_source_concurrency(&mut workflow);
     workflow.push_str("jobs:\n");
     let mut lanes = vec!["rust"];
-    // In independent mode nix_flake_check retires realization only.
+    // Nix projects retain evaluation even when realization is retired.
+    // Cargo projects must opt into flake checks explicitly.
     if options.repository_checks
+        && (runtime == Runtime::Nix || options.nix_flake_check)
         && (options.components.is_empty()
             || options.components.contains(&CiComponent::FlakeEvaluation)
             || options.components.contains(&CiComponent::Checks))
@@ -31,6 +34,11 @@ pub(super) fn render(
         lanes.push("realization");
     }
     for lane in lanes {
+        let lane_runtime = if lane == "rust" {
+            runtime
+        } else {
+            Runtime::Nix
+        };
         workflow.push_str(&format!("  {lane}:\n"));
         push_member_job_name(&mut workflow, package, &options, lane);
         push_docs_gate_keys(&mut workflow, platform, &[]);
@@ -38,13 +46,26 @@ pub(super) fn render(
         push_job_env(
             &mut workflow,
             platform,
-            Runtime::Nix,
+            lane_runtime,
             &options.extra_env,
             true,
         );
         workflow.push_str("    steps:\n");
         push_source_head_checkout(&mut workflow, &runners.ci);
         push_required_env_step(&mut workflow, &options.required_env);
+        if lane_runtime == Runtime::Cargo {
+            push_cargo_ci_steps(
+                &mut workflow,
+                platform,
+                package,
+                self_check,
+                &runners.ci,
+                &options,
+            );
+            trim_trailing_blank_lines(&mut workflow);
+            workflow.push_str("\n\n");
+            continue;
+        }
         push_install_nix_step_with_cache(
             &mut workflow,
             platform,
@@ -76,7 +97,7 @@ pub(super) fn render(
     push_required_gate_jobs(
         &mut workflow,
         platform,
-        Runtime::Nix,
+        runtime,
         package,
         runners,
         &options,

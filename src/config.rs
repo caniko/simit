@@ -465,6 +465,8 @@ fn default_package_binding() -> String {
 pub struct RequiredGate {
     pub id: String,
     pub run: String,
+    /// Omit to retain the enclosing CI or release job's setup.
+    pub runtime: Option<GateRuntime>,
     #[serde(default = "default_gate_timeout_minutes")]
     pub timeout_minutes: u64,
     #[serde(default)]
@@ -472,6 +474,33 @@ pub struct RequiredGate {
     /// Optional evidence retained by GitHub Actions even when the gate fails.
     #[serde(default)]
     pub artifacts: Option<RequiredGateArtifacts>,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum GateRuntime {
+    Nix,
+    Cargo,
+    Shell,
+}
+
+impl GateRuntime {
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            Self::Nix => "nix",
+            Self::Cargo => "cargo",
+            Self::Shell => "shell",
+        }
+    }
+}
+
+impl From<Runtime> for GateRuntime {
+    fn from(runtime: Runtime) -> Self {
+        match runtime {
+            Runtime::Nix => Self::Nix,
+            Runtime::Cargo => Self::Cargo,
+        }
+    }
 }
 
 /// A `[ci].local_gate_steps` entry: a local-only check, such as a browser
@@ -580,14 +609,17 @@ fn default_gate_timeout_minutes() -> u64 {
     30
 }
 
-/// Gates run serially in shared jobs whether or not they retain artifacts, so
-/// every gate/upload deadline is added to the `base` limit of the job's own steps.
+/// Hosted and trusted crate releases run inherited gates serially. Explicit
+/// runtimes use separate jobs and do not consume the shared job's budget.
 pub(crate) fn required_gate_job_timeout(gates: &[RequiredGate], base: u64) -> u64 {
-    gates.iter().fold(base, |budget, gate| {
-        budget
-            .saturating_add(gate.timeout_minutes)
-            .saturating_add(if gate.artifacts.is_some() { 5 } else { 0 })
-    })
+    gates
+        .iter()
+        .filter(|gate| gate.runtime.is_none())
+        .fold(base, |budget, gate| {
+            budget
+                .saturating_add(gate.timeout_minutes)
+                .saturating_add(if gate.artifacts.is_some() { 5 } else { 0 })
+        })
 }
 
 pub(crate) fn validate_required_gate_job_budget(gates: &[RequiredGate], base: u64) -> Result<()> {
@@ -886,6 +918,17 @@ impl CiConfig {
         platform: Platform,
     ) -> Result<()> {
         self.validate_required_gate_artifacts_backend(provider, platform)?;
+        if provider == CiProvider::Crow
+            && let Some(gate) = self
+                .required_gates
+                .iter()
+                .find(|gate| gate.runtime.is_some())
+        {
+            bail!(
+                "Crow CI does not support runtime overrides for required gate `{}`; use an Actions backend",
+                gate.id
+            );
+        }
         if !self.manual_gates.is_empty()
             && (provider != CiProvider::Actions || platform != Platform::Github)
         {
@@ -5697,6 +5740,9 @@ fn set_required_gates_table(table: &mut Table, key: &str, gates: &[RequiredGate]
         let mut item = InlineTable::default();
         item.insert("id", Value::from(gate.id.as_str()));
         item.insert("run", Value::from(gate.run.as_str()));
+        if let Some(runtime) = gate.runtime {
+            item.insert("runtime", Value::from(runtime.as_str()));
+        }
         if gate.timeout_minutes != default_gate_timeout_minutes() {
             item.insert("timeout_minutes", Value::from(gate.timeout_minutes as i64));
         }
@@ -5997,7 +6043,13 @@ fn set_ci_table(table: &mut Table, ci: &CiConfig) {
     set_optional_string(table, "qualified_by", ci.qualified_by.as_deref());
     set_bool(table, "workspace", ci.workspace);
     set_optional_string(table, "check_command", ci.check_command.as_deref());
-    set_optional_bool_default_true(table, "nix_flake_check", ci.nix_flake_check);
+    if ci.independent_lanes
+        && let Some(enabled) = ci.nix_flake_check
+    {
+        table["nix_flake_check"] = value(enabled);
+    } else {
+        set_optional_bool_default_true(table, "nix_flake_check", ci.nix_flake_check);
+    }
     set_bool(table, "independent_lanes", ci.independent_lanes);
     set_bool(table, "separate_events", ci.separate_events);
     set_string_array(table, "push_branches", &ci.push_branches);

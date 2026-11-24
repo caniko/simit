@@ -540,6 +540,8 @@ extra_env = { RUSTDOCFLAGS = "-D warnings", SHARED = "project" }
 required_gates = [
     { id = "integration", run = "nix run .#integration", env = { SHARED = "gate" } },
     { id = "module-smoke", run = "nix build .#module-smoke" },
+    { id = "native", runtime = "cargo", run = "cargo check" },
+    { id = "script", runtime = "shell", run = "./check.sh" },
 ]
 "#,
     )
@@ -564,6 +566,12 @@ required_gates = [
         assert_eq!(job["env"]["RUSTDOCFLAGS"].as_str(), Some("-D warnings"));
         assert_eq!(job["env"]["CARGO_HOME"].as_str(), Some("/tmp/.cargo"));
         assert_eq!(job["env"]["SHARED"].as_str(), Some(shared));
+    }
+    for (id, rust) in [("gate-native", true), ("gate-script", false)] {
+        let job = serde_yaml::to_string(&yaml["jobs"][id]).unwrap();
+        assert_eq!(job.contains("Install Rust"), rust, "{job}");
+        assert!(!job.contains("Install Nix"), "{job}");
+        assert!(!job.contains("NIX_CONFIG"), "{job}");
     }
 }
 
@@ -618,6 +626,118 @@ manual_gates = [{ id = "boot", run = "nix run .#boot", timeout_minutes = 20 }]
     assert!(config.contains("manual_gates"), "{config}");
     let readme = fs::read_to_string(temp.path().join("README.md")).unwrap();
     assert!(readme.contains("CI-managed"), "{readme}");
+}
+
+#[test]
+fn gate_runtimes_round_trip_without_changing_the_project_runtime() {
+    let temp = init_package(false);
+    let config = temp.path().join("simit.toml");
+    fs::write(
+        &config,
+        r#"[ci]
+platform = "github"
+runtime = "cargo"
+nix_setup_action_ref = "0123456789abcdef0123456789abcdef01234567"
+required_gates = [
+    { id = "inherited", run = "cargo test" },
+    { id = "remote", runtime = "nix", run = "nix run github:caniko/simit -- --version" },
+    { id = "script", runtime = "shell", run = "./check.sh", env = { MODE = "ci" } },
+]
+manual_gates = [{ id = "manual", runtime = "cargo", run = "cargo check" }]
+"#,
+    )
+    .unwrap();
+    for args in [&["init", "ci"][..], &["init", "ci", "--check"]] {
+        let output = simit()
+            .current_dir(temp.path())
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "{output:?}");
+    }
+    let config: toml_edit::DocumentMut = fs::read_to_string(config).unwrap().parse().unwrap();
+    let required = config["ci"]["required_gates"].as_array().unwrap();
+    assert!(
+        !required
+            .get(0)
+            .unwrap()
+            .as_inline_table()
+            .unwrap()
+            .contains_key("runtime")
+    );
+    for (table, index, runtime) in [
+        ("required_gates", 1, "nix"),
+        ("required_gates", 2, "shell"),
+        ("manual_gates", 0, "cargo"),
+    ] {
+        let gate = config["ci"][table].as_array().unwrap().get(index).unwrap();
+        assert_eq!(
+            gate.as_inline_table()
+                .unwrap()
+                .get("runtime")
+                .unwrap()
+                .as_str(),
+            Some(runtime)
+        );
+    }
+
+    let load_jobs = |file: &str| {
+        let yaml = fs::read_to_string(temp.path().join(".github/workflows").join(file)).unwrap();
+        serde_yaml::from_str::<serde_yaml::Value>(&yaml).unwrap()["jobs"].clone()
+    };
+    let jobs = load_jobs("ci.yaml");
+    let steps = |job: &str| serde_yaml::to_string(&jobs[job]["steps"]).unwrap();
+    assert!(!steps("test").contains("Install Nix"));
+    assert!(steps("gate-inherited").contains("Install Rust"));
+    assert!(steps("gate-remote").contains(
+        "caniko/simit/.github/actions/nix-setup@0123456789abcdef0123456789abcdef01234567"
+    ));
+    assert!(!steps("gate-remote").contains("nix develop"));
+    assert!(!steps("gate-script").contains("Install Nix"));
+    assert!(!steps("gate-script").contains("Install Rust"));
+    assert_eq!(jobs["gate-script"]["env"]["MODE"].as_str(), Some("ci"));
+    let manual = serde_yaml::to_string(&load_jobs("manual-gates.yaml")["gate-manual"]).unwrap();
+    assert!(manual.contains("Install Rust"));
+    assert!(!manual.contains("Install Nix"));
+}
+
+#[test]
+fn gate_runtime_validation_rejects_unknown_values_and_incompatible_shared_jobs() {
+    for (options, runtime, error) in [
+        ("platform = 'github'", "auto", "unknown variant"),
+        (
+            "platform = 'forgejo'\nprovider = 'crow'",
+            "nix",
+            "Crow CI does not support runtime overrides for required gate `contract`",
+        ),
+        (
+            "platform = 'forgejo'\nprovider = 'actions'",
+            "nix",
+            "Forgejo Cargo CI does not set up Nix",
+        ),
+        (
+            "platform = 'github'\npublish_crates = true\npublish_strategy = 'release-plz'",
+            "shell",
+            "release-plz runs required gate `contract` in the shared qualify job",
+        ),
+    ] {
+        let temp = init_package(false);
+        fs::write(
+            temp.path().join("simit.toml"),
+            format!("[ci]\nruntime = 'cargo'\n{options}\n[[ci.required_gates]]\nid = 'contract'\nruntime = '{runtime}'\nrun = 'true'\n"),
+        )
+        .unwrap();
+        let output = simit()
+            .current_dir(temp.path())
+            .args(["init", "ci"])
+            .output()
+            .unwrap();
+        assert!(!output.status.success(), "{output:?}");
+        assert!(
+            String::from_utf8_lossy(&output.stderr).contains(error),
+            "{output:?}"
+        );
+    }
 }
 
 #[test]

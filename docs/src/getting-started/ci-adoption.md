@@ -1104,20 +1104,22 @@ Omitting `[ci.nix_build]` preserves the existing generated matrix defaults.
 
 ### Shared-store Nix groups
 
-Rust projects using GitHub Actions with the Nix runtime can opt into
+Rust projects using GitHub Actions can opt into
 `[ci].independent_lanes = true`. The `rust` lane retains the existing format,
-test, quality, docs, generator and package steps. The `evaluation` lane evaluates
-the complete flake on all systems without building. Required-gate jobs qualify
-the same immutable PR head as these lanes. Every lane adds Cargo's configured
-binary directory before project setup. With the default `nix_flake_check = true`,
-the `realization` lane also builds all flake checks. These lanes start independently
-and retain the same push and PR triggers. Step-runner overrides and `om_ci` are
-not supported together with this opt-in.
+test, quality, docs, generator and package steps, using the project's runtime.
+Required-gate jobs qualify the same immutable PR head as these lanes. The lanes
+start independently and retain the same push and PR triggers. Step-runner
+overrides and `om_ci` are not supported with independent lanes.
 
-Setting `nix_flake_check = false` omits only the realization lane. Establish
-complete discovered-check and declared-production-output coverage through the
-groups below, qualify their receipts, then migrate required branch contexts
-before removing overlapping full-flake realization.
+With `runtime = "nix"`, `evaluation` evaluates the complete flake on all systems
+without building, and `realization` builds all flake checks by default. Setting
+`nix_flake_check = false` omits only `realization`. Establish replacement check
+and production-output coverage before removing that lane.
+
+With `runtime = "cargo"`, `rust` uses native Cargo and does not install Nix.
+Set `nix_flake_check = true` and provide a root `flake.nix` to add the flake
+lanes. This opt-in is independent of explicit Nix gates, `nix-builds.yaml`,
+and `[prebuild]`.
 
 Native required contexts change from `test` to `rust`, `evaluation` and,
 when enabled, `realization` (with workspace member prefixes where applicable).
@@ -1474,13 +1476,23 @@ Each gate has a stable `id`, one explicit single-line `run` command (a `nix
 run`, `nix build`, or `nix flake check` invocation for flake targets), a
 bounded `timeout_minutes` (1–360, default 30), and scoped `env`. Gates render
 as dedicated `gate-<id>` jobs in CI (same push/PR triggers, once per run) and
-as credential-free prerequisite steps in the coordinated publisher at the exact signed
-revision. Any gate failure blocks publication. Gate setup lives in `run`/`env`
+as credential-free prerequisites in the coordinated publisher at the exact signed
+revision. Any gate failure blocks publication. Gate-specific setup lives in `run`/`env`
 only — never in global `[ci].extra_setup`, so publishing and artifact jobs do
 not inherit test-only services or credentials. Release secrets
 (`CRATES_IO_API_TOKEN`, minisign, etc.) must never appear in gate `env`; they
 belong only to independent default-branch upload jobs in the protected
 `simit-crates-io` environment.
+
+Omit `runtime` to keep the existing CI and publication setup. Set it to `cargo`
+for native Rust toolchain setup, `nix` for Nix setup, or `shell` for neither.
+Simit runs `run` as written; it does not wrap a Nix gate in `nix develop`, so
+remote installables do not need a local flake. Explicit-runtime gates run in
+separate jobs in GitHub hosted releases and the trusted crate publisher.
+Release-plz qualifies gates in its shared job, so overrides there must match
+the project runtime. Crow CI and non-GitHub hosted releases do not support
+runtime overrides. Forgejo Actions uses preinstalled Nix, so a required Nix
+gate there requires Nix CI on a Nix runner.
 
 `[[ci.manual_gates]]` takes the same fields but renders the gates into
 `manual-gates.yaml`, triggered only by `workflow_dispatch` (GitHub Actions
