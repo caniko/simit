@@ -28,6 +28,8 @@ use crate::render::ci::{
 };
 use serde::Serialize;
 
+use super::release_tools;
+
 mod cargo;
 
 /// Everything the release workflow generator needs, resolved up front.
@@ -464,6 +466,31 @@ fn channel_enabled(inputs: &ReleaseWorkflowInputs<'_>, channel: &str) -> bool {
     channel_policy(inputs, channel) != Some(ReleasePublisherPolicy::Disabled)
 }
 
+fn promotion_needs_nix(inputs: &ReleaseWorkflowInputs<'_>, inline_nix_bundles: bool) -> bool {
+    let artifacts = inputs.artifacts;
+    artifacts.version_attr.is_some()
+        || inline_nix_bundles
+        || !artifacts.extract.is_empty()
+        || inputs
+            .attic
+            .is_some_and(|_| !prebuild_publishes_attic(inputs))
+        || (inputs.apt.is_some() && channel_enabled(inputs, "apt"))
+        || inputs.aur.is_some()
+        || inputs.copr.is_some()
+        || inputs.homebrew.is_some()
+        || (inputs.pypi.is_some() && channel_enabled(inputs, "pypi"))
+        || inputs.windows_signing.is_some()
+        || inputs.chocolatey.is_some()
+        || artifacts
+            .supply_chain_command
+            .as_deref()
+            .into_iter()
+            .chain(inputs.smoke_command)
+            .any(release_tools::command_uses_nix)
+        || release_tools::command_uses_nix(&artifacts.build_commands.join("\n"))
+        || release_tools::command_uses_nix(&artifacts.sbom_commands.join("\n"))
+}
+
 fn channel_credential_required(
     inputs: &ReleaseWorkflowInputs<'_>,
     channel: &str,
@@ -586,6 +613,10 @@ fn render_with_nix_setup(
     let bundle_matrix = !prebuilt_release_archives
         && !inputs.artifacts.effective_system_runners().is_empty()
         && !inputs.artifacts.effective_nix_bundle_attrs().is_empty();
+    let inline_nix_bundles = !prebuilt_release_archives
+        && !bundle_matrix
+        && !inputs.artifacts.effective_nix_bundle_attrs().is_empty();
+    let promotion_needs_nix = promotion_needs_nix(inputs, inline_nix_bundles);
     let native_cargo = !inputs.artifacts.cargo.is_empty();
     let separate_validation =
         github_prebuild || !inputs.required_gates.is_empty() || bundle_matrix || native_cargo;
@@ -759,15 +790,35 @@ fn render_with_nix_setup(
         Platform::Forgejo => w.push_str("    enable-openid-connect: true\n"),
         Platform::Gitlab => w.push_str("    # GitLab release rendering is unsupported\n"),
     }
-    if inputs.preinstalled_nix {
+    if promotion_needs_nix && inputs.preinstalled_nix {
         push_preinstalled_nix_env(&mut w, inputs.artifacts);
     }
     w.push_str("    steps:\n");
 
     push_checkout(&mut w, inputs.platform, inputs.runner, "${{ github.sha }}");
-    if !inputs.preinstalled_nix {
+    if promotion_needs_nix && !inputs.preinstalled_nix {
         push_install_nix(&mut w, inputs.platform, inputs.artifacts, nix_setup);
     }
+    let mut tools = vec!["git", "sha256sum"];
+    if inputs.artifacts.sign
+        || inputs.release.is_some()
+        || inputs.announce.is_some()
+        || inputs.flatpak.is_some()
+        || inputs.winget.is_some()
+    {
+        tools.extend(["curl", "jq"]);
+    }
+    if inline_nix_bundles || (activated_remote && inputs.chocolatey.is_some()) {
+        tools.push("jq");
+    }
+    if activated_remote
+        && (inputs.copr.is_some()
+            || inputs.chocolatey.is_some()
+            || (inputs.pypi.is_some() && channel_enabled(inputs, "pypi")))
+    {
+        tools.push("curl");
+    }
+    release_tools::push_setup(&mut w, &tools, inputs.artifacts.sign, inputs.artifacts.sign);
     push_validate_tag(
         &mut w,
         inputs.artifacts,
@@ -776,7 +827,7 @@ fn render_with_nix_setup(
         false,
     );
     push_release_notes(&mut w, inputs.tag_prefix, notes_source);
-    push_release_credentials_preflight(&mut w, inputs);
+    push_release_credentials_preflight(&mut w, inputs, promotion_needs_nix);
     if let Some(copr) = inputs.copr {
         push_rewrite_spec(&mut w, copr);
     }
@@ -789,10 +840,6 @@ fn render_with_nix_setup(
     if !inputs.artifacts.sbom_commands.is_empty() {
         push_sbom(&mut w, &inputs.artifacts.sbom_commands);
     }
-    let prebuilt_release_archives = inputs
-        .prebuild
-        .is_some_and(|prebuild| prebuild.release_archives)
-        && inputs.platform == Platform::Github;
     if prebuilt_release_archives || bundle_matrix {
         push_download_prebuilt_archives(
             &mut w,
@@ -869,6 +916,7 @@ fn render_with_nix_setup(
     if let Some(scoop) = inputs.scoop.filter(|_| channel_enabled(inputs, "scoop")) {
         push_publish_scoop(
             &mut w,
+            inputs.platform,
             scoop,
             channel_soft_skip(inputs, "scoop", activated_remote),
         );
@@ -886,7 +934,7 @@ fn render_with_nix_setup(
     if let Some(chocolatey) = inputs.chocolatey {
         push_publish_chocolatey(&mut w, chocolatey, activated_remote, inputs.platform, false);
     }
-    if republish_enabled(inputs) {
+    if republish {
         push_republish_job(&mut w, inputs, notes_source, activated_remote, nix_setup);
     }
 
@@ -1033,6 +1081,11 @@ fn push_republish_job(
 ) {
     let release = inputs.release.expect("republish needs a GitHub release");
     let channels = republishable_channels(inputs);
+    // These publishers still run Nix; Flathub, Scoop and WinGet are native.
+    let needs_nix = inputs.artifacts.version_attr.is_some()
+        || channels
+            .iter()
+            .any(|channel| matches!(*channel, "aur" | "homebrew" | "pypi" | "chocolatey"));
     let pypi_oidc = inputs
         .pypi
         .is_some_and(|pypi| pypi.trusted_publishing && channels.contains(&"pypi"));
@@ -1044,7 +1097,7 @@ fn push_republish_job(
     if pypi_oidc {
         w.push_str("      id-token: write\n");
     }
-    if inputs.preinstalled_nix {
+    if needs_nix && inputs.preinstalled_nix {
         push_preinstalled_nix_env(w, inputs.artifacts);
     }
     w.push_str("    steps:\n");
@@ -1075,9 +1128,10 @@ fn push_republish_job(
         inputs.runner,
         "refs/tags/${{ inputs.tag }}",
     );
-    if !inputs.preinstalled_nix {
+    if needs_nix && !inputs.preinstalled_nix {
         push_install_nix(w, inputs.platform, inputs.artifacts, nix_setup);
     }
+    release_tools::push_setup(w, &["curl", "git", "jq", "sha256sum"], true, false);
     push_validate_tag(w, inputs.artifacts, inputs.tag_prefix, notes_source, true);
 
     // Download only what the selected channels read, then fail closed unless
@@ -1086,7 +1140,7 @@ fn push_republish_job(
     writeln!(w, "          GITHUB_API: {}", release.api_base).expect("write");
     writeln!(w, "          GITHUB_REPO: {}", release.repo).expect("write");
     w.push_str("          REPUBLISH_CHANNELS: ${{ steps.republish.outputs.channels }}\n");
-    w.push_str("        run: |\n          set -euo pipefail\n          nix shell nixpkgs#curl nixpkgs#jq nixpkgs#minisign -c bash <<'SCRIPT'\n");
+    w.push_str("        run: |\n");
     w.push_str(
         "          set -euo pipefail\n          . ./release-env\n          mkdir -p release\n",
     );
@@ -1121,7 +1175,7 @@ fn push_republish_job(
     w.push_str("              case \"$name\" in */* | '') echo \"::error::unsafe name in SHA256SUMS.txt: $name\" >&2; exit 1;; esac\n");
     w.push_str("              # shellcheck disable=SC2254\n              case \"$name\" in $pattern) fetch \"$name\"; awk -v n=\"$name\" '$2 == n' release/SHA256SUMS.txt >> release-selected.sums; found=1;; esac\n            done\n");
     w.push_str("            [ \"$found\" = 1 ] || { echo \"::error::SHA256SUMS.txt lists no asset matching $pattern\" >&2; exit 1; }\n          done\n");
-    w.push_str("          if [ \"${#need[@]}\" -gt 0 ]; then (cd release && sha256sum -c --strict ../release-selected.sums); fi\n          SCRIPT\n");
+    w.push_str("          if [ \"${#need[@]}\" -gt 0 ]; then (cd release && sha256sum -c --strict ../release-selected.sums); fi\n");
 
     if activated_remote {
         push_publisher_state_probe(w, inputs);
@@ -1153,6 +1207,7 @@ fn push_republish_job(
         channel_steps("scoop", &|s| {
             push_publish_scoop(
                 s,
+                inputs.platform,
                 scoop,
                 channel_soft_skip(inputs, "scoop", activated_remote),
             );
@@ -1591,11 +1646,16 @@ fn push_required_gate(
     }
 }
 
-fn push_release_credentials_preflight(w: &mut String, inputs: &ReleaseWorkflowInputs<'_>) {
+fn push_release_credentials_preflight(
+    w: &mut String,
+    inputs: &ReleaseWorkflowInputs<'_>,
+    needs_nix: bool,
+) {
     let credentials = credential_contract(inputs)
         .into_iter()
         .filter(|credential| {
             credential.required
+                && (credential.channel != "nix" || needs_nix)
                 && (inputs.publish_enforcement == ReleasePublisherEnforcement::Declared
                     || !downstream_publisher_credential(credential)
                     || inputs.publish.policy(&credential.channel)
@@ -1658,10 +1718,10 @@ fn push_release_credentials_preflight(w: &mut String, inputs: &ReleaseWorkflowIn
         w.push_str("          printf '%s' \"$MINISIGN_SECRET_KEY\" > \"$minisign_key\"\n");
         w.push_str("          printf 'simit release credentials probe\\n' > \"$minisign_probe\"\n");
         w.push_str("          printf '%s\\n' \"$MINISIGN_PASSWORD\" | \\\n");
-        w.push_str("            nix shell nixpkgs#minisign -c minisign -S -s \"$minisign_key\" -m \"$minisign_probe\" -x \"$minisign_sig\"\n");
+        w.push_str("            minisign -S -s \"$minisign_key\" -m \"$minisign_probe\" -x \"$minisign_sig\"\n");
         writeln!(
             w,
-            "          nix shell nixpkgs#minisign -c minisign -V -m \"$minisign_probe\" -x \"$minisign_sig\" -p {}",
+            "          minisign -V -m \"$minisign_probe\" -x \"$minisign_sig\" -p {}",
             inputs.artifacts.minisign_pub
         )
         .expect("write");
@@ -2093,14 +2153,14 @@ fn push_sign(
     w.push_str("        run: |\n          set -euo pipefail\n          . ./release-env\n");
     writeln!(w, "          test -s {}", artifacts.minisign_pub).expect("write");
     w.push_str("          test -n \"${MINISIGN_SECRET_KEY:-}\"\n          test -n \"${MINISIGN_PASSWORD:-}\"\n");
-    w.push_str("          umask 077\n          minisign_key=\"$(mktemp)\"; oidc_token=\"$(mktemp)\"; cosign_key=\"$(mktemp)\"; export oidc_token cosign_key\n");
+    w.push_str("          umask 077\n          minisign_key=\"$(mktemp)\"; oidc_token=\"$(mktemp)\"; cosign_key=\"$(mktemp)\"\n");
     w.push_str("          trap 'rm -f \"$minisign_key\" \"$oidc_token\" \"$cosign_key\"' EXIT\n");
     w.push_str("          printf '%s' \"$MINISIGN_SECRET_KEY\" > \"$minisign_key\"\n");
     w.push_str("          printf '%s\\n' \"$MINISIGN_PASSWORD\" | \\\n");
-    w.push_str("            nix shell nixpkgs#minisign -c minisign -S -s \"$minisign_key\" -m release/SHA256SUMS.txt -x release/SHA256SUMS.txt.minisig\n");
+    w.push_str("            minisign -S -s \"$minisign_key\" -m release/SHA256SUMS.txt -x release/SHA256SUMS.txt.minisig\n");
     writeln!(
         w,
-        "          nix shell nixpkgs#minisign -c minisign -V -m release/SHA256SUMS.txt -x release/SHA256SUMS.txt.minisig -p {}\n",
+        "          minisign -V -m release/SHA256SUMS.txt -x release/SHA256SUMS.txt.minisig -p {}\n",
         artifacts.minisign_pub
     )
     .expect("write");
@@ -2116,8 +2176,6 @@ fn push_sign(
             format!("{host}/{}", c.repo)
         })
         .unwrap_or_else(|| format!("{}/unknown/unknown", platform.web_base_url()));
-    w.push_str("          nix shell nixpkgs#cosign nixpkgs#curl nixpkgs#jq -c bash <<'SCRIPT'\n");
-    w.push_str("          set -euo pipefail\n          . ./release-env\n");
     writeln!(w, "          repo_url=\"{repo_url}\"").expect("write");
     w.push_str("          git_sha=\"$(git rev-parse HEAD)\"\n");
     w.push_str("          workflow_sha=\"$(sha256sum ");
@@ -2153,7 +2211,7 @@ fn push_sign(
     w.push_str("\",externalParameters:{repository:$repo_url,ref:$ref,artifact:$artifact,artifactDigest:{sha256:$artifact_sha}},internalParameters:{},resolvedDependencies:[{uri:($repo_url+\".git\"),digest:{gitCommit:$git_sha}},{uri:\"flake.lock\",digest:{sha256:$flake_lock_sha}},{uri:\"release workflow\",digest:{sha256:$workflow_sha}}]},runDetails:{builder:{id:$builder_id}}}' > \"$predicate\"\n");
     w.push_str("            if sign_blob_keyless \"$file\" && attest_blob_keyless \"$file\" \"$predicate\"; then echo \"signed+attested $file (keyless)\"; elif [ -n \"${COSIGN_PRIVATE_KEY:-}\" ]; then echo \"keyless failed for $file; using COSIGN_PRIVATE_KEY\"; sign_blob_with_key \"$file\"; attest_blob_with_key \"$file\" \"$predicate\"; else echo \"::error::keyless Sigstore failed and COSIGN_PRIVATE_KEY is unset for $file\" >&2; exit 1; fi\n");
     w.push_str("            test -s \"${file}.cosign.bundle\"\n            test -s \"${file}.intoto.bundle\"\n");
-    w.push_str("            rm -f \"$predicate\"\n          done < <(printf '%s\\n' \"${files[@]}\" | LC_ALL=C sort -u)\n          SCRIPT\n");
+    w.push_str("            rm -f \"$predicate\"\n          done < <(printf '%s\\n' \"${files[@]}\" | LC_ALL=C sort -u)\n");
 }
 
 fn github_web_base(api_base: &str) -> String {
@@ -2255,8 +2313,6 @@ fn push_github_release(
     writeln!(w, "          GITHUB_API: {}", github.api_base).expect("write");
     writeln!(w, "          GITHUB_REPO: {}", github.repo).expect("write");
     w.push_str("        run: |\n          set -euo pipefail\n          test -n \"$GITHUB_TOKEN\"\n          . ./release-env\n");
-    w.push_str("          nix shell nixpkgs#curl nixpkgs#jq -c bash <<'SCRIPT'\n");
-    w.push_str("          set -euo pipefail\n          . ./release-env\n");
     w.push_str(
         "          release_payload=$(jq -n --arg tag \"$TAG\" --arg name \"$TAG\" --arg branch \"",
     );
@@ -2310,7 +2366,7 @@ fn push_github_release(
     w.push_str("            curl -sS --fail -H \"Authorization: Bearer $GITHUB_TOKEN\" -H 'Accept: application/vnd.github+json' -H 'Content-Type: application/octet-stream' --data-binary \"@$file\" \"$upload_url?name=$name\" > /dev/null\n");
     w.push_str("          done < <(printf '%s\\n' \"");
     w.push('$');
-    w.push_str("{files[@]}\" | LC_ALL=C sort -u)\n          SCRIPT\n");
+    w.push_str("{files[@]}\" | LC_ALL=C sort -u)\n");
 }
 
 fn push_forgejo_release(
@@ -2328,8 +2384,6 @@ fn push_forgejo_release(
     writeln!(w, "          FORGEJO_API: {}", forgejo.api_base).expect("write");
     writeln!(w, "          FORGEJO_REPO: {}", forgejo.repo).expect("write");
     w.push_str("        run: |\n          set -euo pipefail\n          test -n \"$FORGEJO_TOKEN\"\n          . ./release-env\n");
-    w.push_str("          nix shell nixpkgs#curl nixpkgs#jq -c bash <<'SCRIPT'\n");
-    w.push_str("          set -euo pipefail\n          . ./release-env\n");
     writeln!(
         w,
         "          release_payload=$(jq -n --arg tag \"$TAG\" --arg name \"$TAG\" --arg branch \"{branch}\" --argjson prerelease \"$IS_PRERELEASE\" --rawfile body release-notes.md '{{tag_name: $tag, target_commitish: $branch, name: $name, body: $body, draft: false, prerelease: $prerelease}}')",
@@ -2383,9 +2437,7 @@ fn push_forgejo_release(
     w.push_str("            asset_id=\"$(curl -sS --fail -H \"Authorization: token ${FORGEJO_TOKEN}\" \"${FORGEJO_API}/repos/${FORGEJO_REPO}/releases/${release_id}/assets\" | jq -r --arg name \"$name\" '.[] | select(.name == $name) | .id' | head -n 1)\"\n");
     w.push_str("            if [ -n \"$asset_id\" ]; then curl -sS --fail -X DELETE -H \"Authorization: token ${FORGEJO_TOKEN}\" \"${FORGEJO_API}/repos/${FORGEJO_REPO}/releases/${release_id}/assets/${asset_id}\"; fi\n");
     w.push_str("            curl -sS --fail -H \"Authorization: token ${FORGEJO_TOKEN}\" -H 'Content-Type: application/octet-stream' --data-binary \"@${file}\" \"${FORGEJO_API}/repos/${FORGEJO_REPO}/releases/${release_id}/assets?name=${name}\" > /dev/null\n");
-    w.push_str(
-        "          done < <(printf '%s\\n' \"${files[@]}\" | LC_ALL=C sort -u)\n          SCRIPT\n",
-    );
+    w.push_str("          done < <(printf '%s\\n' \"${files[@]}\" | LC_ALL=C sort -u)\n");
 }
 
 /// Emit the stable-only guard shared by downstream package-repo steps.
@@ -2675,7 +2727,7 @@ fn push_publish_aur(w: &mut String, aur: &ResolvedAur, activated_remote: bool) {
         w.push_str("          test -n \"${AUR_SSH_KEY:-}\"\n");
     }
     w.push_str(
-        "          nix shell nixpkgs#git nixpkgs#openssh nixpkgs#pacman nixpkgs#util-linux -c bash <<'SCRIPT'\n",
+        "          nix shell nixpkgs#openssh nixpkgs#pacman nixpkgs#util-linux -c bash <<'SCRIPT'\n",
     );
     w.push_str("          set -euo pipefail\n          . ./release-env\n");
     w.push_str("          AUR_HOST='aur.archlinux.org'; AUR_SSH=\"$HOME/.ssh/aur\"\n");
@@ -2872,7 +2924,14 @@ fn push_publish_homebrew(
     writeln!(w, "          git add Formula/{}.rb; git commit -m \"{} ${{VERSION}}\"; git push origin \"HEAD:${{DEFAULT_BRANCH}}\"", homebrew.name, homebrew.name).expect("write");
 }
 
-fn push_publish_scoop(w: &mut String, scoop: &ResolvedScoop, soft_skip: bool) {
+fn push_publish_scoop(w: &mut String, platform: Platform, scoop: &ResolvedScoop, soft_skip: bool) {
+    super::ci::push_stable_rust_setup_step(w, platform);
+    writeln!(
+        w,
+        "      - name: Install Simit for Scoop\n        run: {} --root \"$RUNNER_TEMP/simit-scoop\"",
+        super::simit_cargo_install()
+    )
+    .expect("write");
     w.push_str("      - name: Publish Scoop bucket\n        env:\n");
     writeln!(
         w,
@@ -2903,7 +2962,7 @@ fn push_publish_scoop(w: &mut String, scoop: &ResolvedScoop, soft_skip: bool) {
             writeln!(w, "          test -s \"release/{arm64_zip}\"").expect("write");
         }
     }
-    w.push_str("          nix develop -c simit dist scoop bump --version \"$VERSION\" --bucket-url \"$SCOOP_BUCKET_URL\" --bucket-token-env SCOOP_BUCKET_TOKEN --work-dir scoop-bucket \\\n");
+    w.push_str("          \"$RUNNER_TEMP/simit-scoop/bin/simit\" dist scoop bump --version \"$VERSION\" --bucket-url \"$SCOOP_BUCKET_URL\" --bucket-token-env SCOOP_BUCKET_TOKEN --work-dir scoop-bucket \\\n");
     writeln!(w, "            --archive \"x64=release/{x64_zip}\" \\").expect("write");
     if scoop.architectures.arm64 {
         let arm64_zip = scoop_windows_archive(scoop, "aarch64");
@@ -3214,8 +3273,6 @@ fn push_announce(
     .expect("write");
     w.push_str("        run: |\n          set -euo pipefail\n");
     push_stable_guard(w, "announcements");
-    w.push_str("          nix shell nixpkgs#curl nixpkgs#jq -c bash <<'SCRIPT'\n");
-    w.push_str("          set -euo pipefail\n          . ./release-env\n");
     w.push_str("          release_url=\"$(jq -r '.html_url // .url // empty' release.json 2>/dev/null || true)\"\n");
     writeln!(
         w,
@@ -3236,7 +3293,7 @@ fn push_announce(
     w.push_str("            encoded_room=\"$(jq -rn --arg v \"$MATRIX_ROOM\" '$v|@uri')\"\n");
     w.push_str("            jq -n --arg body \"$body\" '{msgtype: \"m.text\", body: $body}' > matrix-message.json\n");
     w.push_str("            curl -sS --fail -X PUT -H \"Authorization: Bearer ${MATRIX_TOKEN}\" -H 'Content-Type: application/json' -d @matrix-message.json \"${MATRIX_HOMESERVER%/}/_matrix/client/r0/rooms/${encoded_room}/send/m.room.message/${txnid}\" > /dev/null\n");
-    w.push_str("          else echo 'Matrix secrets are required because release announcements are configured.' >&2; exit 1; fi\n          SCRIPT\n");
+    w.push_str("          else echo 'Matrix secrets are required because release announcements are configured.' >&2; exit 1; fi\n");
 }
 
 fn push_publish_flathub(w: &mut String, flatpak: &FlatpakConfig, activated_remote: bool) {
@@ -3262,9 +3319,7 @@ fn push_publish_flathub(w: &mut String, flatpak: &FlatpakConfig, activated_remot
             writeln!(w, "          test -s \"release/{file}\"").expect("write");
         }
     }
-    w.push_str("          nix shell nixpkgs#curl nixpkgs#git nixpkgs#jq -c bash <<'SCRIPT'\n");
-    w.push_str("          set -euo pipefail\n          . ./release-env\n");
-    w.push_str("          credential_helper='!f() { echo username=x-access-token; echo \"password=$FLATHUB_TOKEN\"; }; f'\n");
+    w.push_str("          # Git expands the token when invoking this credential helper.\n          # shellcheck disable=SC2016\n          credential_helper='!f() { echo username=x-access-token; echo \"password=$FLATHUB_TOKEN\"; }; f'\n");
     writeln!(w, "          rm -rf flathub-repo; git -c credential.helper=\"$credential_helper\" clone https://github.com/{}.git flathub-repo", flatpak.repo).expect("write");
     w.push_str("          cd flathub-repo\n          git config credential.helper \"$credential_helper\"; git config user.email 'ci@localhost'; git config user.name 'release bot'\n");
     w.push_str("          git checkout -B \"release/${VERSION}\"\n");
@@ -3286,7 +3341,7 @@ fn push_publish_flathub(w: &mut String, flatpak: &FlatpakConfig, activated_remot
     writeln!(w, "          status=\"$(curl -sS -o pr.json -w '%{{http_code}}' -H \"Authorization: Bearer ${{FLATHUB_TOKEN}}\" -H 'Accept: application/vnd.github+json' -d \"$payload\" https://api.github.com/repos/{}/pulls)\"", flatpak.repo).expect("write");
     w.push_str("          if [ \"$status\" -eq 422 ]; then echo 'PR exists or rejected'; jq -r '.message' pr.json; exit 0; fi\n");
     w.push_str("          if [ \"$status\" -lt 200 ] || [ \"$status\" -ge 300 ]; then cat pr.json; exit 1; fi\n");
-    w.push_str("          jq -r '.html_url' pr.json\n          SCRIPT\n");
+    w.push_str("          jq -r '.html_url' pr.json\n");
 }
 
 fn push_publish_winget(
@@ -3349,7 +3404,7 @@ fn push_publish_winget(
     }
     // Under activated-remote a failed submission stays a warning while the
     // channel is inactive (the first submission); once active it is an error.
-    w.push_str("          nix shell nixpkgs#curl nixpkgs#jq -c bash <<'SCRIPT'");
+    w.push_str("          bash <<'SCRIPT'");
     if activated_remote {
         w.push_str(" || publisher_missing winget 'GitHub API submission failed'");
     }
@@ -4506,7 +4561,7 @@ printf '%s' "$TEST_FLAKE_VERSION""#,
         assert!(workflow.contains("HOMEBREW_TAP_TOKEN: ${{ secrets.FORGEJO_HOMEBREW_TOKEN }}"));
         assert!(workflow.contains("SCOOP_BUCKET_TOKEN: ${{ secrets.FORGEJO_SCOOP_TOKEN }}"));
         assert!(workflow.contains("nix run '.#harbor-rs' -- brew bump"));
-        assert!(workflow.contains("nix develop -c simit dist scoop bump"));
+        assert!(workflow.contains("\"$RUNNER_TEMP/simit-scoop/bin/simit\" dist scoop bump"));
         assert!(workflow.contains("--archive \"x64=release/modde-${VERSION}-x86_64-windows.zip\""));
         // Prerelease gating present on downstream package repos
         assert!(workflow.contains("skipping AUR packages."));
@@ -5439,7 +5494,8 @@ printf '%s' "$TEST_FLAKE_VERSION""#,
         );
 
         for step in [&standalone, &activated] {
-            assert!(step.contains("nix shell nixpkgs#curl nixpkgs#jq -c bash <<'SCRIPT'"));
+            assert!(step.contains("bash <<'SCRIPT'"));
+            assert!(!step.contains("nix shell"));
             for gone in ["wine", "wingetcreate", "winepath"] {
                 assert!(!step.contains(gone), "{gone} left in the winget step");
             }
@@ -6113,6 +6169,162 @@ cat "$FAKE/code"
     }
 
     #[test]
+    fn promotion_and_republish_install_nix_only_for_their_own_steps() {
+        let mut github = codeberg();
+        github.provider = ReleaseProvider::Github;
+        github.api_base = "https://api.github.com".to_owned();
+        let publish = ReleasePublishConfig::default();
+        let (aur, copr, apt, homebrew, scoop) = (aur(), copr(), apt(), homebrew(), scoop());
+        let (chocolatey, windows, signpath, winget) = (
+            chocolatey(),
+            windows_signing(),
+            signpath_signing(),
+            sorrel_winget(),
+        );
+        let pypi = PypiReleaseConfig {
+            trusted_publishing: true,
+            token_secret: "PYPI_TOKEN".into(),
+        };
+        let revision = NixSetupActionRef::try_from("a".repeat(40)).unwrap();
+        let action = format!(
+            "caniko/simit/.github/actions/nix-setup@{}",
+            revision.as_str()
+        );
+        let cargo: crate::config::CargoReleaseArtifact = toml_edit::de::from_str(
+            "id = 'linux'\nrunner = 'ubuntu-24.04'\ntarget = 'x86_64-unknown-linux-gnu'\ntoolchain = 'stable'\nbinaries = ['demo']\narchive = 'demo-{version}.tar.gz'",
+        )
+        .unwrap();
+
+        for (feature, promotion_nix, republish_nix) in [
+            ("native", false, false),
+            ("forgejo-release", false, false),
+            ("unsigned", false, false),
+            ("version-attr", true, true),
+            ("bundle-inline", true, false),
+            ("bundle-matrix", false, false),
+            ("extract", true, false),
+            ("supply-chain", true, false),
+            ("custom-build", true, false),
+            ("sbom", true, false),
+            ("smoke", true, false),
+            ("apt", true, false),
+            ("aur", true, true),
+            ("copr", true, false),
+            ("homebrew", true, true),
+            ("pypi", true, true),
+            ("authenticode", true, false),
+            ("signpath", true, false),
+            ("chocolatey", true, true),
+        ] {
+            let mut artifacts = ArtifactsConfig {
+                sign: feature != "unsigned",
+                cargo: vec![cargo.clone()],
+                ..toml_edit::de::from_str("").unwrap()
+            };
+            match feature {
+                "version-attr" => artifacts.version_attr = Some("demo".into()),
+                "bundle-inline" | "bundle-matrix" => {
+                    artifacts.nix_bundle_attrs.push("release-bundle".into());
+                    if feature == "bundle-matrix" {
+                        artifacts
+                            .system_runners
+                            .insert("x86_64-linux".into(), "ubuntu-24.04".into());
+                    }
+                }
+                "extract" => artifacts.extract.push(sorrel_extract()),
+                "supply-chain" => {
+                    artifacts.supply_chain_command =
+                        Some("env CI=1 nix develop -c cargo deny check".into())
+                }
+                "custom-build" => artifacts
+                    .build_commands
+                    .push("out=$(nix build --print-out-paths)".into()),
+                "sbom" => artifacts
+                    .sbom_commands
+                    .push("bash -c 'nix run .#sbom'".into()),
+                _ => {}
+            }
+            let forgejo = codeberg();
+            let workflow = render_with_nix_setup(
+                &ReleaseWorkflowInputs {
+                    platform: Platform::Github,
+                    runner: "ubuntu-24.04",
+                    preinstalled_nix: false,
+                    publish_enforcement: ReleasePublisherEnforcement::default(),
+                    publish: &publish,
+                    artifacts: &artifacts,
+                    prebuild: None,
+                    smoke_command: (feature == "smoke")
+                        .then_some("if true; then nix-shell --run true; fi; scripts/smoke"),
+                    tag_prefix: crate::release_identity::TagPrefix::None,
+                    notes_source: None,
+                    required_gates: &[],
+                    release: Some(if feature == "forgejo-release" {
+                        &forgejo
+                    } else {
+                        &github
+                    }),
+                    attic: None,
+                    aur: (feature == "aur").then_some(&aur),
+                    copr: (feature == "copr").then_some(&copr),
+                    apt: (feature == "apt").then_some(&apt),
+                    homebrew: (feature == "homebrew").then_some(&homebrew),
+                    scoop: Some(&scoop),
+                    chocolatey: (feature == "chocolatey").then_some(&chocolatey),
+                    windows_signing: match feature {
+                        "signpath" => Some(&signpath),
+                        "authenticode" => Some(&windows),
+                        _ => None,
+                    },
+                    flatpak: None,
+                    winget: Some(&winget),
+                    announce: None,
+                    pypi: (feature == "pypi").then_some(&pypi),
+                },
+                Some(&revision),
+            );
+            let doc: serde_yaml::Value = serde_yaml::from_str(&workflow).unwrap();
+            for (job, expected_nix, signed) in [
+                ("release", promotion_nix, artifacts.sign),
+                ("republish", republish_nix, true),
+            ] {
+                let job_yaml = &doc["jobs"][job];
+                if job_yaml.is_null() {
+                    assert_eq!(job, "republish");
+                    assert!(matches!(feature, "unsigned" | "forgejo-release"));
+                    continue;
+                }
+                let rendered = serde_yaml::to_string(job_yaml).unwrap();
+                assert_eq!(rendered.contains(&action), expected_nix, "{feature}/{job}");
+                let has_nix_command = job_yaml["steps"]
+                    .as_sequence()
+                    .unwrap()
+                    .iter()
+                    .filter_map(|step| step["run"].as_str())
+                    .any(|run| run.contains("nix ") || run.contains("nix-shell"));
+                assert_eq!(has_nix_command, expected_nix, "{feature}/{job}");
+                assert_eq!(
+                    rendered.contains("minisign-0.12-linux.tar.gz"),
+                    signed,
+                    "{feature}/{job}"
+                );
+                assert_eq!(
+                    rendered.contains("/cosign/releases/download/v3.1.4/"),
+                    signed && job == "release",
+                    "{feature}/{job}"
+                );
+                assert!(!rendered.contains("nixpkgs#minisign"), "{feature}/{job}");
+                assert!(!rendered.contains("nixpkgs#cosign"), "{feature}/{job}");
+            }
+            if feature == "bundle-matrix" {
+                let bundles = serde_yaml::to_string(&doc["jobs"]["bundles"]).unwrap();
+                assert!(bundles.contains(&action));
+                assert!(bundles.contains("nix eval") && bundles.contains("nix build"));
+            }
+        }
+    }
+
+    #[test]
     fn republish_job_runs_only_selected_channels_against_the_signed_tag() {
         let (workflow, doc) = republish_doc(true, true, |_| {});
         // The probe authenticates its api.github.com calls on GitHub, so a
@@ -6324,18 +6536,10 @@ cat "$FAKE/code"
     fn republish_download_fails_closed_on_signature_or_checksum_mismatch() {
         use std::os::unix::fs::PermissionsExt;
         let (_, doc) = republish_doc(false, true, |_| {});
-        let step = step(&doc, "Download and verify release assets")["run"]
+        let body = step(&doc, "Download and verify release assets")["run"]
             .as_str()
             .unwrap();
-        let body = step
-            .split_once("<<'SCRIPT'\n")
-            .unwrap()
-            .1
-            .split_once("SCRIPT\n")
-            .unwrap()
-            .0;
-        let body = body.to_owned();
-        let run = |tamper: bool, bad_sig: bool| {
+        let run = |tamper: bool, bad_sig: bool, listed: bool| {
             let dir = tempfile::tempdir().unwrap();
             let p = dir.path();
             let zip = "sorrel-1.2.3-x86_64-windows.zip";
@@ -6358,7 +6562,8 @@ cat "$FAKE/code"
             )
             .unwrap();
             let hash = sum.split_whitespace().next().unwrap();
-            std::fs::write(p.join("assets/2"), format!("{hash}  {zip}\n")).unwrap();
+            let listed_name = if listed { zip } else { "unrelated.zip" };
+            std::fs::write(p.join("assets/2"), format!("{hash}  {listed_name}\n")).unwrap();
             std::fs::write(p.join("assets/3"), "sig").unwrap();
             if tamper {
                 std::fs::write(p.join("assets/1"), "evil bytes").unwrap();
@@ -6387,7 +6592,7 @@ cat "$FAKE/code"
                 std::env::var("PATH").unwrap()
             );
             let out = run_script(
-                &body,
+                body,
                 p,
                 &[
                     ("PATH", &path),
@@ -6412,15 +6617,17 @@ cat "$FAKE/code"
         }) {
             return;
         }
-        let (ok, err, has) = run(false, false);
+        let (ok, err, has) = run(false, false, true);
         assert!(ok && has, "{err}");
-        let (ok, _, _) = run(true, false);
+        let (ok, _, _) = run(true, false, true);
         assert!(!ok, "a tampered asset must fail the checksum");
-        let (ok, _, has) = run(false, true);
+        let (ok, _, has) = run(false, true, true);
         assert!(
             !ok && !has,
             "a bad signature stops before any asset is fetched"
         );
+        let (ok, _, has) = run(false, false, false);
+        assert!(!ok && !has, "an unlisted asset must not be downloaded");
     }
 
     #[test]
@@ -6435,27 +6642,16 @@ cat "$FAKE/code"
         }
         let (_, doc) = republish_doc(true, true, |_| {});
         let dir = tempfile::tempdir().unwrap();
-        let download = step(&doc, "Download and verify release assets")["run"]
-            .as_str()
-            .unwrap();
-        let heredoc = download
-            .split_once("<<'SCRIPT'\n")
-            .unwrap()
-            .1
-            .split_once("SCRIPT\n")
-            .unwrap()
-            .0;
-        for (i, script) in [
-            step(&doc, "Select channels to republish")["run"]
-                .as_str()
-                .unwrap(),
-            heredoc,
+        for (i, name) in [
+            "Select channels to republish",
+            "Set up native release tools",
+            "Download and verify release assets",
         ]
         .into_iter()
         .enumerate()
         {
             let path = dir.path().join(format!("s{i}.sh"));
-            std::fs::write(&path, script).unwrap();
+            std::fs::write(&path, step(&doc, name)["run"].as_str().unwrap()).unwrap();
             let out = Command::new("shellcheck")
                 .args(["--shell=bash", "--severity=info", "--exclude=SC1091"])
                 .arg(&path)

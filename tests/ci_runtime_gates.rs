@@ -475,7 +475,9 @@ fn github_nix_input_transport_works_without_a_runner_ssh_key() {
     let directory = fixture("nix", false, false);
     let config_path = directory.path().join("simit.toml");
     let mut project_config = fs::read_to_string(&config_path).unwrap();
-    project_config.push_str("\n[release.github]\nrepo = \"example/runtime-gates-fixture\"\n");
+    project_config.push_str(
+        "\n[release.github]\nrepo = \"example/runtime-gates-fixture\"\n\n[release.artifacts]\nversion_attr = \"demo\"\n",
+    );
     fs::write(&config_path, project_config).unwrap();
     let release = common::simit()
         .current_dir(directory.path())
@@ -495,7 +497,9 @@ fn github_nix_input_transport_works_without_a_runner_ssh_key() {
         .unwrap()
         .iter()
         .find_map(|step| step["run"].as_str().filter(|run| run.contains("insteadOf")))
-        .expect("Comprehensive release jobs must also normalize GitHub SSH input transport");
+        .expect(
+            "Release jobs evaluating a flake version must normalize GitHub SSH input transport",
+        );
     let setup = commands(directory.path(), "ci")
         .into_iter()
         .find(|run| run.contains("insteadOf"))

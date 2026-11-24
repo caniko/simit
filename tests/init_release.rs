@@ -209,13 +209,15 @@ fn nix_bundle_release_workflow_is_byte_stable() {
     let workflow = render_release(BUNDLE_RELEASE);
     assert_eq!(
         format!("{:x}", Sha256::digest(&workflow)),
-        "713bb719c6facfb1838748a9ccacaf373324d127815703d59d050c563e935677"
+        "e7262426ad310792f36b909361ea2c0ec8ec3a6a9d09a5206c1f0bf31cd9d7dd"
     );
     let yaml: serde_yaml::Value = serde_yaml::from_str(&workflow).unwrap();
     let validate = serde_yaml::to_string(&yaml["jobs"]["validate"]).unwrap();
     let bundles = serde_yaml::to_string(&yaml["jobs"]["bundles"]).unwrap();
+    let promotion = serde_yaml::to_string(&yaml["jobs"]["release"]).unwrap();
     assert!(!validate.contains("install-nix-action") && !validate.contains("nix "));
     assert!(bundles.contains("install-nix-action"));
+    assert!(!promotion.contains("install-nix-action") && !promotion.contains("nix "));
     actionlint(&workflow);
 }
 

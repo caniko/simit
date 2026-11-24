@@ -131,6 +131,19 @@ fn netrc_secret_authenticates_github_release_nix_substituters() {
     }
 
     let dir = project(&format!("{config}netrc_secret='ATTIC_NETRC'\n"));
+    let release: serde_yaml::Value = serde_yaml::from_str(&render(dir.path())).unwrap();
+    assert_eq!(
+        release["jobs"]["prebuild"]["secrets"]["ATTIC_NETRC"],
+        "${{ secrets.ATTIC_NETRC }}"
+    );
+    let promotion = serde_yaml::to_string(&release["jobs"]["release"]).unwrap();
+    assert!(!promotion.contains("ATTIC_NETRC"));
+    assert!(!promotion.contains("install-nix-action"));
+
+    // Unlike prebuild-only promotion, a configured flake version uses Nix here.
+    let dir = project(&format!(
+        "{config}version_attr='demo'\nnetrc_secret='ATTIC_NETRC'\n"
+    ));
     for (workflow, job, secret) in [
         (render(dir.path()), "release", "${{ secrets.ATTIC_NETRC }}"),
         (prebuild(dir.path()), "build", "${{ secrets.ATTIC_NETRC }}"),
@@ -155,12 +168,6 @@ fn netrc_secret_authenticates_github_release_nix_substituters() {
             );
         }
     }
-    let release: serde_yaml::Value = serde_yaml::from_str(&render(dir.path())).unwrap();
-    assert_eq!(
-        release["jobs"]["prebuild"]["secrets"]["ATTIC_NETRC"],
-        "${{ secrets.ATTIC_NETRC }}"
-    );
-
     for (config, error) in [
         (
             format!("{config}netrc_secret='ATTIC_NETRC'\n")
