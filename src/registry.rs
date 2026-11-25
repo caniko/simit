@@ -2949,8 +2949,8 @@ jobs:
                 Some("github.com/caniko/simit"),
             ),
             (
-                "ssh://git@codefloe.com:2222/caniko/pink-raven.git",
-                Some("codefloe.com/caniko/pink-raven"),
+                "ssh://git@codefloe.com:2222/caniko/example-app.git",
+                Some("codefloe.com/caniko/example-app"),
             ),
             (
                 "git@codeberg.org:caniko/group/sub.git",

@@ -659,20 +659,20 @@ mod tests {
     use super::*;
     use serde_json::json;
 
-    const REVISION: &str = "a96a22ab6f554631e72068acdf22baab4bdbe622";
+    const REVISION: &str = "0123456789abcdef0123456789abcdef01234567";
     const ORIGIN: &str = "https://ci.codefloe.com";
-    const BUILD: &str = ".crow/build-pink-raven.yaml";
+    const BUILD: &str = ".crow/build-example-app.yaml";
     const VM: &str = ".crow/vm-checks.yaml";
     const MAINTENANCE: &str = "simit/update/0123456789abcdef";
-    const BRANCH: &str = "repos/caniko/pink-raven/branches/trunk";
-    const LIST: &str = "repos/1906/pipelines?branch=trunk&event=push&after=2026-10-02T06%3A34%3A59Z&page=1&perPage=50";
-    const PIPELINE: &str = "repos/1906/pipelines/52";
-    const CONFIG: &str = "repos/1906/pipelines/52/config";
+    const BRANCH: &str = "repos/caniko/example-app/branches/trunk";
+    const LIST: &str = "repos/4242/pipelines?branch=trunk&event=push&after=2026-10-02T06%3A34%3A59Z&page=1&perPage=50";
+    const PIPELINE: &str = "repos/4242/pipelines/52";
+    const CONFIG: &str = "repos/4242/pipelines/52/config";
 
     /// Real codefloe Forgejo and Crow replies: (fixture, forge, crow).
     fn fixture() -> (Value, Value, Value) {
         let value: Value = serde_json::from_str(include_str!(
-            "../../../tests/fixtures/forgejo-adapter/pink-raven.json"
+            "../../../tests/fixtures/forgejo-adapter/example-app.json"
         ))
         .unwrap();
         (value.clone(), value["forge"].clone(), value["crow"].clone())
@@ -708,13 +708,13 @@ mod tests {
     }
 
     fn source(forge: &Value, path: &str) -> String {
-        let file = &forge[format!("repos/caniko/pink-raven/contents/{path}?ref={REVISION}")];
+        let file = &forge[format!("repos/caniko/example-app/contents/{path}?ref={REVISION}")];
         String::from_utf8(workflow_bytes(path, file).unwrap()).unwrap()
     }
 
     fn request(operation: &str) -> AdapterRequest {
         serde_json::from_value(json!({
-            "schemaVersion":2,"operation":operation,"coordinate":"codefloe.com/caniko/pink-raven",
+            "schemaVersion":2,"operation":operation,"coordinate":"codefloe.com/caniko/example-app",
             "apiUrl":"https://codefloe.com/api/v1","credentialFile":"/run/credentials/forgejo",
             "ciCredentialFile":"/run/credentials/crow","authority":ORIGIN,
             "revision":(operation != "inspect").then_some(REVISION),"branch":null,
@@ -792,7 +792,7 @@ mod tests {
                 .iter()
                 .map(|check| (check.name.as_str(), check.run.as_str()))
                 .collect::<Vec<_>>(),
-            [("build", "1906/52"), ("vm-checks", "1906/52")]
+            [("build", "4242/52"), ("vm-checks", "4242/52")]
         );
         let mutated = |change: &dyn Fn(&mut Value)| {
             let mut crow = crow.clone();
@@ -821,10 +821,10 @@ mod tests {
         );
         let message = |change: &dyn Fn(&mut Value)| mutated(change).unwrap_err().to_string();
         assert!(
-            message(&|crow| crow["repos/lookup/caniko/pink-raven"]["active"] = json!(false))
+            message(&|crow| crow["repos/lookup/caniko/example-app"]["active"] = json!(false))
                 .contains("not active")
         );
-        // Quota denial as codefloe reports it (pink-raven pipelines 118-120).
+        // Quota denial as codefloe reports it (example-app pipelines 118-120).
         assert!(
             message(&|crow| {
                 let build = &mut crow[PIPELINE]["workflows"][0];
@@ -839,17 +839,17 @@ mod tests {
             .contains("quota exhausted")
         );
         let changes: Vec<&dyn Fn(&mut Value)> = vec![
-            &|crow| crow["repos/lookup/caniko/pink-raven"]["forge_remote_id"] = json!("5405"),
+            &|crow| crow["repos/lookup/caniko/example-app"]["forge_remote_id"] = json!("4344"),
             // Same name and id on another forge connection.
             &|crow| {
-                crow["repos/lookup/caniko/pink-raven"]["clone_url"] =
-                    json!("https://forge.example/caniko/pink-raven.git")
+                crow["repos/lookup/caniko/example-app"]["clone_url"] =
+                    json!("https://forge.example/caniko/example-app.git")
             },
-            &|crow| crow["repos/lookup/caniko/pink-raven"]["default_branch"] = json!("main"),
+            &|crow| crow["repos/lookup/caniko/example-app"]["default_branch"] = json!("main"),
             &|crow| {
-                crow["repos/lookup/caniko/pink-raven"]["require_approval"] = json!("all_events")
+                crow["repos/lookup/caniko/example-app"]["require_approval"] = json!("all_events")
             },
-            &|crow| crow["repos/lookup/caniko/pink-raven"]["config_file"] = json!(".ci/"),
+            &|crow| crow["repos/lookup/caniko/example-app"]["config_file"] = json!(".ci/"),
             // Duplicate originals for one commit are ambiguous.
             &|crow| {
                 let mut duplicate = crow[LIST][1].clone();
@@ -917,9 +917,9 @@ mod tests {
         let changes: Vec<&dyn Fn(&mut Value)> = vec![
             &|forge| forge[BRANCH]["required_approvals"] = json!(1),
             &|forge| forge[BRANCH]["user_can_push"] = json!(false),
-            &|forge| forge["repos/caniko/pink-raven"]["archived"] = json!(true),
-            &|forge| forge["repos/caniko/pink-raven"]["mirror"] = json!(true),
-            &|forge| forge["repos/caniko/pink-raven"]["full_name"] = json!("caniko/renamed"),
+            &|forge| forge["repos/caniko/example-app"]["archived"] = json!(true),
+            &|forge| forge["repos/caniko/example-app"]["mirror"] = json!(true),
+            &|forge| forge["repos/caniko/example-app"]["full_name"] = json!("caniko/renamed"),
         ];
         for change in changes {
             assert!(mutated(&inspect, change).is_err());
@@ -945,7 +945,7 @@ mod tests {
             "protected_file_patterns":"","enable_push":true,"enable_push_whitelist":false});
         let protected = |rule: Value| {
             move |forge: &mut Value| {
-                forge["repos/caniko/pink-raven/branch_protections"] = json!([rule.clone()])
+                forge["repos/caniko/example-app/branch_protections"] = json!([rule.clone()])
             }
         };
         mutated(&inspect, &protected(rule.clone())).unwrap();

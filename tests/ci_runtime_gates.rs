@@ -533,8 +533,8 @@ fn github_nix_input_transport_works_without_a_runner_ssh_key() {
             "https://github.com/caniko/harbor-rs.git",
         ),
         (
-            "ssh://git@codefloe.com/caniko/cotton.git",
-            "ssh://git@codefloe.com/caniko/cotton.git",
+            "ssh://git@codefloe.com/caniko/example-lib.git",
+            "ssh://git@codefloe.com/caniko/example-lib.git",
         ),
     ] {
         let result = Command::new("git")
