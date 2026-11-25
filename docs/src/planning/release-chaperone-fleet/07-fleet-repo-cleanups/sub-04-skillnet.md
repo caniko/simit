@@ -9,7 +9,7 @@
 
 ## Working tree
 
-[/data/nvme0/can/Projects/skillnet](file:///data/nvme0/can/Projects/skillnet)
+`<workspace>/skillnet`
 — feature branch off the default branch (`main`). Remote:
 `ssh://git@codeberg.org/caniko/skillnet.git`.
 
@@ -145,5 +145,5 @@ the default `simit init flake` wants to remove them.
 - Phase 03 (preferred dependency for clean flake `--check`).
 - Phase 07 README.
 - Phase 11 sub-04 in
-  `/home/can/.claude/plans/detritus-rust-cache/11-fleet-adoption/sub-04-skillnet.md`
+  `~/.claude/plans/detritus-rust-cache/11-fleet-adoption/sub-04-skillnet.md`
   (predecessor).

@@ -11,7 +11,7 @@
 
 ## Working tree
 
-[/data/nvme0/can/Projects/simit](file:///data/nvme0/can/Projects/simit)
+`<workspace>/simit`
 — branch off `trunk`. Independent of phases 01–04, but benefits
 from phase 02's unified `--check` story (verify will call the same
 check path). If phase 02 has not landed yet, fall back to invoking
@@ -163,6 +163,6 @@ refs/tags/<version>`.
 - Research dossier: improvement (6) and (10).
 - Phase 02 (preferred dependency, optional).
 - Chaperone skill:
-  `/home/can/.claude/skills/rust-crate-release-chaperone/SKILL.md`
+  `~/.claude/skills/rust-crate-release-chaperone/SKILL.md`
 - [src/commands/release.rs](../../../src/commands/release.rs)
   — existing release subcommands.

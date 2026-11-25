@@ -157,8 +157,8 @@ and 03 running in parallel beside them.
 - Research dossier:
   [release-chaperone-fleet-research.md](../release-chaperone-fleet-research.md)
 - Upstream readiness report:
-  `/home/can/.claude/plans/detritus-rust-cache/11-fleet-adoption/release-chaperone-gap-report.md`
+  `~/.claude/plans/detritus-rust-cache/11-fleet-adoption/release-chaperone-gap-report.md`
 - Phase 11 sub-layer set (predecessor):
-  `/home/can/.claude/plans/detritus-rust-cache/11-fleet-adoption/`
+  `~/.claude/plans/detritus-rust-cache/11-fleet-adoption/`
 - Chaperone skill:
-  `/home/can/.claude/skills/rust-crate-release-chaperone/SKILL.md`
+  `~/.claude/skills/rust-crate-release-chaperone/SKILL.md`

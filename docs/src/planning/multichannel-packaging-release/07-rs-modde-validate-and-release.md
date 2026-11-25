@@ -14,7 +14,7 @@
 
 ## Working tree
 
-`/data/nvme0/can/Projects/rs-modde`. Depends on Phase 06 (rs-modde on the
+`<workspace>/rs-modde`. Depends on Phase 06 (rs-modde on the
 released simit, workflows regenerated, committed) and Phase 05 (secrets reach
 the atlas job). Uses the fork `nix_tool` for chocolatey unless Phase 04 merged.
 This is the last phase; on success the plan is exhausted.
@@ -93,7 +93,7 @@ so this proof doesn't cost a real version.
 
 ## Files likely touched
 
-- `/data/nvme0/can/Projects/rs-modde` — tags only (and, if a generator bug is
+- `<workspace>/rs-modde` — tags only (and, if a generator bug is
   found, a bounce to simit + regenerated workflows committed via Phase 06 steps).
 
 ## Risk profile

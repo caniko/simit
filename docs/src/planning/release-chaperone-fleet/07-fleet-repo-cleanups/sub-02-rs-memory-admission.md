@@ -9,7 +9,7 @@
 
 ## Working tree
 
-[/data/nvme0/can/Projects/rs-memory-admission](file:///data/nvme0/can/Projects/rs-memory-admission)
+`<workspace>/rs-memory-admission`
 — feature branch off `trunk`. Remote:
 `ssh://git@codeberg.org/caniko/rs-memory-admission.git`.
 
@@ -156,5 +156,5 @@ chaperone`. Body covers: worktree cleanup decisions, simit
 - Research dossier: per-repo cleanups (rs-memory-admission).
 - Phase 07 README.
 - Phase 11 sub-02 in
-  `/home/can/.claude/plans/detritus-rust-cache/11-fleet-adoption/sub-02-rs-memory-admission.md`
+  `~/.claude/plans/detritus-rust-cache/11-fleet-adoption/sub-02-rs-memory-admission.md`
   (predecessor).

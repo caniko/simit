@@ -61,7 +61,7 @@ Conflict surface is small:
 
 ## Phase-level acceptance criteria
 
-- [ ] `simit projects show /data/nvme0/can/Projects/simit` prints
+- [ ] `simit projects show <workspace>/simit` prints
       the `simit init ci` regeneration command in its output.
 - [ ] `simit init flake --check --diff` on a project that would
       lose a pre-commit hook prints an inline `note: removing

@@ -11,7 +11,7 @@
 
 ## Working tree
 
-`/data/nvme0/can/Projects/simit`. Depends on Phase 02 (tests + docs + changelog
+`<workspace>/simit`. Depends on Phase 02 (tests + docs + changelog
 ready). After this phase the new simit version is on crates.io and Codeberg,
 unblocking Phase 06.
 
@@ -70,7 +70,7 @@ it."
 
 ## Files likely touched
 
-- `/data/nvme0/can/Projects/simit/{Cargo.toml,Cargo.lock,CHANGELOG.md}` (via
+- `<workspace>/simit/{Cargo.toml,Cargo.lock,CHANGELOG.md}` (via
   simit tooling) + the release tag.
 
 ## Pitfalls

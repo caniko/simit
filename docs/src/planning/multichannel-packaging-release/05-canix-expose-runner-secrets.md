@@ -10,7 +10,7 @@
 
 ## Working tree
 
-`/data/nvme0/can/Projects/canix` (NixOS multi-host repo). Independent of the
+`<workspace>/canix` (NixOS multi-host repo). Independent of the
 simit/rs-modde phases — runs in parallel with Waves 0–3. Use the `canix-cli`
 skill for deploy/secret operations.
 
@@ -28,7 +28,7 @@ soft-skip), never a half-configured failure.
 `choco-api-key` is registered as a Forgejo **runner credential**
 (`services.forgejo.runner.instances.codeberg.credentials.choco-api-key`,
 file at `/run/credentials/forgejo-runner@codeberg.service/choco-api-key`), but
-`root/hosts/atlas/server/forgejo-runners.nix` currently only mounts the **Attic**
+`root/hosts/<host>/server/forgejo-runners.nix` currently only mounts the **Attic**
 token into job containers (`-v … -e ATTIC_TOKENS_DIR=…`). So the choco key — and
 any other runner-managed cred — is not yet visible to jobs. The release workflow
 references `codeberg_token`, `chocolatey_api_key`/runner env, `homebrew_tap_token`,
@@ -85,8 +85,8 @@ references `codeberg_token`, `chocolatey_api_key`/runner env, `homebrew_tap_toke
 
 ## Files likely touched
 
-- `/data/nvme0/can/Projects/canix/root/hosts/atlas/server/forgejo-runners.nix`
-- `/data/nvme0/can/Projects/canix/root/modules/server/forgejo-runner-secrets/*.nix`
+- `<workspace>/canix/root/hosts/<host>/server/forgejo-runners.nix`
+- `<workspace>/canix/root/modules/server/forgejo-runner-secrets/*.nix`
   (+ `lib.nix` `secretMappings`)
 
 ## Pitfalls

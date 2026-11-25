@@ -9,7 +9,7 @@
 
 ## Working tree
 
-[/data/nvme0/can/Projects/simit](file:///data/nvme0/can/Projects/simit)
+`<workspace>/simit`
 — branch off `trunk`. Independent of phases 01–03; can land any
 time, but coordinate with phase 03 if they ship together (both
 touch the same removal-detection path).

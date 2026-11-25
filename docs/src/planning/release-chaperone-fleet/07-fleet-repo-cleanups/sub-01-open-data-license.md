@@ -9,7 +9,7 @@
 
 ## Working tree
 
-[/data/nvme0/can/Projects/open-data-license](file:///data/nvme0/can/Projects/open-data-license)
+`<workspace>/open-data-license`
 — feature branch off the default branch (`trunk`). Remote:
 `ssh://git@codeberg.org/caniko/open-data-license.git`.
 
@@ -146,7 +146,7 @@ origin`. Identify the `v0.1.0` legacy tag and document in the
 - [ ] PR description flags the `0.2.0` sync-up-vs-bump decision
       with the evidence the user needs to decide.
 - [ ] PR description documents the `v0.1.0` legacy tag finding.
-- [ ] `simit projects show /data/nvme0/can/Projects/open-data-license`
+- [ ] `simit projects show <workspace>/open-data-license`
       reports `ci: managed` (or `managed+extra` if `pages.yaml`
       remains).
 
@@ -175,6 +175,6 @@ origin`. Identify the `v0.1.0` legacy tag and document in the
 - Research dossier: per-repo cleanups (open-data-license).
 - Phase 07 README.
 - Phase 11 sub-01 in
-  `/home/can/.claude/plans/detritus-rust-cache/11-fleet-adoption/sub-01-open-data-license.md`
+  `~/.claude/plans/detritus-rust-cache/11-fleet-adoption/sub-01-open-data-license.md`
   (predecessor).
 - Chaperone skill.

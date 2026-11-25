@@ -8,7 +8,7 @@
 
 ## Working tree
 
-[/data/nvme0/can/Projects/simit](file:///data/nvme0/can/Projects/simit)
+`<workspace>/simit`
 — branch off `trunk` _after_ phase 01 has landed.
 
 ## Goal

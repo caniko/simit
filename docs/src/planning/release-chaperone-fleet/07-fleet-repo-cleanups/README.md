@@ -11,11 +11,11 @@
 
 | #   | Slug                | Model            | Touches                                         | Sub-layer file                                                   |
 | --- | ------------------- | ---------------- | ----------------------------------------------- | ---------------------------------------------------------------- |
-| 01  | open-data-license   | GPT 5.4 / medium | `/data/nvme0/can/Projects/open-data-license/`   | [sub-01-open-data-license.md](./sub-01-open-data-license.md)     |
-| 02  | rs-memory-admission | GPT 5.4 / medium | `/data/nvme0/can/Projects/rs-memory-admission/` | [sub-02-rs-memory-admission.md](./sub-02-rs-memory-admission.md) |
-| 03  | rs-modde            | GPT 5.5 / high   | `/data/nvme0/can/Projects/rs-modde/`            | [sub-03-rs-modde.md](./sub-03-rs-modde.md)                       |
-| 04  | skillnet            | GPT 5.4 / medium | `/data/nvme0/can/Projects/skillnet/`            | [sub-04-skillnet.md](./sub-04-skillnet.md)                       |
-| 05  | sorrel              | GPT 5.5 / medium | `/data/nvme0/can/Projects/sorrel/`              | [sub-05-sorrel.md](./sub-05-sorrel.md)                           |
+| 01  | open-data-license   | GPT 5.4 / medium | `<workspace>/open-data-license/`   | [sub-01-open-data-license.md](./sub-01-open-data-license.md)     |
+| 02  | rs-memory-admission | GPT 5.4 / medium | `<workspace>/rs-memory-admission/` | [sub-02-rs-memory-admission.md](./sub-02-rs-memory-admission.md) |
+| 03  | rs-modde            | GPT 5.5 / high   | `<workspace>/rs-modde/`            | [sub-03-rs-modde.md](./sub-03-rs-modde.md)                       |
+| 04  | skillnet            | GPT 5.4 / medium | `<workspace>/skillnet/`            | [sub-04-skillnet.md](./sub-04-skillnet.md)                       |
+| 05  | sorrel              | GPT 5.5 / medium | `<workspace>/sorrel/`              | [sub-05-sorrel.md](./sub-05-sorrel.md)                           |
 
 Sub-03 (`rs-modde`) gets the high tier because it carries the most
 open decisions (legacy `release.yml` vs. simit-generated artifacts,
@@ -46,7 +46,7 @@ manual pre-triage. Concretely:
 ## Why this matters now
 
 The Phase 11 sub-layer set in
-`/home/can/.claude/plans/detritus-rust-cache/11-fleet-adoption/`
+`~/.claude/plans/detritus-rust-cache/11-fleet-adoption/`
 was scoped as "regenerate CI, push, merge." It did not anticipate
 the simit pin pre-dating the CLI restructure, the option-persistence
 gap causing post-adoption "drift" to recur, or the flake integration
@@ -117,8 +117,8 @@ merges; the decision becomes a separate user-owned follow-up.
 
 - Research dossier: per-repo cleanups section.
 - Original readiness report:
-  `/home/can/.claude/plans/detritus-rust-cache/11-fleet-adoption/release-chaperone-gap-report.md`
+  `~/.claude/plans/detritus-rust-cache/11-fleet-adoption/release-chaperone-gap-report.md`
 - Predecessor sub-layer set:
-  `/home/can/.claude/plans/detritus-rust-cache/11-fleet-adoption/`
+  `~/.claude/plans/detritus-rust-cache/11-fleet-adoption/`
 - Chaperone skill:
-  `/home/can/.claude/skills/rust-crate-release-chaperone/SKILL.md`
+  `~/.claude/skills/rust-crate-release-chaperone/SKILL.md`
