@@ -9,8 +9,8 @@
 
 ## Sub-layers
 
-| #   | Slug                | Model            | Touches                                         | Sub-layer file                                                   |
-| --- | ------------------- | ---------------- | ----------------------------------------------- | ---------------------------------------------------------------- |
+| #   | Slug                | Model            | Touches                            | Sub-layer file                                                   |
+| --- | ------------------- | ---------------- | ---------------------------------- | ---------------------------------------------------------------- |
 | 01  | open-data-license   | GPT 5.4 / medium | `<workspace>/open-data-license/`   | [sub-01-open-data-license.md](./sub-01-open-data-license.md)     |
 | 02  | rs-memory-admission | GPT 5.4 / medium | `<workspace>/rs-memory-admission/` | [sub-02-rs-memory-admission.md](./sub-02-rs-memory-admission.md) |
 | 03  | rs-modde            | GPT 5.5 / high   | `<workspace>/rs-modde/`            | [sub-03-rs-modde.md](./sub-03-rs-modde.md)                       |
