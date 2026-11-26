@@ -39,7 +39,7 @@ Current versions: simit `0.15.4` (Cargo.toml); rs-modde pins simit at the
 | 02    | [02-simit-release-readiness.md](./02-simit-release-readiness.md)             | simit        | 01                   | `simit/{tests,README.md,docs,CHANGELOG.md}`                            | 04, 05            | blocks 03            |
 | 03    | [03-release-simit.md](./03-release-simit.md)                                 | simit        | 02                   | `simit` Cargo.toml/CHANGELOG + tag                                     | 04, 05            | blocks 06            |
 | 04    | [04-upstream-nixpkgs-choco-scoop.md](./04-upstream-nixpkgs-choco-scoop.md)   | nixpkgs fork | —                    | `pkgs/by-name/{ch/chocolatey,sc/scoop}`                                | all               | optional; relaxes 07 |
-| 05    | [05-canix-expose-runner-secrets.md](./05-canix-expose-runner-secrets.md)     | canix        | —                    | `canix/root/hosts/<host>/server/forgejo-runners.nix` + secret modules  | 01–04, 06         | blocks 07            |
+| 05    | [05-canix-expose-runner-secrets.md](./05-canix-expose-runner-secrets.md)     | canix        | —                    | Runner host and secret management configuration                        | 01–04, 06         | blocks 07            |
 | 06    | [06-rs-modde-adopt-simit-release.md](./06-rs-modde-adopt-simit-release.md)   | rs-modde     | 03                   | `rs-modde/flake.{nix,lock}`, `.forgejo/workflows/*`, dist artifacts    | 04, 05            | blocks 07            |
 | 07    | [07-rs-modde-validate-and-release.md](./07-rs-modde-validate-and-release.md) | rs-modde     | 05, 06 (04 optional) | tags on rs-modde                                                       | —                 | terminal             |
 
@@ -71,7 +71,7 @@ version-dependency; 07 is gated on both 05 and 06 green.
 - [ ] simit: a new release is published to crates.io and Codeberg via simit's own
       tooling, with the new `init`/`dist`/`init release` commands documented.
 - [ ] canix: every secret the rs-modde release workflow references is reachable
-      by the atlas Forgejo job (as an Actions secret or a runner-provided env),
+      by the Forgejo release job (as an Actions secret or a runner-provided env),
       or explicitly deferred with a soft-skip confirmed.
 - [ ] rs-modde: `simit` flake input points at the new release; `simit init
 release --check` and `simit init ci --check` are clean; all working-tree
@@ -84,7 +84,7 @@ release --check` and `simit init ci --check` are clean; all working-tree
 
 - This maintainer **releases via `simit`** (`simit commit` / `simit release` /
   `simit changelog`) — do not hand-roll cargo+git+sed.
-- CI runs on the **self-hosted `atlas` Forgejo runner** against **Codeberg**.
+- CI runs on a **self-hosted Forgejo runner** against **Codeberg**.
 - **Local verification before CI**: every simit change is `cargo
 build/test/clippy` green and diffed against rs-modde's committed artifacts
   before anything is tagged. Live CI is the last resort, used only in Phase 07.

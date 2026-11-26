@@ -68,7 +68,7 @@ the default `simit init flake` wants to remove them.
 
 4. **Resolve the CI "drift".** Two paths:
    - **Phase 01 landed**: run `simit init ci --platform forgejo
---runtime cargo --runner atlas --with-audit --with-deny
+--runtime cargo --runner <runner-label> --with-audit --with-deny
 --with-docs --with-msrv` once to populate `simit.toml [ci]`;
      thereafter bare `simit init ci --check --diff` is clean.
    - **Phase 01 not landed**: add a `simit.toml [ci]` skeleton

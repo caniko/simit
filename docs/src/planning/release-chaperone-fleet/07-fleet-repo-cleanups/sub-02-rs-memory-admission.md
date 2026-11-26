@@ -82,7 +82,7 @@ origin/simit-ci-adoption-20260525` onto a working branch.
    nix develop -c simit init ci \
      --platform forgejo \
      --runtime cargo \
-     --runner atlas \
+     --runner "${RUNNER_LABEL:?set the runner label}" \
      --with-audit --with-deny --with-docs --with-msrv
    ```
 

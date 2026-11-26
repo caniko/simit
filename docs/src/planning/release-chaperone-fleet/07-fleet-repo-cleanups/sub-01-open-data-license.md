@@ -88,7 +88,7 @@ origin/simit-ci-adoption-20260525` onto a working branch off
    nix develop -c simit init ci \
      --platform forgejo \
      --runtime nix \
-     --runner atlas-nix-trusted \
+     --runner "${RUNNER_LABEL:?set the runner label}" \
      --with-om-ci \
      --with-msrv --with-audit --with-deny --with-docs
    ```

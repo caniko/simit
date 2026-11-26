@@ -57,7 +57,7 @@ Snapshots below are point-in-time. Re-run the checks before acting.
   flake input; CI/dev shells fall back to whatever simit is in PATH.
   `simit init ci --platform forgejo --check --diff` (no extra flags)
   reports both `ci.yaml` and `publish-crate.yaml` as drifted because
-  the actual file uses `--runtime nix --runner atlas-nix-trusted
+  the actual file uses `--runtime nix --runner <runner-label>
 --with-om-ci --with-msrv --with-audit --with-deny --with-docs`,
   none of which the bare check restores. An adoption branch
   (`simit-ci-adoption-20260525`) carries up-to-date generated CI

@@ -16,7 +16,7 @@
 
 `<workspace>/rs-modde`. Depends on Phase 06 (rs-modde on the
 released simit, workflows regenerated, committed) and Phase 05 (secrets reach
-the atlas job). Uses the fork `nix_tool` for chocolatey unless Phase 04 merged.
+the release job). Uses the fork `nix_tool` for chocolatey unless Phase 04 merged.
 This is the last phase; on success the plan is exhausted.
 
 ## Goal

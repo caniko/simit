@@ -51,7 +51,7 @@ it."
    `[Unreleased]` → dated section, bumps `Cargo.toml`/lock, commits, creates the
    signed tag). Review the planned commit/tag with `--dry-run` first.
 4. Push the release commit and tag to Codeberg. The `publish-crate` workflow
-   (tag-triggered) runs on the atlas runner: it verifies the signed tag, runs
+   (tag-triggered) runs on the configured release runner: it verifies the signed tag, runs
    the gates, and `cargo publish`es. Watch the run (use the `berg` CLI /
    Codeberg Actions UI).
 5. Verify post-publish: crate version live on crates.io

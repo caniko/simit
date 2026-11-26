@@ -824,7 +824,7 @@ mod tests {
             message(&|crow| crow["repos/lookup/caniko/example-app"]["active"] = json!(false))
                 .contains("not active")
         );
-        // Quota denial as codefloe reports it (example-app pipelines 118-120).
+        // Quota denial as the forge reports it.
         assert!(
             message(&|crow| {
                 let build = &mut crow[PIPELINE]["workflows"][0];
