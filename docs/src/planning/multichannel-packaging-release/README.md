@@ -97,4 +97,3 @@ build/test/clippy` green and diffed against rs-modde's committed artifacts
   (this session's implementation plan) and the project memory
   `project_simit_multichannel_packaging`.
 - simit release tooling: `simit release --help`, `simit changelog --help`.
-- canix runner secrets: `canix/root/modules/server/forgejo-runner-secrets/`.

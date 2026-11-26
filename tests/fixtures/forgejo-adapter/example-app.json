@@ -1,5 +1,5 @@
 {
-  "_source": "Sanitized read-only replies from codefloe.com (Forgejo 16.0.6, /api/v1) and ci.codefloe.com (Crow 6.12.0, /api/v1), captured 2026-10-26 for caniko/example-app trunk pipeline 52. Identities, avatars, e-mail addresses, commit messages and changed files are removed and the trunk head is pinned to that pipeline's revision; workflow bytes and Crow configuration are the real files. statusContexts are the commit's real Forgejo status contexts.",
+  "_source": "Sanitized read-only Forgejo 16.0.6 and Crow 6.12.0 API v1 responses from 2026-10-26. Repository names, repository IDs and revision SHAs are synthetic substitutions. Personal metadata, commit messages and changed files are omitted. Workflow bytes, Crow configuration and Forgejo status contexts are unchanged from the capture.",
   "statusContexts": [
     "ci/crow/pr/build",
     "ci/crow/pr/vm-checks",

@@ -11,15 +11,14 @@
 ## Working tree
 
 `<workspace>/canix` (NixOS multi-host repo). Independent of the
-simit/rs-modde phases — runs in parallel with Waves 0–3. Use the `canix-cli`
-skill for deploy/secret operations.
+simit/rs-modde phases — runs in parallel with Waves 0–3.
 
 ## Goal
 
 Every secret the rs-modde release workflow references is reachable by the release
 Forgejo job at release time — either as a Codeberg Actions secret of the
 expected name, or (preferred for runner-managed creds) exposed into the job
-container the same way the Attic token is. The terminal validation (Phase 07)
+container like the existing cache credential. The terminal validation (Phase 07)
 must find each channel's credential present (publish) or absent (clean
 soft-skip), never a half-configured failure.
 
