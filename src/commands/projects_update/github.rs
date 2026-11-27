@@ -1,5 +1,7 @@
 //! GitHub Actions adapter. Provider identifiers and API location come from policy.
-use super::schema::*;
+use super::schema::{
+    AdapterRequest, AdapterResponse, Change, Check, Requirement, credential_bytes,
+};
 use crate::render::ci::step_conditions::{PushOutcome, StepCondition, is_optional_step};
 use anyhow::{Context, Result, ensure};
 use base64::Engine;
@@ -599,7 +601,9 @@ fn admit_concurrency(
 
 pub(super) fn is_workflow_path(path: &str) -> bool {
     std::path::Path::new(path).parent() == Some(std::path::Path::new(".github/workflows"))
-        && (path.ends_with(".yaml") || path.ends_with(".yml"))
+        && path
+            .rsplit_once('.')
+            .is_some_and(|(_, ext)| matches!(ext, "yaml" | "yml"))
 }
 
 fn requested_workflows(
@@ -1073,7 +1077,7 @@ fn admit_classic_rules(
     anyhow::bail!("classic protection exceeds adapter pagination ceiling")
 }
 
-pub fn execute(request: &AdapterRequest) -> Result<AdapterResponse> {
+pub(super) fn execute(request: &AdapterRequest) -> Result<AdapterResponse> {
     request.validate()?;
     let api = Api::with(
         &request.api_url,
@@ -1232,7 +1236,7 @@ fn execute_with(
     let runs = runs["workflow_runs"]
         .as_array()
         .context("missing workflow runs")?;
-    let mut generator_jobs = std::collections::BTreeMap::new();
+    let mut generator_jobs = BTreeMap::new();
     let mut sources: BTreeMap<String, Value> = BTreeMap::new();
     let mut source = |path: &str| -> Result<Value> {
         if let Some(file) = sources.get(path) {
@@ -1283,7 +1287,9 @@ fn execute_with(
     for path in paths {
         ensure!(
             path.starts_with(".github/workflows/")
-                && (path.ends_with(".yaml") || path.ends_with(".yml")),
+                && path
+                    .rsplit_once('.')
+                    .is_some_and(|(_, ext)| matches!(ext, "yaml" | "yml")),
             "GitHub adapter cannot qualify this workflow format"
         );
         let file = source(&path)?;
@@ -1434,14 +1440,14 @@ fn pull(
         "pull request differs from the maintenance branch and target"
     );
     let number = number(&pull, "/number")?;
-    let mut state = if !pull["merged_at"].is_null() {
-        "merged"
-    } else {
+    let mut state = if pull["merged_at"].is_null() {
         match pull["state"].as_str() {
             Some("open") => "open",
             Some("closed") => "closed",
             _ => anyhow::bail!("unknown pull request state"),
         }
+    } else {
+        "merged"
     };
     let mut merge_commit = (state == "merged")
         .then(|| text(&pull, "/merge_commit_sha"))
@@ -1673,6 +1679,7 @@ fn admit_run(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::CrowCiConfig;
     use serde_json::json;
 
     fn refuse(method: &str, path: &str, _: &Value) -> Result<Value> {
@@ -2016,7 +2023,7 @@ mod tests {
         assert!(writes.borrow().is_empty());
         request.change = None;
         pull.borrow_mut()["merged_at"] = Value::Null;
-        let mut retargeted = open.clone();
+        let mut retargeted = open;
         retargeted["base"]["ref"] = json!("main");
         *listed.borrow_mut() = json!([closed, retargeted]);
         assert_eq!(replay(&request).unwrap().1.unwrap().state, "closed");
@@ -2077,7 +2084,7 @@ mod tests {
                 .unwrap()
                 .policy_digest
         );
-        let mut restricted = reviewed.clone();
+        let mut restricted = reviewed;
         restricted["restrictions"] = json!({"users":[]});
         assert!(replay(&request, &restricted).is_err());
         let rule = |reviews: bool, pushes: bool| {
@@ -2199,7 +2206,7 @@ mod tests {
         assert!(references("${{ vars[format('{0}', 'X')] }}", "vars.").is_err());
         // One runner must carry every label a job requests.
         responses.borrow_mut().insert(
-            runners.clone(),
+            runners,
             json!({"total_count":2,"runners":[{"labels":[{"name":"self-hosted"}]},{"labels":[{"name":"atlas-nix"}]}]}),
         );
         assert!(
@@ -2286,7 +2293,7 @@ mod tests {
         }))
         .unwrap();
         ci::github_prebuild_file(
-            &std::collections::BTreeMap::from([
+            &BTreeMap::from([
                 ("x86_64-linux".into(), "ubuntu-24.04".into()),
                 ("aarch64-darwin".into(), "macos-15".into()),
             ]),
@@ -2600,7 +2607,7 @@ mod tests {
                 let files = ci::primary_files(FilesRequest {
                     provider: CiProvider::Actions,
                     platform: Platform::Github,
-                    crow: &Default::default(),
+                    crow: &CrowCiConfig::default(),
                     runtime,
                     package: &package,
                     file_suffix: None,
@@ -2613,10 +2620,10 @@ mod tests {
                         workspace: true,
                     },
                     runners: &runners,
-                    step_runners: &Default::default(),
+                    step_runners: &BTreeMap::default(),
                     options: CiOptions {
-                        workspace_strategy,
                         separate_events,
+                        workspace_strategy,
                         ..Default::default()
                     },
                 })
@@ -3332,7 +3339,7 @@ mod tests {
             assert!(admit(&run, &changed, &suite).is_err());
         }
         assert!(admit(&run, &json!({"total_count":0,"jobs":[]}), &suite).is_err());
-        let mut pending = run.clone();
+        let mut pending = run;
         pending["status"] = json!("in_progress");
         pending["conclusion"] = Value::Null;
         assert!(!admit(&pending, &jobs, &suite).unwrap());

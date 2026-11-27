@@ -8,6 +8,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use anyhow::{Context, Result, anyhow, bail};
 use semver::Version;
 
+use crate::release_identity::TagPrefix;
+
 pub const DEFAULT_PATH: &str = "CHANGELOG.md";
 pub const HEADER: &str = "# Changelog\n\nAll notable changes to this project will be documented in this file.\n\nThe format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),\nand this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).\n";
 
@@ -160,14 +162,14 @@ pub fn draft_file(path: &Path, base_ref: Option<&str>, dry_run: bool) -> Result<
 }
 
 pub fn draft_content(content: &str, repo_root: &Path, base_ref: Option<&str>) -> Result<String> {
-    draft_content_with_prefix(content, repo_root, base_ref, Default::default())
+    draft_content_with_prefix(content, repo_root, base_ref, TagPrefix::default())
 }
 
 pub(crate) fn draft_content_with_prefix(
     content: &str,
     repo_root: &Path,
     base_ref: Option<&str>,
-    prefix: crate::release_identity::TagPrefix,
+    prefix: TagPrefix,
 ) -> Result<String> {
     check_content(content)?;
     let range = changelog_range(repo_root, base_ref, prefix)?;
@@ -186,7 +188,7 @@ pub(crate) fn draft_component_content(
         .lines()
         .find(|tag| crate::release_identity::ReleaseTag::parse_for_package(namespace, tag).is_ok());
     let mut range = if let Some(base) = base {
-        changelog_range(repo_root, Some(base), Default::default())?
+        changelog_range(repo_root, Some(base), TagPrefix::default())?
     } else {
         ChangelogRange {
             git: "HEAD".to_owned(),
@@ -305,13 +307,12 @@ pub(crate) fn release_content_with_prefix(
     let unreleased_start = unreleased.start;
     let unreleased_end = unreleased.end;
 
-    let latest = latest_released_version(&document)?;
+    let latest = latest_released_version(&document);
     if let Some(latest) = latest.as_ref()
         && version <= latest
     {
         bail!(
-            "release version {version} must be greater than the latest changelog release {}",
-            latest
+            "release version {version} must be greater than the latest changelog release {latest}"
         );
     }
 
@@ -397,8 +398,7 @@ pub fn show_file(path: &Path, requested: Option<&str>) -> Result<String> {
 pub fn show_content(content: &str, requested: Option<&str>) -> Result<String> {
     let document = parse_document(content)?;
     let section = match requested {
-        None => unreleased_section(&document)?,
-        Some("Unreleased" | "unreleased") => unreleased_section(&document)?,
+        None | Some("Unreleased" | "unreleased") => unreleased_section(&document)?,
         Some(value) => {
             let version =
                 Version::parse(value).with_context(|| format!("parsing version `{value}`"))?;
@@ -563,20 +563,19 @@ fn unreleased_section(document: &Document) -> Result<&Section> {
     Ok(first)
 }
 
-fn latest_released_version(document: &Document) -> Result<Option<Version>> {
-    let mut latest = None;
-    for section in &document.sections {
-        if let SectionKind::Version(version) = &section.kind {
-            if latest
-                .as_ref()
-                .is_some_and(|current: &Version| version <= current)
-            {
-                continue;
+fn latest_released_version(document: &Document) -> Option<Version> {
+    document
+        .sections
+        .iter()
+        .filter_map(|section| {
+            if let SectionKind::Version(version) = &section.kind {
+                Some(version)
+            } else {
+                None
             }
-            latest = Some(version.clone());
-        }
-    }
-    Ok(latest)
+        })
+        .max()
+        .cloned()
 }
 
 fn trimmed_body_lines(lines: &[String]) -> Vec<String> {
@@ -611,8 +610,7 @@ fn insert_entry(body: &mut Vec<String>, kind: EntryKind, text: &str) {
         let next_heading = body[index + 1..]
             .iter()
             .position(|line| line.starts_with("### "))
-            .map(|offset| index + 1 + offset)
-            .unwrap_or(body.len());
+            .map_or(body.len(), |offset| index + 1 + offset);
         let mut insert_at = next_heading;
         while insert_at > index + 1 && body[insert_at - 1].trim().is_empty() {
             insert_at -= 1;
@@ -666,7 +664,7 @@ struct ChangelogRange {
 fn changelog_range(
     repo_root: &Path,
     requested: Option<&str>,
-    prefix: crate::release_identity::TagPrefix,
+    prefix: TagPrefix,
 ) -> Result<ChangelogRange> {
     if let Some(requested) = requested {
         let requested = requested.trim();
@@ -1033,7 +1031,7 @@ fn update_reference_links(
         let previous_text = previous.to_string();
         let previous_tag = existing
             .iter()
-            .filter_map(|line| {
+            .find_map(|line| {
                 let (label, url) = line.split_once("]: ")?;
                 let (_, refs) = url.split_once("/compare/")?;
                 let candidate = if label == "[Unreleased" {
@@ -1048,7 +1046,6 @@ fn update_reference_links(
                     || candidate.strip_prefix(prefix) == Some(previous_text.as_str()))
                 .then_some(candidate.to_owned())
             })
-            .next()
             .unwrap_or_else(|| format!("{prefix}{previous}"));
         format!(
             "[{version}]: {}/compare/{}...{prefix}{}",

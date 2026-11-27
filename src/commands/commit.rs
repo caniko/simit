@@ -66,7 +66,7 @@ fn print_dry_run(
         println!("would update {}", plan.package.manifest_path);
     }
     println!("would update Cargo.lock if present");
-    println!("would run git commit with {:?}", git_args);
+    println!("would run git commit with {git_args:?}");
     if create_tag {
         let version = &plans[0].new_version;
         if sign_tag {

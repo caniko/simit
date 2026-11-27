@@ -14,7 +14,7 @@ use crate::cli::{PublisherStage, ReleaseCommand};
 
 // Engine-owned signing using npm's Sigstore bundle contract. This program reads
 // a provider-bound statement on stdin, never package archives/configuration.
-const PROVENANCE_SIGNER: &str = r#"
+const PROVENANCE_SIGNER: &str = r"
 const fs = require('node:fs');
 const path = require('node:path');
 const root = process.argv[2];
@@ -24,7 +24,7 @@ const statement = JSON.parse(fs.readFileSync(0, 'utf8'));
 sigstore.attest(Buffer.from(JSON.stringify(statement)), 'application/vnd.in-toto+json')
   .then(bundle => process.stdout.write(JSON.stringify(bundle)))
   .catch(error => { console.error(error.message); process.exitCode = 1; });
-"#;
+";
 
 fn provider_members(bytes: &[u8]) -> Result<BTreeMap<String, Vec<u8>>> {
     let mut zip = zip::ZipArchive::new(Cursor::new(bytes))?;
@@ -44,7 +44,7 @@ fn provider_members(bytes: &[u8]) -> Result<BTreeMap<String, Vec<u8>>> {
                 && member.is_file()
                 && member
                     .unix_mode()
-                    .is_none_or(|mode| mode & 0o170000 == 0o100000),
+                    .is_none_or(|mode| mode & 0o170_000 == 0o100_000),
             "invalid native provider member"
         );
         let limit = if name == "receipt.json" {

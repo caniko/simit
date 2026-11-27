@@ -160,14 +160,18 @@ fn observer_inputs(
     super::observer::preflight_receipt(
         &preflight,
         outcome.is_ok(),
-        outcome.as_ref().err().map(|error| format!("{error:#}")),
+        outcome
+            .as_ref()
+            .err()
+            .map(|error| format!("{error:#}"))
+            .as_deref(),
     )?;
     let outcome = outcome.and_then(|inputs| {
         super::observer::preflight_check(deadline, cancellation)?;
         Ok(inputs)
     });
     if let Err(error) = &outcome {
-        super::observer::preflight_receipt(&preflight, false, Some(format!("{error:#}")))?;
+        super::observer::preflight_receipt(&preflight, false, Some(&format!("{error:#}")))?;
     }
     outcome
 }

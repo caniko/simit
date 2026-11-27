@@ -69,10 +69,9 @@ fn with_fake_nix<T>(json: &str, body: impl FnOnce(&TempDir) -> T) -> T {
     fs::write(
         &nix,
         format!(
-            r#"#!/bin/sh
-printf '%s\n' '{}'
-"#,
-            json
+            r"#!/bin/sh
+printf '%s\n' '{json}'
+"
         ),
     )
     .unwrap();
@@ -413,7 +412,7 @@ fn flake_and_ci_config_load_from_flake_output() {
         |temp| {
             fs::write(
                 temp.path().join("flake.nix"),
-                r#"{ outputs = { self }: { simitConfig = {}; }; }"#,
+                r"{ outputs = { self }: { simitConfig = {}; }; }",
             )
             .unwrap();
 
@@ -536,7 +535,7 @@ fn flake_simit_config_output_loads() {
         |temp| {
             fs::write(
                 temp.path().join("flake.nix"),
-                r#"{ outputs = { self }: { simitConfig = {}; }; }"#,
+                r"{ outputs = { self }: { simitConfig = {}; }; }",
             )
             .unwrap();
 
@@ -622,7 +621,7 @@ download_repo = "caniko/mythos"
             .unwrap();
             fs::write(
                 temp.path().join("flake.nix"),
-                r#"{ outputs = { self }: { simitConfig = {}; }; }"#,
+                r"{ outputs = { self }: { simitConfig = {}; }; }",
             )
             .unwrap();
 

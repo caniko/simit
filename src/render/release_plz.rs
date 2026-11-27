@@ -1,5 +1,6 @@
 //! Release-plz owns crate releases; Simit qualifies its immutable source first.
 
+use std::fmt::Write as _;
 use std::{
     collections::BTreeSet,
     fs,
@@ -141,10 +142,12 @@ pub fn files(
         tag
     );
     for package in &publishable {
-        toml.push_str(&format!(
+        write!(
+            toml,
             "\n[[package]]\nname = {:?}\nrelease = true\n",
             package.name
-        ));
+        )
+        .expect("write");
     }
     Ok(vec![
         GeneratedFile {
@@ -432,11 +435,7 @@ fn local_publisher(
             Some("python" | "python3" | "node" | "pwsh" | "ruby")
         )
     };
-    if !seen.insert((
-        cwd.clone(),
-        path.clone(),
-        if workflow { None } else { Some(shell) },
-    )) {
+    if !seen.insert((cwd.clone(), path, if workflow { None } else { Some(shell) })) {
         return Ok(false);
     }
     if workflow {
@@ -783,7 +782,11 @@ pub fn credential_contract(
 }
 
 fn checkout(w: &mut String) {
-    w.push_str(&format!("      - uses: {}\n        with:\n          ref: ${{{{ github.sha }}}}\n          fetch-depth: 0\n          persist-credentials: false\n\n", ci::github_action_ref("actions/checkout", "v7.0.1")));
+    write!(
+        w,
+        "      - uses: {}\n        with:\n          ref: ${{{{ github.sha }}}}\n          fetch-depth: 0\n          persist-credentials: false\n\n",
+        ci::github_action_ref("actions/checkout", "v7.0.1")
+    ).expect("write");
 }
 
 fn install(w: &mut String, runtime: Runtime) {
@@ -792,7 +795,9 @@ fn install(w: &mut String, runtime: Runtime) {
     } else {
         ""
     };
-    w.push_str(&format!(r#"      - name: Install pinned release-plz {VERSION}
+    write!(
+        w,
+        r#"      - name: Install pinned release-plz {VERSION}
         run: |
           set -euo pipefail
           mkdir -p "$RUNNER_TEMP/release-plz/bin"
@@ -803,7 +808,8 @@ fn install(w: &mut String, runtime: Runtime) {
           tar -xzf "$archive" -C "$RUNNER_TEMP/release-plz/bin" release-plz
           {prefix}"$RUNNER_TEMP/release-plz/bin/release-plz" --version
 
-"#));
+"#
+    ).expect("write");
 }
 
 fn authentication(w: &mut String, config: &ProjectConfig) -> String {
@@ -812,7 +818,11 @@ fn authentication(w: &mut String, config: &ProjectConfig) -> String {
         &credentials.app_id_variable,
         &credentials.app_private_key_secret,
     ) {
-        w.push_str(&format!("      - name: Create repository-scoped release token\n        id: app\n        uses: {}\n        with:\n          app-id: ${{{{ vars.{id} }}}}\n          private-key: ${{{{ secrets.{key} }}}}\n          owner: ${{{{ github.repository_owner }}}}\n          repositories: ${{{{ github.event.repository.name }}}}\n          permission-contents: write\n          permission-pull-requests: write\n\n", ci::github_action_ref("actions/create-github-app-token", "v2")));
+        write!(
+            w,
+            "      - name: Create repository-scoped release token\n        id: app\n        uses: {}\n        with:\n          app-id: ${{{{ vars.{id} }}}}\n          private-key: ${{{{ secrets.{key} }}}}\n          owner: ${{{{ github.repository_owner }}}}\n          repositories: ${{{{ github.event.repository.name }}}}\n          permission-contents: write\n          permission-pull-requests: write\n\n",
+            ci::github_action_ref("actions/create-github-app-token", "v2")
+        ).expect("write");
         "${{ steps.app.outputs.token }}".into()
     } else {
         format!("${{{{ secrets.{} }}}}", credentials.token_secret)
@@ -821,7 +831,13 @@ fn authentication(w: &mut String, config: &ProjectConfig) -> String {
 
 fn signing(w: &mut String, config: &ProjectConfig) {
     let credentials = &config.ci.release_plz;
-    w.push_str(&format!("      - name: Configure authorized tag signing\n        env:\n          RELEASE_KEY: ${{{{ secrets.{} }}}}\n          RELEASE_PASSPHRASE: ${{{{ secrets.{} }}}}\n          RELEASE_TRUST_ROOT: {:?}\n        run: |\n", credentials.signing_key_secret, credentials.signing_passphrase_secret, config.release.signing.trust_root));
+    write!(
+        w,
+        "      - name: Configure authorized tag signing\n        env:\n          RELEASE_KEY: ${{{{ secrets.{} }}}}\n          RELEASE_PASSPHRASE: ${{{{ secrets.{} }}}}\n          RELEASE_TRUST_ROOT: {:?}\n        run: |\n",
+        credentials.signing_key_secret,
+        credentials.signing_passphrase_secret,
+        config.release.signing.trust_root
+    ).expect("write");
     w.push_str(r#"          set -euo pipefail
           test -n "$RELEASE_KEY" || { echo 'Missing release-plz signing key' >&2; exit 1; }
           export GNUPGHOME="$RUNNER_TEMP/release-plz-gnupg"
@@ -902,7 +918,11 @@ fn workflow(
     );
     checkout(&mut w);
     w.push_str("      - name: Require the preceding release-plz event to succeed\n        env:\n          GH_TOKEN: ${{ github.token }}\n        run: python3 .simit/release-plz.py prior-run\n\n");
-    w.push_str(&format!("      - name: Resolve release-plz immutable revision\n        id: select\n        env:\n          GH_TOKEN: ${{{{ github.token }}}}\n          RELEASE_TRUST_ROOT: {:?}\n        run: python3 .simit/release-plz.py select\n\n  release-plz-qualify:\n    needs: select\n    if: needs.select.outputs.release_sha != ''\n    runs-on: ubuntu-24.04\n    timeout-minutes: 120\n    permissions:\n      contents: read\n      pull-requests: read\n", config.release.signing.trust_root));
+    write!(
+        w,
+        "      - name: Resolve release-plz immutable revision\n        id: select\n        env:\n          GH_TOKEN: ${{{{ github.token }}}}\n          RELEASE_TRUST_ROOT: {:?}\n        run: python3 .simit/release-plz.py select\n\n  release-plz-qualify:\n    needs: select\n    if: needs.select.outputs.release_sha != ''\n    runs-on: ubuntu-24.04\n    timeout-minutes: 120\n    permissions:\n      contents: read\n      pull-requests: read\n",
+        config.release.signing.trust_root
+    ).expect("write");
     ci::push_job_env(&mut w, Platform::Github, runtime, &options.extra_env, true);
     w.push_str("    steps:\n");
     checkout(&mut w);
@@ -913,26 +933,45 @@ fn workflow(
     let selection = packages
         .iter()
         .filter(|package| package.is_publishable_to_crates_io())
-        .map(|package| format!(" --package {}", ci::shell_word(&package.name)))
-        .collect::<String>();
+        .fold(String::new(), |mut output, package| {
+            write!(output, " --package {}", ci::shell_word(&package.name)).expect("write");
+            output
+        });
     let prefix = if runtime == Runtime::Nix {
         "nix develop -c "
     } else {
         ""
     };
-    w.push_str(&format!("      - name: Verify package archives including unpublished workspace dependencies\n        run: |\n          set -euo pipefail\n          package_cargo=$(rustup which --toolchain stable cargo)\n          {prefix}\"$package_cargo\" package --locked --allow-dirty{selection} --target-dir \"$RUNNER_TEMP/release-plz-package\"\n\n      - name: Retain qualified crate archives\n        uses: {}\n        with:\n          name: release-plz-crates-${{{{ github.run_attempt }}}}\n          if-no-files-found: error\n          path: ${{{{ runner.temp }}}}/release-plz-package/package/*.crate\n\n", ci::github_action_ref("actions/upload-artifact", "v7.0.2")));
+    write!(
+        w,
+        "      - name: Verify package archives including unpublished workspace dependencies\n        run: |\n          set -euo pipefail\n          package_cargo=$(rustup which --toolchain stable cargo)\n          {prefix}\"$package_cargo\" package --locked --allow-dirty{selection} --target-dir \"$RUNNER_TEMP/release-plz-package\"\n\n      - name: Retain qualified crate archives\n        uses: {}\n        with:\n          name: release-plz-crates-${{{{ github.run_attempt }}}}\n          if-no-files-found: error\n          path: ${{{{ runner.temp }}}}/release-plz-package/package/*.crate\n\n",
+        ci::github_action_ref("actions/upload-artifact", "v7.0.2")
+    ).expect("write");
     w.push_str("  publish:\n    needs: [select, release-plz-qualify]\n    runs-on: ubuntu-24.04\n    timeout-minutes: 60\n    permissions:\n      contents: read\n      pull-requests: read\n    steps:\n");
     checkout(&mut w);
     prepare(&mut w);
     ci::trusted_publisher::bootstrap(&mut w);
     w.push_str("      - name: Preserve qualified publisher outside project checkouts\n        run: cp .simit-publisher-engine/target/release/simit \"$RUNNER_TEMP/simit-release-plz-publisher\"\n\n");
     install(&mut w, Runtime::Cargo);
-    w.push_str(&format!("      - name: Download same-run qualified archives\n        uses: {}\n        with:\n          name: release-plz-crates-${{{{ github.run_attempt }}}}\n          path: ${{{{ runner.temp }}}}/release-plz-archives\n\n", ci::github_action_ref("actions/download-artifact", "v8.0.2")));
-    w.push_str(&format!("      - name: Recheck immutable release selection\n        working-directory: ${{{{ runner.temp }}}}/release-plz-event-source\n        env:\n          GH_TOKEN: ${{{{ github.token }}}}\n          SIMIT_EXPECTED_RELEASE_SHA: ${{{{ needs.select.outputs.release_sha }}}}\n          SIMIT_RELEASE_BASE: ${{{{ needs.select.outputs.release_base }}}}\n          RELEASE_TRUST_ROOT: {:?}\n        run: python3 \"$RUNNER_TEMP/release-plz-admission.py\" select\n\n", config.release.signing.trust_root));
+    write!(
+        w,
+        "      - name: Download same-run qualified archives\n        uses: {}\n        with:\n          name: release-plz-crates-${{{{ github.run_attempt }}}}\n          path: ${{{{ runner.temp }}}}/release-plz-archives\n\n",
+        ci::github_action_ref("actions/download-artifact", "v8.0.2")
+    ).expect("write");
+    write!(
+        w,
+        "      - name: Recheck immutable release selection\n        working-directory: ${{{{ runner.temp }}}}/release-plz-event-source\n        env:\n          GH_TOKEN: ${{{{ github.token }}}}\n          SIMIT_EXPECTED_RELEASE_SHA: ${{{{ needs.select.outputs.release_sha }}}}\n          SIMIT_RELEASE_BASE: ${{{{ needs.select.outputs.release_base }}}}\n          RELEASE_TRUST_ROOT: {:?}\n        run: python3 \"$RUNNER_TEMP/release-plz-admission.py\" select\n\n",
+        config.release.signing.trust_root
+    ).expect("write");
     w.push_str("      - name: Reconstruct qualified archives and reconcile all registry versions without credentials\n        env:\n          SIMIT_EXPECTED_RELEASE_SHA: ${{ needs.select.outputs.release_sha }}\n          SIMIT_RELEASE_PLZ_SOURCE: ${{ runner.temp }}/release-plz-event-source\n        run: |\n          \"$RUNNER_TEMP/simit-release-plz-publisher\" release publisher --publisher-stage prepare --repo \"$GITHUB_REPOSITORY\" --release-plz-archives \"$RUNNER_TEMP/release-plz-archives\" --release-plz-check-registry\n\n");
     signing(&mut w, config);
     let token = authentication(&mut w, config);
-    w.push_str(&format!("      - name: Publish verified archives and signed tags\n        env:\n          GIT_TOKEN: {token}\n          CARGO_REGISTRY_TOKEN: ${{{{ secrets.{} }}}}\n          SIMIT_EXPECTED_RELEASE_SHA: ${{{{ needs.select.outputs.release_sha }}}}\n          SIMIT_RELEASE_PLZ_PUBLISHER: ${{{{ runner.temp }}}}/simit-release-plz-publisher\n        run: |\n          set -euo pipefail\n          test -n \"$GIT_TOKEN\" && test -n \"$CARGO_REGISTRY_TOKEN\" || {{ echo 'Missing release-plz automation/registry token' >&2; exit 1; }}\n          {}\n\n", config.ci.release_plz.registry_token_secret, invocation(Runtime::Cargo, "release")));
+    write!(
+        w,
+        "      - name: Publish verified archives and signed tags\n        env:\n          GIT_TOKEN: {token}\n          CARGO_REGISTRY_TOKEN: ${{{{ secrets.{} }}}}\n          SIMIT_EXPECTED_RELEASE_SHA: ${{{{ needs.select.outputs.release_sha }}}}\n          SIMIT_RELEASE_PLZ_PUBLISHER: ${{{{ runner.temp }}}}/simit-release-plz-publisher\n        run: |\n          set -euo pipefail\n          test -n \"$GIT_TOKEN\" && test -n \"$CARGO_REGISTRY_TOKEN\" || {{ echo 'Missing release-plz automation/registry token' >&2; exit 1; }}\n          {}\n\n",
+        config.ci.release_plz.registry_token_secret,
+        invocation(Runtime::Cargo, "release")
+    ).expect("write");
     cleanup(&mut w);
     w.push_str("  prepare-pr:\n    needs: [select, publish]\n    if: always() && needs.select.result == 'success' && (needs.publish.result == 'success' || (needs.select.outputs.release_sha == '' && needs.publish.result == 'skipped'))\n    runs-on: ubuntu-24.04\n    timeout-minutes: 120\n    permissions:\n      contents: read\n      pull-requests: read\n");
     ci::push_job_env(&mut w, Platform::Github, runtime, &options.extra_env, true);
@@ -942,14 +981,26 @@ fn workflow(
     ci::release_plz_setup(&mut w, runtime, options);
     ci::release_plz_update_setup(&mut w, options);
     install(&mut w, runtime);
-    w.push_str(&format!("      - name: Compute release-plz versions and changelogs without release credentials\n        env:\n          GIT_TOKEN: ${{{{ github.token }}}}\n        run: |\n          set -euo pipefail\n          git switch --force-create \"$GITHUB_REF_NAME\" \"$GITHUB_SHA\"\n          {prefix}python3 \"$RUNNER_TEMP/release-plz-admission.py\" update --config \"$RUNNER_TEMP/release-plz.toml\" | tee \"$RUNNER_TEMP/release-plz-update.log\"\n          python3 \"$RUNNER_TEMP/release-plz-admission.py\" prepare-pr\n\n      - name: Retain release-plz update data\n        uses: {}\n        with:\n          name: release-plz-pr-${{{{ github.run_attempt }}}}\n          if-no-files-found: error\n          path: ${{{{ runner.temp }}}}/release-plz-pr/\n\n", ci::github_action_ref("actions/upload-artifact", "v7.0.2")));
+    write!(
+        w,
+        "      - name: Compute release-plz versions and changelogs without release credentials\n        env:\n          GIT_TOKEN: ${{{{ github.token }}}}\n        run: |\n          set -euo pipefail\n          git switch --force-create \"$GITHUB_REF_NAME\" \"$GITHUB_SHA\"\n          {prefix}python3 \"$RUNNER_TEMP/release-plz-admission.py\" update --config \"$RUNNER_TEMP/release-plz.toml\" | tee \"$RUNNER_TEMP/release-plz-update.log\"\n          python3 \"$RUNNER_TEMP/release-plz-admission.py\" prepare-pr\n\n      - name: Retain release-plz update data\n        uses: {}\n        with:\n          name: release-plz-pr-${{{{ github.run_attempt }}}}\n          if-no-files-found: error\n          path: ${{{{ runner.temp }}}}/release-plz-pr/\n\n",
+        ci::github_action_ref("actions/upload-artifact", "v7.0.2")
+    ).expect("write");
     w.push_str("  release-pr:\n    needs: [select, prepare-pr]\n    if: always() && needs.select.result == 'success' && needs.prepare-pr.result == 'success'\n    runs-on: ubuntu-24.04\n    timeout-minutes: 30\n    concurrency:\n      group: release-plz-pr-${{ github.repository }}\n      cancel-in-progress: false\n    permissions:\n      contents: read\n      pull-requests: read\n    steps:\n");
     checkout(&mut w);
     prepare(&mut w);
-    w.push_str(&format!("      - name: Download prepared release PR data\n        uses: {}\n        with:\n          name: release-plz-pr-${{{{ github.run_attempt }}}}\n          path: ${{{{ runner.temp }}}}/release-plz-pr\n\n      - name: Admit only release data into the event index\n        run: python3 \"$RUNNER_TEMP/release-plz-admission.py\" admit-pr\n\n", ci::github_action_ref("actions/download-artifact", "v8.0.2")));
+    write!(
+        w,
+        "      - name: Download prepared release PR data\n        uses: {}\n        with:\n          name: release-plz-pr-${{{{ github.run_attempt }}}}\n          path: ${{{{ runner.temp }}}}/release-plz-pr\n\n      - name: Admit only release data into the event index\n        run: python3 \"$RUNNER_TEMP/release-plz-admission.py\" admit-pr\n\n",
+        ci::github_action_ref("actions/download-artifact", "v8.0.2")
+    ).expect("write");
     signing(&mut w, config);
     let token = authentication(&mut w, config);
-    w.push_str(&format!("      - name: Deliver signed release-plz update without executing project code\n        env:\n          GIT_TOKEN: {token}\n          RELEASE_TRUST_ROOT: {:?}\n        run: |\n          set -euo pipefail\n          test -n \"$GIT_TOKEN\" || {{ echo 'Missing release-plz automation token' >&2; exit 1; }}\n          python3 \"$RUNNER_TEMP/release-plz-admission.py\" apply-pr\n\n", config.release.signing.trust_root));
+    write!(
+        w,
+        "      - name: Deliver signed release-plz update without executing project code\n        env:\n          GIT_TOKEN: {token}\n          RELEASE_TRUST_ROOT: {:?}\n        run: |\n          set -euo pipefail\n          test -n \"$GIT_TOKEN\" || {{ echo 'Missing release-plz automation token' >&2; exit 1; }}\n          python3 \"$RUNNER_TEMP/release-plz-admission.py\" apply-pr\n\n",
+        config.release.signing.trust_root
+    ).expect("write");
     cleanup(&mut w);
     w.trim_end().to_owned() + "\n"
 }

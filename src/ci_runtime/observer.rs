@@ -98,7 +98,9 @@ impl Spec {
                     && name
                         .bytes()
                         .all(|b| b.is_ascii_alphanumeric() || b"_.-@".contains(&b))
-                    && (name.ends_with(".yaml") || name.ends_with(".yml")),
+                    && name
+                        .rsplit_once('.')
+                        .is_some_and(|(_, ext)| matches!(ext, "yaml" | "yml")),
                 "invalid workflow path"
             );
             ensure!(
@@ -143,7 +145,7 @@ pub struct Identity {
     pub repository_id: u64,
     /// Exact branch or PR source head.
     pub head: String,
-    /// Only branch push or pull_request.
+    /// Only branch push or `pull_request`.
     pub event: String,
     /// Original observer run.
     pub run_id: u64,
@@ -299,7 +301,9 @@ impl Identity {
         ensure!(
             path.strip_prefix(".github/workflows/")
                 .is_some_and(|name| !name.contains('/')
-                    && (name.ends_with(".yml") || name.ends_with(".yaml")))
+                    && name
+                        .rsplit_once('.')
+                        .is_some_and(|(_, ext)| matches!(ext, "yaml" | "yml")))
                 && target::workflow_reference(reference),
             "invalid observer workflow ref"
         );
@@ -425,9 +429,11 @@ fn open_regular(path: &Path) -> Result<File> {
     #[cfg(unix)]
     {
         use std::os::unix::fs::OpenOptionsExt;
-        options.custom_flags(
-            (rustix::fs::OFlags::NOFOLLOW | rustix::fs::OFlags::NONBLOCK).bits() as i32,
-        );
+        options.custom_flags(i32::from_ne_bytes(
+            (rustix::fs::OFlags::NOFOLLOW | rustix::fs::OFlags::NONBLOCK)
+                .bits()
+                .to_ne_bytes(),
+        ));
     }
     #[cfg(windows)]
     {
@@ -457,7 +463,7 @@ fn read_bytes_checked(
     check()?;
     let mut file = open_regular(path)?.take(maximum + 1);
     let mut bytes = Vec::new();
-    let mut buffer = [0; 65536];
+    let mut buffer = vec![0; 65536];
     loop {
         check()?;
         let count = file.read(&mut buffer)?;
@@ -489,7 +495,7 @@ pub(crate) fn read_preflight(
     read_bytes_checked(path, maximum, || preflight_check(deadline, cancellation))
 }
 
-pub(crate) fn preflight_receipt(root: &Path, complete: bool, error: Option<String>) -> Result<()> {
+pub(crate) fn preflight_receipt(root: &Path, complete: bool, error: Option<&str>) -> Result<()> {
     save_receipt_with_limit(
         root,
         &json!({
@@ -1041,14 +1047,14 @@ fn archive_members(
             "duplicate or unsafe log ZIP name"
         );
         ensure!(
-            entry.unix_mode().is_none_or(|m| m & 0o170000 != 0o120000),
+            entry.unix_mode().is_none_or(|m| m & 0o170_000 != 0o120_000),
             "log ZIP symlink rejected"
         );
         if entry.is_dir() {
             continue;
         }
         let mut hash = Sha256::new();
-        let mut buffer = [0; 65536];
+        let mut buffer = vec![0; 65536];
         loop {
             check()?;
             let count = entry.read(&mut buffer)?;
@@ -1293,7 +1299,7 @@ fn inventory_checked(
             );
             let mut file = open_regular(&path)?;
             let mut hash = Sha256::new();
-            let mut buffer = [0; 65536];
+            let mut buffer = vec![0; 65536];
             loop {
                 check()?;
                 ensure!(
@@ -1602,7 +1608,7 @@ fn validate_artifact(
             .context("missing artifact expiry")?,
     )?;
     ensure!(
-        (expires - created).num_seconds() >= 2592000 && expires > chrono::Utc::now(),
+        (expires - created).num_seconds() >= 2_592_000 && expires > chrono::Utc::now(),
         "uploaded artifact retention is insufficient"
     );
     Ok(())
@@ -1842,7 +1848,7 @@ mod tests {
         assert!(admitted > 0);
         assert_eq!(
             receipt.producers.len(),
-            admitted as usize,
+            usize::try_from(admitted).unwrap(),
             "overflowing producer must not remain duplicated into the receipt"
         );
         receipt.error = Some(failure.to_string());
@@ -1863,7 +1869,7 @@ mod tests {
         );
         assert!(!retained.capture_complete);
         assert!(!retained.qualified);
-        assert_eq!(retained.producers.len(), admitted as usize);
+        assert_eq!(retained.producers.len(), usize::try_from(admitted).unwrap());
         assert_eq!(
             fs::read(root.path().join("original-provider.zip")).unwrap(),
             b"unchanged original archive bytes"

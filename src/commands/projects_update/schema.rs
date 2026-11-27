@@ -594,7 +594,7 @@ impl Inventory {
             .signed_duration_since(self.observed_at)
             .num_seconds();
         ensure!(
-            (-30..=workspace.inventory.max_age_seconds as i64).contains(&age),
+            age >= -30 && u64::try_from(age).unwrap_or(0) <= workspace.inventory.max_age_seconds,
             "inventory is stale or from the future"
         );
         ensure!(!self.producer.is_empty(), "inventory producer is required");
@@ -1247,14 +1247,14 @@ mod tests {
         ] {
             let mut cfg = config();
             cfg.profiles.get_mut("fleet").unwrap().scopes =
-                scopes.iter().map(|scope| scope.to_string()).collect();
+                scopes.iter().map(ToString::to_string).collect();
             assert!(cfg.validate().is_err(), "{scopes:?}");
         }
         let mut cfg = config();
         cfg.profiles.get_mut("fleet").unwrap().scopes = SUPPORTED_SCOPES
             .iter()
             .rev()
-            .map(|scope| scope.to_string())
+            .map(ToString::to_string)
             .collect();
         cfg.validate().unwrap();
     }
@@ -1264,7 +1264,7 @@ mod tests {
         let migrated = |scopes: &[&str], migrate: serde_json::Value| {
             let mut cfg = config();
             let profile = cfg.profiles.get_mut("fleet").unwrap();
-            profile.scopes = scopes.iter().map(|scope| scope.to_string()).collect();
+            profile.scopes = scopes.iter().map(ToString::to_string).collect();
             profile.migrate = Some(serde_json::from_value(migrate).unwrap());
             cfg.validate()
         };
@@ -1278,7 +1278,7 @@ mod tests {
         .unwrap();
         for (scopes, migrate) in [
             (&["ci"][..], actions.clone()),
-            (&["ci", "ci-extra", "readme"], actions.clone()),
+            (&["ci", "ci-extra", "readme"], actions),
             (
                 &["ci", "ci-extra"],
                 serde_json::json!({"provider":"crow","platform":"github","runner":"ubuntu-24.04"}),
@@ -1902,7 +1902,7 @@ mod tests {
         let mut malformed = valid.clone();
         malformed["target"] = serde_json::json!("a".repeat(39));
         rejected(malformed, "40 hexadecimal");
-        let mut malformed = valid.clone();
+        let mut malformed = valid;
         malformed["items"][0]["target"] = serde_json::json!("A".repeat(41));
         rejected(malformed, "40 hexadecimal");
         rejected(

@@ -21,7 +21,7 @@ pub(super) fn collect(spec: &RepoSpec, window: &Window) -> Result<(Vec<Sample>, 
         .ok()
         .filter(|value| !value.trim().is_empty())
         .unwrap_or_else(|| "https://api.github.com".into());
-    let api = JsonApi::new(&base, token, "GitHub", "application/vnd.github+json", true)?;
+    let api = JsonApi::new(&base, &token, "GitHub", "application/vnd.github+json", true)?;
     let repo = format!("{}/{}", spec.owner, spec.name);
     let mut warnings = Vec::new();
     let mut samples = Vec::new();
@@ -113,7 +113,7 @@ fn collect_jobs(api: &JsonApi, repo: &str, run: &RunRef) -> Result<Vec<Sample>> 
         let jobs = value["jobs"]
             .as_array()
             .with_context(|| format!("GitHub jobs response for run {} is missing jobs", run.id))?;
-        samples.extend(parse_jobs(repo, &run.name, jobs)?);
+        samples.extend(parse_jobs(repo, &run.name, jobs));
         if jobs.len() < PER_PAGE as usize {
             break;
         }
@@ -160,7 +160,7 @@ fn parse_runs_page(value: &Value) -> Result<(u64, Vec<RunRef>)> {
     Ok((total, parsed))
 }
 
-fn parse_jobs(repo: &str, workflow: &str, jobs: &[Value]) -> Result<Vec<Sample>> {
+fn parse_jobs(repo: &str, workflow: &str, jobs: &[Value]) -> Vec<Sample> {
     let mut samples = Vec::new();
     for job in jobs {
         let (Some(started), Some(completed)) = (
@@ -203,7 +203,7 @@ fn parse_jobs(repo: &str, workflow: &str, jobs: &[Value]) -> Result<Vec<Sample>>
             runner: labels,
         });
     }
-    Ok(samples)
+    samples
 }
 
 fn parse_time(raw: Option<&str>) -> Option<DateTime<Utc>> {
@@ -288,7 +288,7 @@ mod tests {
     fn jobs_parse_duration_labels_and_failure() {
         let value: Value = serde_json::from_str(JOBS).unwrap();
         let jobs = value["jobs"].as_array().unwrap();
-        let samples = parse_jobs("caniko/simit", "CI", jobs).unwrap();
+        let samples = parse_jobs("caniko/simit", "CI", jobs);
         assert_eq!(samples.len(), 2);
         assert_eq!(samples[0].workflow, "CI");
         assert_eq!(samples[0].unit, "test (ubuntu-24.04)");

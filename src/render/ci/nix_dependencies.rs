@@ -1,6 +1,12 @@
 //! Same-run dependency transport never substitutes qualification execution.
-use super::*;
+use super::{
+    NixSetupActionRef, Platform, ResolvedRunner, Result, StepCondition, nix_groups,
+    push_action_uses, push_checkout_step, push_docs_gate_keys, push_extra_setup_steps,
+    push_hosted_kvm_step, push_install_nix_step_with_cache, push_required_env_step, runs_on,
+    yaml_double_quote, yaml_json_scalar,
+};
 use crate::config::NixBuildConfig;
+use std::fmt::Write as _;
 
 fn program(
     workflow: &mut String,
@@ -13,7 +19,11 @@ fn program(
     } else {
         "Verify and import dependency closure"
     };
-    workflow.push_str(&format!("      - name: {name}\n        shell: python\n        env:\n          SIMIT_DEPENDENCY_MODE: {mode}\n          SIMIT_DEPENDENCY_ROOT: ${{{{ runner.temp }}}}/simit-nix-dependencies\n          SIMIT_DEPENDENCY_MAX_BYTES: {}\n", options.dependency_max_mib.unwrap_or(2048) * 1024 * 1024));
+    write!(
+        workflow,
+        "      - name: {name}\n        shell: python\n        env:\n          SIMIT_DEPENDENCY_MODE: {mode}\n          SIMIT_DEPENDENCY_ROOT: ${{{{ runner.temp }}}}/simit-nix-dependencies\n          SIMIT_DEPENDENCY_MAX_BYTES: {}\n",
+        options.dependency_max_mib.unwrap_or(2048) * 1024 * 1024
+    ).expect("write");
     nix_groups::push_producer_env_lines(workflow, options);
     let mut limits = Vec::new();
     if let Some(value) = options.max_jobs {
@@ -34,14 +44,14 @@ fn program(
         ),
         ("SIMIT_NIX_LIMITS", serde_json::to_string(&limits)?),
     ] {
-        workflow.push_str(&format!("          {name}: {}\n", yaml_json_scalar(&value)));
+        writeln!(workflow, "          {name}: {}", yaml_json_scalar(&value)).expect("write");
     }
     workflow.push_str("        run: |\n");
     for line in include_str!("nix_dependencies.py").lines() {
         if line.is_empty() {
             workflow.push('\n');
         } else {
-            workflow.push_str(&format!("          {line}\n"));
+            writeln!(workflow, "          {line}").expect("write");
         }
     }
     Ok(())
@@ -68,10 +78,12 @@ pub(super) fn import(
         "v4.3.0",
     );
     workflow.push_str("\n        with:\n          name: simit-nix-dependencies-${{ github.run_id }}-${{ github.run_attempt }}\n          path: ${{ runner.temp }}/simit-nix-dependencies\n");
-    workflow.push_str(&format!(
+    write!(
+        workflow,
         "      - name: Explain missing attempt-bound dependencies\n        if: {}\n",
         StepCondition::DependencyDownloadFailed.wrapped()
-    ));
+    )
+    .expect("write");
     workflow.push_str("        run: |\n          echo 'Dependency transport requires a producer from this exact run attempt. Use Re-run all jobs; partial reruns cannot reuse a previous-attempt artifact.' >&2\n          exit 1\n");
     provision_python(workflow, runner);
     program(workflow, "import", options, plan)
@@ -90,7 +102,10 @@ fn provision_python(workflow: &mut String, runner: &ResolvedRunner) {
     workflow.push_str("\n        with:\n          python-version: '3.12'\n");
 }
 
-#[allow(clippy::too_many_arguments)]
+#[allow(
+    clippy::too_many_arguments,
+    reason = "Cache settings, dependency plan, and setup policy are resolved by the caller"
+)]
 pub(super) fn job(
     workflow: &mut String,
     runner: &ResolvedRunner,
@@ -104,20 +119,22 @@ pub(super) fn job(
     if options.dependency_installables.is_empty() {
         return Ok(());
     }
-    workflow.push_str(&format!(
+    write!(
+        workflow,
         "\n  dependencies:\n    runs-on: {}\n",
         runs_on(runner)
-    ));
+    )
+    .expect("write");
     push_docs_gate_keys(workflow, Platform::Github, &[]);
     if let Some(timeout) = options.timeout_minutes {
-        workflow.push_str(&format!("    timeout-minutes: {timeout}\n"));
+        writeln!(workflow, "    timeout-minutes: {timeout}").expect("write");
     }
     workflow.push_str("    env:\n");
     if !options.extra_env.contains_key("NIX_CONFIG") {
         workflow.push_str("      NIX_CONFIG: \"experimental-features = nix-command flakes\"\n");
     }
     for (name, value) in &options.extra_env {
-        workflow.push_str(&format!("      {name}: \"{}\"\n", yaml_double_quote(value)));
+        writeln!(workflow, "      {name}: \"{}\"", yaml_double_quote(value)).expect("write");
     }
     workflow.push_str("    steps:\n");
     push_checkout_step(workflow, Platform::Github, runner);
@@ -132,10 +149,12 @@ pub(super) fn job(
     push_extra_setup_steps(workflow, &options.extra_setup);
     push_required_env_step(workflow, &options.required_env);
     program(workflow, "export", options, plan)?;
-    workflow.push_str(&format!(
+    write!(
+        workflow,
         "      - name: Upload dependency evidence and closure\n        if: {}\n",
         StepCondition::Always.expression()
-    ));
+    )
+    .expect("write");
     push_action_uses(
         workflow,
         Platform::Github,
@@ -144,6 +163,10 @@ pub(super) fn job(
         "v7.0.2",
         "v4.6.2",
     );
-    workflow.push_str(&format!("\n        with:\n          name: simit-nix-dependencies-${{{{ github.run_id }}}}-${{{{ github.run_attempt }}}}\n          retention-days: {}\n          compression-level: 0\n          if-no-files-found: error\n          path: ${{{{ runner.temp }}}}/simit-nix-dependencies\n", options.artifact_retention_days.unwrap_or(14)));
+    write!(
+        workflow,
+        "\n        with:\n          name: simit-nix-dependencies-${{{{ github.run_id }}}}-${{{{ github.run_attempt }}}}\n          retention-days: {}\n          compression-level: 0\n          if-no-files-found: error\n          path: ${{{{ runner.temp }}}}/simit-nix-dependencies\n",
+        options.artifact_retention_days.unwrap_or(14)
+    ).expect("write");
     Ok(())
 }

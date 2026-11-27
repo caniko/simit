@@ -1,3 +1,4 @@
+use std::fmt::Write as _;
 use std::{fs, path::Path, process::Command};
 
 mod common;
@@ -779,7 +780,10 @@ fn explicit_metadata_members_overrides_new_default_in_both_cargo_scopes() {
         fs::remove_file(temp.path().join("simit.toml")).unwrap();
         let manifest = temp.path().join("Cargo.toml");
         let mut text = fs::read_to_string(&manifest).unwrap();
-        text.push_str(&format!("\n[{scope}.metadata.simit.ci]\n# Keep the opted-out policy.\nplatform = \"github\"\npublish_crates = false\npublish_strategy = \"members\"\n"));
+        write!(
+            text,
+            "\n[{scope}.metadata.simit.ci]\n# Keep the opted-out policy.\nplatform = \"github\"\npublish_crates = false\npublish_strategy = \"members\"\n"
+        ).expect("write");
         fs::write(&manifest, text).unwrap();
         let output = init(temp.path(), &["--publish-crates"]);
         assert!(output.status.success(), "{output:?}");

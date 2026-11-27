@@ -220,7 +220,9 @@ fn cli_signal_cancels_a_blocked_real_git_probe_and_retains_preflight_failure() {
         let writer = loop {
             if let Ok(file) = fs::OpenOptions::new()
                 .write(true)
-                .custom_flags(rustix::fs::OFlags::NONBLOCK.bits() as i32)
+                .custom_flags(i32::from_ne_bytes(
+                    rustix::fs::OFlags::NONBLOCK.bits().to_ne_bytes(),
+                ))
                 .open(&object)
             {
                 break file;
@@ -234,7 +236,7 @@ fn cli_signal_cancels_a_blocked_real_git_probe_and_retains_preflight_failure() {
         };
         let start = Instant::now();
         rustix::process::kill_process(
-            rustix::process::Pid::from_raw(child.id() as i32).unwrap(),
+            rustix::process::Pid::from_child(&child),
             rustix::process::Signal::TERM,
         )
         .unwrap();

@@ -1,3 +1,4 @@
+use std::fmt::Write as _;
 use std::fs;
 
 use serde_yaml::Value;
@@ -147,21 +148,22 @@ fn assert_trusted_credential_boundary(mode: &str) {
                 continue;
             }
             credential_jobs += 1;
-            assert!(workflow["on"]["push"].is_null(), "{path:?}");
-            assert!(workflow["on"]["pull_request"].is_null(), "{path:?}");
+            let workflow_path = path.display();
+            assert!(workflow["on"]["push"].is_null(), "{workflow_path}");
+            assert!(workflow["on"]["pull_request"].is_null(), "{workflow_path}");
             assert_eq!(
                 workflow["on"]["workflow_run"]["types"],
                 serde_yaml::to_value(["completed"]).unwrap(),
-                "{mode}: {path:?} must execute its independently trusted default-branch definition"
+                "{mode}: {workflow_path} must execute its independently trusted default-branch definition"
             );
             let environment = job["environment"]
                 .as_str()
                 .or_else(|| job["environment"]["name"].as_str())
                 .expect("publication credentials require a protected environment");
-            assert!(!environment.is_empty(), "{path:?}");
+            assert!(!environment.is_empty(), "{workflow_path}");
             assert!(
                 !environment.contains("${{"),
-                "candidate input must not select the credential environment: {path:?}"
+                "candidate input must not select the credential environment: {workflow_path}"
             );
         }
     }
@@ -919,7 +921,10 @@ fn artifact_gate_job_budgets_cover_all_commands_and_uploads() {
             "\n[[ci.required_gates]]\nid='setup'\nrun='cargo test'\ntimeout_minutes=40\n",
         );
         for id in ["first", "second"] {
-            gates.push_str(&format!("[[ci.required_gates]]\nid='{id}'\nrun='cargo test'\ntimeout_minutes=60\n[ci.required_gates.artifacts]\nname='{id}'\npaths=['target/evidence/']\n"));
+            write!(
+                gates,
+                "[[ci.required_gates]]\nid='{id}'\nrun='cargo test'\ntimeout_minutes=60\n[ci.required_gates.artifacts]\nname='{id}'\npaths=['target/evidence/']\n"
+            ).expect("write");
         }
         fs::write(temp.path().join("simit.toml"), format!("{config}{gates}")).unwrap();
         let output = common::simit()

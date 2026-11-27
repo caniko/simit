@@ -36,6 +36,10 @@ struct JsonPlanEntry {
     depends_on: Vec<String>,
 }
 
+#[expect(
+    clippy::needless_pass_by_value,
+    reason = "Keep the public command entry point's owned argument API"
+)]
 pub fn run(command: ReleaseCommand) -> Result<()> {
     reject_non_plan_flags(&command)?;
     if let Some(selection) = crate::monorepo::releases::select(&command)? {

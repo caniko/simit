@@ -1,6 +1,9 @@
 use super::{
     artifact, canonical_digest,
-    contract::*,
+    contract::{
+        Outcome, Plan, PlatformResult, Publication, Request, VERSION, WORKFLOW, hash, name,
+        reference, repository, sha,
+    },
     github,
     process::{args, command, run, run_command},
     read_json, write_json,
@@ -9,6 +12,7 @@ use anyhow::{Result, ensure};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
+use std::fmt::Write as _;
 use std::{
     collections::BTreeMap,
     fs,
@@ -164,31 +168,36 @@ pub fn markdown(r: &ReviewResult) -> String {
         r.retrieval
     );
     if let Some(recipe) = &p.recipe {
-        text.push_str(&format!(
+        write!(
+            text,
             "Recipe: `{}` at `{}`.\n\n",
             recipe.repository, recipe.commit
-        ));
+        )
+        .expect("write");
     }
     if let Some(pr) = &p.pr {
-        text.push_str(&format!(
+        write!(
+            text,
             "PR: {}. Head: `{}` from `{}`; base: `{}`; mode: `{:?}`.\n\n",
             pr.url, pr.head, pr.head_repository, pr.base, p.request.mode
-        ));
+        )
+        .expect("write");
     }
     for (system, platform) in &r.platforms {
-        text.push_str(&format!(
-            "- `{system}`: build **{:?}**, tests **{:?}**; effective plan `{}`; bundle `{}`.\n",
+        writeln!(
+            text,
+            "- `{system}`: build **{:?}**, tests **{:?}**; effective plan `{}`; bundle `{}`.",
             platform.build,
             platform.tests,
             platform.effective.digest,
             r.bundle_digests
                 .get(system)
-                .map(String::as_str)
-                .unwrap_or("unverified")
-        ));
+                .map_or("unverified", String::as_str)
+        )
+        .expect("write");
     }
     for system in &r.missing_platforms {
-        text.push_str(&format!("- `{system}`: **FAILED — missing report**.\n"));
+        writeln!(text, "- `{system}`: **FAILED — missing report**.").expect("write");
     }
     text.push_str("\nNo approval or merge authority is granted by this report. Build-reported facts are not independent attestations. See artifacts for logs, effective locks, runtime closures, and consumption instructions.\n");
     text
@@ -198,9 +207,17 @@ pub fn consume(r: &ReviewResult) -> String {
         "# Consume exact review outputs\n\nPublication and cache retrieval are separate gates. A local closure transfer does not establish remote-cache availability.\n\n## Fetch without source building\n\nAfter approved publication, use `repo-review fetch --result PLATFORM/review-result.json --policy TRUSTED-CONTROLLER/policy.json --profile PROFILE --destination NEW-EMPTY-STORE`. This performs only `nix copy` and `nix path-info` on exact store paths; it never evaluates or builds a target.\n\nDo not use `--no-check-sigs`. Keep the standard trusted keys and append only the reviewed profile's public keys. Adding a cache key trusts its operator to provide executable software; a signature says nothing about test quality.\n\n## Optional output comparison\n\nIn a disposable unprivileged environment, evaluate the pinned flake with `--reference-lock-file effective.lock --no-update-lock-file --option allow-import-from-derivation false --option accept-flake-config false`, compare every derivation/output path against `effective-plan.json`, then copy the verified exact paths. Never use a build command as a retrieval check: `--max-jobs 0 --builders ''` still permits preferLocalBuild derivations.\n\n",
     );
     for (system, p) in &r.platforms {
-        text.push_str(&format!("## {system}\n\nPinned recipe: `{}`\n\nEffective lock digest: `{}`. Retain the exact `effective.lock` artifact; the original recipe is immutable. A downstream recipe may commit that lock.\n\nExact roots:\n\n```text\n", p.effective.flake_reference.as_deref().unwrap_or("legacy Nixpkgs report only"), p.effective.lock_digest.as_deref().unwrap_or("none")));
+        write!(
+            text,
+            "## {system}\n\nPinned recipe: `{}`\n\nEffective lock digest: `{}`. Retain the exact `effective.lock` artifact; the original recipe is immutable. A downstream recipe may commit that lock.\n\nExact roots:\n\n```text\n",
+            p.effective
+                .flake_reference
+                .as_deref()
+                .unwrap_or("legacy Nixpkgs report only"),
+            p.effective.lock_digest.as_deref().unwrap_or("none")
+        ).expect("write");
         for root in artifact::roots(p) {
-            text.push_str(&format!("{root}\n"));
+            writeln!(text, "{root}").expect("write");
         }
         text.push_str("```\n\n");
     }
@@ -372,7 +389,7 @@ pub fn publish(
         ensure!(!token.is_empty(), "missing Cachix credentials");
         let mut a = args(&["push", &c.cache]);
         a.extend(artifact::roots(r));
-        let mut cmd = super::process::command("cachix", &a, None);
+        let mut cmd = command("cachix", &a, None);
         cmd.env("CACHIX_AUTH_TOKEN", token);
         if let Ok(k) = std::env::var("CACHIX_SIGNING_KEY")
             && !k.is_empty()
@@ -416,7 +433,7 @@ pub fn validate_review(r: &ReviewResult) -> Result<()> {
     Ok(())
 }
 
-/// The pinned Attic reads only XDG_CONFIG_HOME/attic/config.toml; no --config flag.
+/// The pinned Attic reads only `XDG_CONFIG_HOME/attic/config.toml`; no --config flag.
 #[cfg(unix)]
 pub fn attic_command(
     c: &CacheProfile,

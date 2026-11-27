@@ -20,20 +20,20 @@ pub const DISTRIBUTIONS_PATH: &str = "dist/apt/conf/distributions";
 
 pub fn run(command: AptCommand) -> Result<()> {
     match command.action {
-        AptAction::Render(args) => render(args),
-        AptAction::Build(args) => build(args),
+        AptAction::Render(args) => render(&args),
+        AptAction::Build(args) => build(&args),
         AptAction::Publish(args) => publish(args),
-        AptAction::Verify(args) => verify(args),
+        AptAction::Verify(args) => verify(&args),
     }
 }
 
-fn render(args: AptRenderArgs) -> Result<()> {
+fn render(args: &AptRenderArgs) -> Result<()> {
     let resolved = resolve(args.apt.as_overrides(), args.package.as_deref())?;
     print!("{}", apt_conf::render_distributions(&resolved));
     Ok(())
 }
 
-fn build(args: AptBuildArgs) -> Result<()> {
+fn build(args: &AptBuildArgs) -> Result<()> {
     validate_version(&args.version)?;
     let resolved = resolve(args.apt.as_overrides(), args.package.as_deref())?;
     let architecture = host_architecture(&resolved)?;
@@ -205,7 +205,7 @@ fn publish(args: AptPublishArgs) -> Result<()> {
     Ok(())
 }
 
-fn verify(args: AptVerifyArgs) -> Result<()> {
+fn verify(args: &AptVerifyArgs) -> Result<()> {
     let resolved = resolve(args.apt.as_overrides(), None)?;
     ensure_repo_checkout(args.repo.as_std_path())?;
     let repo = args.repo.as_std_path();
@@ -383,7 +383,7 @@ impl TempDir {
                     set_private_dir(&path)?;
                     return Ok(Self { path });
                 }
-                Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => continue,
+                Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => {}
                 Err(err) => {
                     return Err(err).with_context(|| format!("creating {}", path.display()));
                 }
@@ -474,12 +474,12 @@ fn configured_or_standard_env(configured: &str, standard: &str) -> Result<String
 }
 
 fn write_private(path: &Path, contents: &[u8]) -> Result<PathBuf> {
+    use std::io::Write;
     let mut file = OpenOptions::new()
         .create_new(true)
         .write(true)
         .open(path)
         .with_context(|| format!("creating private temporary file {}", path.display()))?;
-    use std::io::Write;
     file.write_all(contents)
         .with_context(|| format!("writing private temporary file {}", path.display()))?;
     set_private(path)?;

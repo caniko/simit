@@ -120,7 +120,7 @@ pub(super) fn adapter(
     Ok(command)
 }
 
-pub fn inventory(command: &super::schema::Command) -> Result<Vec<u8>> {
+pub(super) fn inventory(command: &super::schema::Command) -> Result<Vec<u8>> {
     ensure!(
         cfg!(target_os = "linux"),
         "updater discovery requires Linux namespaces"
@@ -218,7 +218,7 @@ fn snapshot_registrations(source_state: &Path, nix_state: &Path) -> Result<()> {
     Ok(())
 }
 
-pub fn generation(
+pub(super) fn generation(
     executable: &Path,
     checkout: &Path,
     nix_state: &Path,
@@ -235,9 +235,8 @@ pub fn generation(
     if flake.is_file() && crate::config::flake_declares_simit_config(&flake)? {
         // SQLite's online snapshot includes committed WAL content without
         // exposing the live database, daemon socket or host fetcher cache.
-        let source_state = std::env::var_os("NIX_STATE_DIR")
-            .map(std::path::PathBuf::from)
-            .unwrap_or_else(|| "/nix/var/nix".into());
+        let source_state =
+            std::env::var_os("NIX_STATE_DIR").map_or_else(|| "/nix/var/nix".into(), PathBuf::from);
         snapshot_registrations(&source_state, nix_state)?;
     }
     let path = std::env::join_paths(&directories)?;

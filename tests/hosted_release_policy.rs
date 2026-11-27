@@ -1,3 +1,4 @@
+use std::fmt::Write as _;
 use std::{fs, path::Path, process::Command};
 
 use tempfile::TempDir;
@@ -210,16 +211,23 @@ fn hosted_release_gates_share_the_bounded_job_budget() {
         ] {
             let mut config = String::from("[ci]\nplatform='github'\n");
             for id in ["first", "second"] {
-                config.push_str(&format!(
+                write!(
+                    config,
                     "[[ci.required_gates]]\nid='{id}'\nrun='false'\ntimeout_minutes={timeout}\n"
-                ));
+                )
+                .expect("write");
                 if artifacts {
-                    config.push_str(&format!(
+                    write!(
+                        config,
                         "[ci.required_gates.artifacts]\nname='{id}'\npaths=['target/evidence/']\n"
-                    ));
+                    )
+                    .expect("write");
                 }
             }
-            config.push_str(&format!("[release.github]\nrepo='example/player'\n[release.artifacts]\nrunner='ubuntu-24.04'\nprebuild_binaries=true\nsign=false\n{prebuild}"));
+            write!(
+                config,
+                "[release.github]\nrepo='example/player'\n[release.artifacts]\nrunner='ubuntu-24.04'\nprebuild_binaries=true\nsign=false\n{prebuild}"
+            ).expect("write");
             let dir = project(&config);
             let output = common::simit()
                 .current_dir(dir.path())

@@ -146,7 +146,7 @@ fn plan_accounts_for_every_enrolled_coordinate_without_executing_adapters_or_gen
     stale["observedAt"] = json!(chrono::Utc::now() - chrono::Duration::days(1));
     let mut wrong_root = original.clone();
     wrong_root["root"] = json!(root.join("other-workspace"));
-    let mut duplicate = original.clone();
+    let mut duplicate = original;
     duplicate["projects"]
         .as_array_mut()
         .unwrap()

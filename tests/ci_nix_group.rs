@@ -819,7 +819,7 @@ fn cancellation_retains_incomplete_receipt_and_stops_later_members_and_descendan
         std::thread::sleep(Duration::from_millis(10));
     }
     rustix::process::kill_process(
-        rustix::process::Pid::from_raw(child.id() as i32).unwrap(),
+        rustix::process::Pid::from_child(&child),
         rustix::process::Signal::TERM,
     )
     .unwrap();

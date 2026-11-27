@@ -157,7 +157,7 @@ fn default_vscode_package_command() -> String {
     "nix run .#package-release-assets -- \"$VERSION\"".to_owned()
 }
 
-/// `[jetbrains]` — publish an IntelliJ Platform plugin from Forgejo or GitHub CI.
+/// `[jetbrains]` — publish an `IntelliJ` Platform plugin from Forgejo or GitHub CI.
 #[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct JetbrainsConfig {
@@ -763,6 +763,10 @@ impl NixSetupActionRef {
 
 #[derive(Debug, Clone, Default, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "These fields mirror independent settings in the serialized configuration"
+)]
 pub struct CiConfig {
     #[serde(default)]
     pub provider: Option<CiProvider>,
@@ -1028,6 +1032,10 @@ impl CiConfig {
 /// `[ci.nix_build]` — opt-in GitHub-hosted qualification and evidence capture.
 #[derive(Debug, Clone, Default, Deserialize, PartialEq, Eq)]
 #[serde(default, deny_unknown_fields)]
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "These fields mirror independent settings in the serialized configuration"
+)]
 pub struct NixBuildConfig {
     /// Emit just the declared installable matrix, including for language projects.
     pub only: bool,
@@ -1404,6 +1412,10 @@ impl ProjectConfig {
 /// `[prebuild]` - native GitHub Nix builds shared by CI and releases.
 #[derive(Debug, Clone, Default, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "These fields mirror independent settings in the serialized configuration"
+)]
 pub struct PrebuildConfig {
     #[serde(default)]
     pub release_archives: bool,
@@ -1620,18 +1632,18 @@ pub struct ReleaseConfig {
     /// Optional Windows Authenticode signing of release `.exe`s.
     #[serde(default)]
     pub windows_signing: Option<WindowsSigningConfig>,
-    /// Optional upload of the prebuilt `release/*.whl` to PyPI.
+    /// Optional upload of the prebuilt `release/*.whl` to `PyPI`.
     #[serde(default)]
     pub pypi: Option<PypiReleaseConfig>,
 }
 
 /// `[release.pypi]` — upload the wheels the release build left in `release/`
-/// (e.g. from a Nix release bundle) to PyPI with `uv publish`. Unlike
+/// (e.g. from a Nix release bundle) to `PyPI` with `uv publish`. Unlike
 /// `[ci].pypi_*`, nothing is built here: the wheels are release artifacts.
 #[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct PypiReleaseConfig {
-    /// Authenticate with PyPI trusted publishing (GitHub OIDC). Register the
+    /// Authenticate with `PyPI` trusted publishing (GitHub OIDC). Register the
     /// trusted publisher with workflow `release.yml`.
     #[serde(default)]
     pub trusted_publishing: bool,
@@ -1765,7 +1777,7 @@ pub enum WindowsSigningProvider {
     /// Sign loose `.exe`s with osslsigncode and a PFX secret, then package them.
     #[default]
     Osslsigncode,
-    /// Submit finished release archives to SignPath (GitHub Actions only).
+    /// Submit finished release archives to `SignPath` (GitHub Actions only).
     Signpath,
 }
 
@@ -1773,7 +1785,7 @@ pub enum WindowsSigningProvider {
 ///
 /// `provider = "osslsigncode"` (default) uses `dir`, `binaries`, `sign_*`,
 /// `timestamp_url`, the archive names and the PFX secrets. `provider =
-/// "signpath"` uses the SignPath fields instead; mixing is rejected by
+/// "signpath"` uses the `SignPath` fields instead; mixing is rejected by
 /// [`Self::validate`].
 #[derive(Debug, Clone, Default, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
@@ -1798,23 +1810,23 @@ pub struct WindowsSigningConfig {
     pub pfx_secret: Option<String>,
     pub pass_secret: Option<String>,
     pub subject_secret: Option<String>,
-    /// SignPath: organization ID.
+    /// `SignPath`: organization ID.
     pub organization_id: Option<String>,
-    /// SignPath: project slug.
+    /// `SignPath`: project slug.
     pub project_slug: Option<String>,
-    /// SignPath: signing policy slug, e.g. `release-signing`.
+    /// `SignPath`: signing policy slug, e.g. `release-signing`.
     pub signing_policy_slug: Option<String>,
-    /// SignPath: artifact configuration slug; the project default when unset.
+    /// `SignPath`: artifact configuration slug; the project default when unset.
     pub artifact_configuration_slug: Option<String>,
-    /// SignPath: Actions secret holding the API token (default `SIGNPATH_API_TOKEN`).
+    /// `SignPath`: Actions secret holding the API token (default `SIGNPATH_API_TOKEN`).
     pub api_token_secret: Option<String>,
-    /// SignPath: release archives (`.zip`, `{version}` allowed) to submit.
+    /// `SignPath`: release archives (`.zip`, `{version}` allowed) to submit.
     #[serde(default)]
     pub archives: Vec<String>,
-    /// SignPath: PE files inside each archive that must end up signed.
+    /// `SignPath`: PE files inside each archive that must end up signed.
     #[serde(default)]
     pub pe_files: Vec<String>,
-    /// SignPath: seconds to wait per request, including manual approval
+    /// `SignPath`: seconds to wait per request, including manual approval
     /// (default 3600, at most 21600).
     pub wait_timeout_seconds: Option<u32>,
 }
@@ -1941,7 +1953,8 @@ impl WindowsSigningConfig {
         }
         for archive in &self.archives {
             validate_extract_text("[release.windows_signing].archives", archive)?;
-            if archive.contains('/') || !archive.ends_with(".zip") {
+            if archive.contains('/') || archive.rsplit_once('.').is_none_or(|(_, ext)| ext != "zip")
+            {
                 bail!("{P}.archives {archive:?} must be a bare file name ending in .zip");
             }
         }
@@ -2211,7 +2224,11 @@ impl ArtifactsConfig {
                 bail!("{label}: features must list individual Cargo feature names");
             }
             if !file_component(&job.archive)
-                || !(job.archive.ends_with(".tar.gz") || job.archive.ends_with(".zip"))
+                || !(job.archive.ends_with(".tar.gz")
+                    || job
+                        .archive
+                        .rsplit_once('.')
+                        .is_some_and(|(_, ext)| ext == "zip"))
                 || !archives.insert(job.archive.to_ascii_lowercase())
             {
                 bail!(
@@ -2512,7 +2529,7 @@ pub struct ResolvedJetbrains {
 #[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct ReleaseSigningConfig {
-    /// OpenPGP fingerprint used to sign and verify release tags.
+    /// `OpenPGP` fingerprint used to sign and verify release tags.
     pub key: Option<String>,
 
     /// Public keyring committed for CI-side `git verify-tag`.
@@ -2597,6 +2614,10 @@ fn default_windows_archive_pattern() -> String {
 
 #[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "These fields mirror independent settings in the serialized configuration"
+)]
 pub struct HomebrewPlatformsConfig {
     #[serde(default = "default_true")]
     pub darwin_arm: bool,
@@ -2911,14 +2932,26 @@ fn default_apt_debian_release() -> String {
     "bookworm".to_owned()
 }
 
+#[expect(
+    clippy::unnecessary_wraps,
+    reason = "Serde defaults must return the field's Option type"
+)]
 fn default_aur_doc_changelog() -> Option<String> {
     Some("CHANGELOG.md".to_owned())
 }
 
+#[expect(
+    clippy::unnecessary_wraps,
+    reason = "Serde defaults must return the field's Option type"
+)]
 fn default_aur_license_file() -> Option<String> {
     Some("LICENSE".to_owned())
 }
 
+#[expect(
+    clippy::unnecessary_wraps,
+    reason = "Serde defaults must return the field's Option type"
+)]
 fn default_aur_readme() -> Option<String> {
     Some("README.md".to_owned())
 }
@@ -2937,7 +2970,7 @@ pub struct AurConfig {
     pub license: Option<String>,
     /// Maintainer line, e.g. `Name <email>`. Emitted as a `# Maintainer:` comment.
     pub maintainer: Option<String>,
-    /// Maintainer OpenPGP fingerprint, emitted as a `# Maintainer GPG key:` comment.
+    /// Maintainer `OpenPGP` fingerprint, emitted as a `# Maintainer GPG key:` comment.
     pub maintainer_gpg: Option<String>,
     #[serde(default = "default_aur_arch")]
     pub arch: String,
@@ -4058,7 +4091,7 @@ impl ProjectConfig {
                 None => Table::new(),
             };
             table.set_implicit(false);
-            set_ci_table(&mut table, ci);
+            set_ci_table(&mut table, ci)?;
             container.insert("ci", Item::Table(table));
         }
 
@@ -4412,7 +4445,7 @@ impl ProjectConfig {
             overrides.name.map(str::to_owned),
             cfg.and_then(|chocolatey| chocolatey.name.clone()),
             Some(package.name.clone()),
-            missing_chocolatey_message("name"),
+            &missing_chocolatey_message("name"),
         )?;
         let id = overrides
             .id
@@ -4434,13 +4467,13 @@ impl ProjectConfig {
             overrides.download_repo.map(str::to_owned),
             cfg.map(|chocolatey| chocolatey.download_repo.clone()),
             None,
-            missing_chocolatey_message("download_repo"),
+            &missing_chocolatey_message("download_repo"),
         )?;
         let description = merge_packager(
             overrides.description.map(str::to_owned),
             cfg.and_then(|chocolatey| chocolatey.description.clone()),
             package.description.clone(),
-            missing_chocolatey_message("description"),
+            &missing_chocolatey_message("description"),
         )?;
         if description.chars().count() > 4000 {
             bail!("chocolatey.description must be 4000 characters or fewer");
@@ -4453,7 +4486,7 @@ impl ProjectConfig {
             overrides.project_url.map(str::to_owned),
             cfg.and_then(|chocolatey| chocolatey.project_url.clone()),
             package.homepage.clone(),
-            missing_chocolatey_message("project_url"),
+            &missing_chocolatey_message("project_url"),
         )?;
         let license_url = overrides
             .license_url
@@ -4562,38 +4595,38 @@ impl ProjectConfig {
             overrides.name.map(str::to_owned),
             cfg.and_then(|scoop| scoop.name.clone()),
             Some(package.name.clone()),
-            missing_scoop_message("name"),
+            &missing_scoop_message("name"),
         )?;
         let bucket_url = merge_packager(
             overrides.bucket_url.map(str::to_owned),
             cfg.map(|scoop| scoop.bucket_url.clone()),
             None,
-            missing_scoop_message("bucket_url"),
+            &missing_scoop_message("bucket_url"),
         )?;
         reject_basic_auth_url("scoop.bucket_url", &bucket_url)?;
         let description = merge_packager(
             overrides.description.map(str::to_owned),
             cfg.and_then(|scoop| scoop.description.clone()),
             package.description.clone(),
-            missing_scoop_message("description"),
+            &missing_scoop_message("description"),
         )?;
         let homepage = merge_packager(
             overrides.homepage.map(str::to_owned),
             cfg.and_then(|scoop| scoop.homepage.clone()),
             package.homepage.clone(),
-            missing_scoop_message("homepage"),
+            &missing_scoop_message("homepage"),
         )?;
         let license = merge_packager(
             overrides.license.map(str::to_owned),
             cfg.and_then(|scoop| scoop.license.clone()),
             package.license.clone(),
-            missing_scoop_message("license"),
+            &missing_scoop_message("license"),
         )?;
         let download_repo = merge_packager(
             overrides.download_repo.map(str::to_owned),
             cfg.map(|scoop| scoop.download_repo.clone()),
             None,
-            missing_scoop_message("download_repo"),
+            &missing_scoop_message("download_repo"),
         )?;
         let archive_pattern = overrides
             .archive_pattern
@@ -4713,7 +4746,7 @@ impl ProjectConfig {
         &self,
         overrides: AurOverrides<'_>,
         package: &crate::cargo::Package,
-        platform: crate::cli::Platform,
+        platform: Platform,
     ) -> Result<ResolvedAur> {
         self.resolve_aur_with_host(overrides, package, platform.web_base_url())
     }
@@ -4730,13 +4763,13 @@ impl ProjectConfig {
             overrides.name.map(str::to_owned),
             cfg.and_then(|aur| aur.name.clone()),
             Some(package.name.clone()),
-            missing_packager_message("aur", "name", "--aur-name", "package.name"),
+            &missing_packager_message("aur", "name", "--aur-name", "package.name"),
         )?;
         let description = merge_packager(
             overrides.description.map(str::to_owned),
             cfg.and_then(|aur| aur.description.clone()),
             package.description.clone(),
-            missing_packager_message(
+            &missing_packager_message(
                 "aur",
                 "description",
                 "--aur-description",
@@ -4747,13 +4780,13 @@ impl ProjectConfig {
             overrides.license.map(str::to_owned),
             cfg.and_then(|aur| aur.license.clone()),
             package.license.clone(),
-            missing_packager_message("aur", "license", "--aur-license", "package.license"),
+            &missing_packager_message("aur", "license", "--aur-license", "package.license"),
         )?;
         let download_repo = merge_packager(
             overrides.download_repo.map(str::to_owned),
             cfg.map(|aur| aur.download_repo.clone()),
             None,
-            missing_packager_message("aur", "download_repo", "--aur-download-repo", ""),
+            &missing_packager_message("aur", "download_repo", "--aur-download-repo", ""),
         )?;
         validate_owner_repo("aur.download_repo", &download_repo)?;
         let repo = repo_basename(&download_repo);
@@ -4814,7 +4847,7 @@ impl ProjectConfig {
         &self,
         overrides: CoprOverrides<'_>,
         package: &crate::cargo::Package,
-        platform: crate::cli::Platform,
+        platform: Platform,
     ) -> Result<ResolvedCopr> {
         self.resolve_copr_with_host(overrides, package, platform.web_base_url())
     }
@@ -4831,13 +4864,13 @@ impl ProjectConfig {
             overrides.name.map(str::to_owned),
             cfg.and_then(|copr| copr.name.clone()),
             Some(package.name.clone()),
-            missing_packager_message("copr", "name", "--copr-name", "package.name"),
+            &missing_packager_message("copr", "name", "--copr-name", "package.name"),
         )?;
         let summary = merge_packager(
             overrides.summary.map(str::to_owned),
             cfg.and_then(|copr| copr.summary.clone()),
             package.description.clone(),
-            missing_packager_message("copr", "summary", "--copr-summary", "package.description"),
+            &missing_packager_message("copr", "summary", "--copr-summary", "package.description"),
         )?;
         let description = overrides
             .description
@@ -4848,13 +4881,13 @@ impl ProjectConfig {
             overrides.license.map(str::to_owned),
             cfg.and_then(|copr| copr.license.clone()),
             package.license.clone(),
-            missing_packager_message("copr", "license", "--copr-license", "package.license"),
+            &missing_packager_message("copr", "license", "--copr-license", "package.license"),
         )?;
         let download_repo = merge_packager(
             overrides.download_repo.map(str::to_owned),
             cfg.map(|copr| copr.download_repo.clone()),
             None,
-            missing_packager_message("copr", "download_repo", "--copr-download-repo", ""),
+            &missing_packager_message("copr", "download_repo", "--copr-download-repo", ""),
         )?;
         validate_owner_repo("copr.download_repo", &download_repo)?;
         let repo = repo_basename(&download_repo);
@@ -4947,7 +4980,7 @@ impl ProjectConfig {
             overrides.repo_url.map(str::to_owned),
             cfg.map(|apt| apt.repo_url.clone()),
             None,
-            missing_packager_message("apt", "repo_url", "--apt-repo-url", ""),
+            &missing_packager_message("apt", "repo_url", "--apt-repo-url", ""),
         )?;
         reject_password_url("apt.repo_url", &repo_url)?;
         let label = overrides
@@ -5016,13 +5049,13 @@ impl ProjectConfig {
     /// Resolve the selected hosted release target, if configured.
     pub fn resolve_release_target(
         &self,
-        platform: crate::cli::Platform,
+        platform: Platform,
     ) -> Result<Option<ResolvedReleaseTarget>> {
-        if platform == crate::cli::Platform::Gitlab {
+        if platform == Platform::Gitlab {
             return Ok(None);
         }
         let (provider, target) = match platform {
-            crate::cli::Platform::Forgejo => (
+            Platform::Forgejo => (
                 ReleaseProvider::Forgejo,
                 self.release.codeberg.as_ref().map(|target| {
                     (
@@ -5034,7 +5067,7 @@ impl ProjectConfig {
                     )
                 }),
             ),
-            crate::cli::Platform::Github => (
+            Platform::Github => (
                 ReleaseProvider::Github,
                 self.release.github.as_ref().map(|target| {
                     (
@@ -5046,7 +5079,7 @@ impl ProjectConfig {
                     )
                 }),
             ),
-            crate::cli::Platform::Gitlab => (ReleaseProvider::Github, None),
+            Platform::Gitlab => (ReleaseProvider::Github, None),
         };
         let Some((repo, api_base, token_secret, target_branch, body_from_changelog)) = target
         else {
@@ -5194,8 +5227,7 @@ fn repo_basename(download_repo: &str) -> String {
 
 fn resolve_named_binaries(cfg: Option<&[String]>, name: &str) -> Vec<String> {
     cfg.filter(|binaries| !binaries.is_empty())
-        .map(<[String]>::to_vec)
-        .unwrap_or_else(|| vec![name.to_owned()])
+        .map_or_else(|| vec![name.to_owned()], <[String]>::to_vec)
 }
 
 fn missing_packager_message(
@@ -5615,10 +5647,10 @@ fn validate_native_tests(ci: &CiConfig) -> Result<()> {
     Ok(())
 }
 
-fn set_native_tests_table(table: &mut Table, tests: &[NativeTest]) {
+fn set_native_tests_table(table: &mut Table, tests: &[NativeTest]) -> Result<()> {
     if tests.is_empty() {
         table.remove("native_tests");
-        return;
+        return Ok(());
     }
     let mut array = Array::new();
     for test in tests {
@@ -5629,7 +5661,10 @@ fn set_native_tests_table(table: &mut Table, tests: &[NativeTest]) {
             item.insert("args", Value::from(test.args.as_str()));
         }
         if test.timeout_minutes != default_native_test_timeout_minutes() {
-            item.insert("timeout_minutes", Value::from(test.timeout_minutes as i64));
+            item.insert(
+                "timeout_minutes",
+                Value::from(i64::try_from(test.timeout_minutes)?),
+            );
         }
         if let Some(toolchain) = &test.toolchain {
             item.insert("toolchain", Value::from(toolchain.as_str()));
@@ -5647,12 +5682,13 @@ fn set_native_tests_table(table: &mut Table, tests: &[NativeTest]) {
         array.push(Value::InlineTable(item));
     }
     table["native_tests"] = Item::Value(Value::Array(array));
+    Ok(())
 }
 
-fn set_target_smokes_table(table: &mut Table, smokes: &[TargetSmoke]) {
+fn set_target_smokes_table(table: &mut Table, smokes: &[TargetSmoke]) -> Result<()> {
     if smokes.is_empty() {
         table.remove("target_smokes");
-        return;
+        return Ok(());
     }
     let mut array = Array::new();
     for smoke in smokes {
@@ -5663,7 +5699,10 @@ fn set_target_smokes_table(table: &mut Table, smokes: &[TargetSmoke]) {
         item.insert("shell", Value::from(smoke.shell.as_str()));
         item.insert("run", Value::from(smoke.run.as_str()));
         if smoke.timeout_minutes != default_gate_timeout_minutes() {
-            item.insert("timeout_minutes", Value::from(smoke.timeout_minutes as i64));
+            item.insert(
+                "timeout_minutes",
+                Value::from(i64::try_from(smoke.timeout_minutes)?),
+            );
         }
         if !smoke.env.is_empty() {
             let mut env = InlineTable::default();
@@ -5675,15 +5714,16 @@ fn set_target_smokes_table(table: &mut Table, smokes: &[TargetSmoke]) {
         if let Some(artifacts) = &smoke.artifacts {
             item.insert(
                 "artifacts",
-                Value::InlineTable(artifacts_inline_table(artifacts)),
+                Value::InlineTable(artifacts_inline_table(artifacts)?),
             );
         }
         array.push(Value::InlineTable(item));
     }
     table["target_smokes"] = Item::Value(Value::Array(array));
+    Ok(())
 }
 
-fn artifacts_inline_table(artifacts: &RequiredGateArtifacts) -> InlineTable {
+fn artifacts_inline_table(artifacts: &RequiredGateArtifacts) -> Result<InlineTable> {
     let mut value = InlineTable::default();
     value.insert("name", Value::from(artifacts.name.as_str()));
     let mut paths = Array::new();
@@ -5693,9 +5733,9 @@ fn artifacts_inline_table(artifacts: &RequiredGateArtifacts) -> InlineTable {
     value.insert("paths", Value::Array(paths));
     value.insert(
         "retention_days",
-        Value::from(artifacts.retention_days as i64),
+        Value::from(i64::try_from(artifacts.retention_days)?),
     );
-    value
+    Ok(value)
 }
 
 fn validate_local_gate_steps(ci: &CiConfig) -> Result<()> {
@@ -5735,10 +5775,10 @@ fn set_local_gate_steps(table: &mut Table, steps: &[LocalGateStep]) {
     table["local_gate_steps"] = Item::Value(Value::Array(array));
 }
 
-fn set_required_gates_table(table: &mut Table, key: &str, gates: &[RequiredGate]) {
+fn set_required_gates_table(table: &mut Table, key: &str, gates: &[RequiredGate]) -> Result<()> {
     if gates.is_empty() {
         table.remove(key);
-        return;
+        return Ok(());
     }
     let mut array = Array::new();
     for gate in gates {
@@ -5749,7 +5789,10 @@ fn set_required_gates_table(table: &mut Table, key: &str, gates: &[RequiredGate]
             item.insert("runtime", Value::from(runtime.as_str()));
         }
         if gate.timeout_minutes != default_gate_timeout_minutes() {
-            item.insert("timeout_minutes", Value::from(gate.timeout_minutes as i64));
+            item.insert(
+                "timeout_minutes",
+                Value::from(i64::try_from(gate.timeout_minutes)?),
+            );
         }
         if !gate.env.is_empty() {
             let mut env = InlineTable::default();
@@ -5761,12 +5804,13 @@ fn set_required_gates_table(table: &mut Table, key: &str, gates: &[RequiredGate]
         if let Some(artifacts) = &gate.artifacts {
             item.insert(
                 "artifacts",
-                Value::InlineTable(artifacts_inline_table(artifacts)),
+                Value::InlineTable(artifacts_inline_table(artifacts)?),
             );
         }
         array.push(Value::InlineTable(item));
     }
     table[key] = Item::Value(Value::Array(array));
+    Ok(())
 }
 
 fn validate_nix_system_runners(ci: &CiConfig) -> Result<()> {
@@ -5929,10 +5973,10 @@ fn validate_nix_build_config(config: &ProjectConfig) -> Result<()> {
     Ok(())
 }
 
-fn set_nix_build_table(table: &mut Table, options: &NixBuildConfig) {
+fn set_nix_build_table(table: &mut Table, options: &NixBuildConfig) -> Result<()> {
     if *options == NixBuildConfig::default() {
         table.remove("nix_build");
-        return;
+        return Ok(());
     }
     let mut build = Table::new();
     build.set_implicit(false);
@@ -5980,7 +6024,9 @@ fn set_nix_build_table(table: &mut Table, options: &NixBuildConfig) {
         ("artifact_retention_days", options.artifact_retention_days),
     ] {
         if let Some(number) = number {
-            build[name] = value(number as i64);
+            build[name] = value(i64::try_from(number).with_context(|| {
+                format!("[ci.nix_build].{name} exceeds the TOML integer range")
+            })?);
         }
     }
     set_string_array(&mut build, "artifact_paths", &options.artifact_paths);
@@ -5991,9 +6037,10 @@ fn set_nix_build_table(table: &mut Table, options: &NixBuildConfig) {
     set_string_array(&mut build, "required_secrets", &options.required_secrets);
     set_string_array(&mut build, "required_env", &options.required_env);
     table["nix_build"] = Item::Table(build);
+    Ok(())
 }
 
-fn set_ci_table(table: &mut Table, ci: &CiConfig) {
+fn set_ci_table(table: &mut Table, ci: &CiConfig) -> Result<()> {
     if let Some(config) = &ci.custody {
         let mut custody = Table::new();
         if config.protocol == custody::Protocol::SealedV2 {
@@ -6001,7 +6048,10 @@ fn set_ci_table(table: &mut Table, ci: &CiConfig) {
         }
         custody["repository"] = value(&config.repository);
         custody["status_context"] = value(&config.status_context);
-        custody["producer_attempt"] = value(config.producer_attempt as i64);
+        custody["producer_attempt"] = value(
+            i64::try_from(config.producer_attempt)
+                .context("[ci.custody].producer_attempt exceeds the TOML integer range")?,
+        );
         let mut producers = Table::new();
         for (name, producer) in &config.producers {
             let mut entry = Table::new();
@@ -6070,7 +6120,7 @@ fn set_ci_table(table: &mut Table, ci: &CiConfig) {
     );
     set_string_array(table, "packages", &ci.packages);
     set_string_array(table, "nix_builds", &ci.nix_builds);
-    set_nix_build_table(table, &ci.nix_build);
+    set_nix_build_table(table, &ci.nix_build)?;
     match ci.all_features {
         Some(false) => table["all_features"] = value(false),
         Some(true) | None => {
@@ -6099,10 +6149,10 @@ fn set_ci_table(table: &mut Table, ci: &CiConfig) {
     } else {
         table.remove("publish_strategy");
     }
-    set_required_gates_table(table, "required_gates", &ci.required_gates);
-    set_required_gates_table(table, "manual_gates", &ci.manual_gates);
-    set_target_smokes_table(table, &ci.target_smokes);
-    set_native_tests_table(table, &ci.native_tests);
+    set_required_gates_table(table, "required_gates", &ci.required_gates)?;
+    set_required_gates_table(table, "manual_gates", &ci.manual_gates)?;
+    set_target_smokes_table(table, &ci.target_smokes)?;
+    set_native_tests_table(table, &ci.native_tests)?;
     set_string_array(table, "extra_setup", &ci.extra_setup);
     set_string_map(table, "extra_env", &ci.extra_env);
     set_string_map(table, "workflow_templates", &ci.workflow_templates);
@@ -6115,6 +6165,7 @@ fn set_ci_table(table: &mut Table, ci: &CiConfig) {
     set_optional_string(table, "omnix_ref", ci.omnix_ref.as_deref());
     set_optional_pages_table(table, ci.pages.as_ref());
     set_crow_table(table, &ci.crow);
+    Ok(())
 }
 
 fn set_crow_table(table: &mut Table, crow: &CrowCiConfig) {
@@ -6288,7 +6339,7 @@ impl ProjectConfigSource {
                 .ci
                 .as_ref()
                 .and_then(Item::as_table_like)
-                .is_none_or(|table| table.is_empty())
+                .is_none_or(toml_edit::TableLike::is_empty)
     }
 }
 
@@ -6491,7 +6542,7 @@ fn resolve_binaries(
     name: &str,
 ) -> Vec<String> {
     cli.filter(|values| !values.is_empty())
-        .map(|values| values.to_vec())
+        .map(<[String]>::to_vec)
         .or_else(|| {
             cfg.and_then(|homebrew| {
                 (!homebrew.binaries.is_empty()).then(|| homebrew.binaries.clone())
@@ -6506,7 +6557,7 @@ fn resolve_scoop_binaries(
     name: &str,
 ) -> Vec<String> {
     cli.filter(|values| !values.is_empty())
-        .map(|values| values.to_vec())
+        .map(<[String]>::to_vec)
         .or_else(|| scoop_config_binaries(cfg))
         .unwrap_or_else(|| vec![name.to_owned()])
 }
@@ -6559,11 +6610,9 @@ fn merge_packager<T>(
     cli: Option<T>,
     cfg: Option<T>,
     metadata: Option<T>,
-    missing: String,
+    missing: &str,
 ) -> Result<T> {
-    cli.or(cfg)
-        .or(metadata)
-        .ok_or_else(|| anyhow!("{}", missing))
+    cli.or(cfg).or(metadata).ok_or_else(|| anyhow!("{missing}"))
 }
 
 fn missing_message(name: &str) -> String {
@@ -6674,6 +6723,21 @@ fn config_hint() -> &'static str {
 #[cfg(test)]
 mod extract_tests {
     use super::*;
+
+    #[test]
+    fn ci_config_rejects_integers_outside_toml_range() {
+        let ci = CiConfig {
+            nix_build: NixBuildConfig {
+                max_jobs: Some(u64::MAX),
+                ..NixBuildConfig::default()
+            },
+            ..CiConfig::default()
+        };
+        let mut table = Table::new();
+        let error = set_ci_table(&mut table, &ci).unwrap_err();
+        assert!(error.to_string().contains("[ci.nix_build].max_jobs"));
+        assert!(!table.contains_key("nix_build"));
+    }
 
     fn entry(archive: &str, member: &str, asset: &str) -> ExtractAssetConfig {
         ExtractAssetConfig {

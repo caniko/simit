@@ -36,29 +36,26 @@ pub struct Update {
 
 /// Resolve `--system`, defaulting to the Nix system of this host.
 pub fn resolve_system(requested: Option<&str>) -> Result<String> {
-    match requested {
-        Some(system) => {
-            if !SYSTEMS.contains(&system) {
-                bail!(
-                    "unsupported Nix system {system:?}; use one of {}",
-                    SYSTEMS.join(", ")
-                );
-            }
-            Ok(system.to_owned())
+    if let Some(system) = requested {
+        if !SYSTEMS.contains(&system) {
+            bail!(
+                "unsupported Nix system {system:?}; use one of {}",
+                SYSTEMS.join(", ")
+            );
         }
-        None => {
-            let arch = match std::env::consts::ARCH {
-                "x86_64" => "x86_64",
-                "aarch64" => "aarch64",
-                other => bail!("no Nix system mapping for architecture {other}"),
-            };
-            let os = match std::env::consts::OS {
-                "linux" => "linux",
-                "macos" => "darwin",
-                other => bail!("no Nix system mapping for operating system {other}"),
-            };
-            Ok(format!("{arch}-{os}"))
-        }
+        Ok(system.to_owned())
+    } else {
+        let arch = match std::env::consts::ARCH {
+            "x86_64" => "x86_64",
+            "aarch64" => "aarch64",
+            other => bail!("no Nix system mapping for architecture {other}"),
+        };
+        let os = match std::env::consts::OS {
+            "linux" => "linux",
+            "macos" => "darwin",
+            other => bail!("no Nix system mapping for operating system {other}"),
+        };
+        Ok(format!("{arch}-{os}"))
     }
 }
 

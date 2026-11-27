@@ -143,7 +143,7 @@ impl AdmissionSpec {
             )
             .chain(paths.iter().map(|path| path.as_os_str().len()));
         if strings
-            .try_fold(0usize, |total, length| total.checked_add(length))
+            .try_fold(0usize, usize::checked_add)
             .is_none_or(|length| length > MAX_EVIDENCE_BYTES)
         {
             return Err(invalid("aggregate probe input exceeds 64 KiB"));
@@ -252,6 +252,7 @@ pub fn admit(
     evidence: &Path,
     cancellation: &Cancellation,
 ) -> Result<AdmissionReceipt, AdmissionError> {
+    use std::io::Write;
     let spec = &validated.spec;
     let start = Instant::now();
     let deadline = start + Duration::from_millis(spec.overall_timeout_ms);
@@ -355,7 +356,6 @@ pub fn admit(
     if bytes.len() > MAX_EVIDENCE_BYTES {
         return Err(AdmissionError::InvalidSpec("receipt exceeds 64 KiB"));
     }
-    use std::io::Write;
     let mut file = fs::OpenOptions::new()
         .write(true)
         .create_new(true)

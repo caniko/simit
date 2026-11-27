@@ -526,8 +526,14 @@ pub fn validate_cache_receipt(plan: &Plan, system: &str, receipt: &CacheReceipt)
     artifact::store_path(&receipt.sandbox_derivation)?;
     artifact::store_path(&receipt.sandbox_output)?;
     ensure!(
-        receipt.sandbox_derivation.ends_with(".drv")
-            && !receipt.sandbox_output.ends_with(".drv")
+        receipt
+            .sandbox_derivation
+            .rsplit_once('.')
+            .is_some_and(|(_, ext)| ext == "drv")
+            && receipt
+                .sandbox_output
+                .rsplit_once('.')
+                .is_none_or(|(_, ext)| ext != "drv")
             && sha256(&receipt.sandbox_receipt_sha256),
         "invalid frozen sandbox admission receipt"
     );
@@ -809,7 +815,10 @@ pub fn freeze_source(
     artifact::store_path(derivation)?;
     artifact::store_path(output)?;
     ensure!(
-        derivation.ends_with(".drv") && !output.ends_with(".drv"),
+        derivation
+            .rsplit_once('.')
+            .is_some_and(|(_, ext)| ext == "drv")
+            && output.rsplit_once('.').is_none_or(|(_, ext)| ext != "drv"),
         "Kvrocks bootstrap requires frozen derivation and runtime output"
     );
     Ok(NativeSource {
@@ -929,7 +938,7 @@ mod tests {
     fn account_observation(program: &str, arguments: &[String]) -> Result<String> {
         let arguments = arguments.iter().map(String::as_str).collect::<Vec<_>>();
         match (program, arguments.as_slice()) {
-            ("id", ["-u"]) | ("id", ["-ru"]) => Ok("1001\n".into()),
+            ("id", ["-u" | "-ru"]) => Ok("1001\n".into()),
             ("id", ["-un"]) => Ok("runner\n".into()),
             ("getent", ["passwd", "runner"]) => {
                 Ok("runner:x:1001:1001:CI runner:/home/runner:/bin/bash\n".into())

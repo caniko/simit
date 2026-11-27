@@ -14,12 +14,12 @@ use crate::sha256;
 
 pub fn run(command: HomebrewCommand) -> Result<()> {
     match command.action {
-        HomebrewAction::Render(args) => render(args),
+        HomebrewAction::Render(args) => render(&args),
         HomebrewAction::Bump(args) => bump(args),
     }
 }
 
-fn render(args: HomebrewRenderArgs) -> Result<()> {
+fn render(args: &HomebrewRenderArgs) -> Result<()> {
     let (resolved, package_version) = resolve(args.homebrew.as_overrides())?;
     let version = args.version.as_deref().unwrap_or(&package_version);
     validate_version(version)?;

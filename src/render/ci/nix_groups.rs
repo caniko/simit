@@ -1,8 +1,18 @@
 //! Opt-in Nix groups keep shared dependencies on one runner and retain each gate.
 use super::step_conditions::cache_action;
-use super::*;
+use super::{
+    CHECKOUT_COMPAT_VERSION, CHECKOUT_VERSION, GeneratedFile, NixSetupActionRef, PathBuf, Platform,
+    ResolvedRunner, Result, StepCondition, nix_build_action_version, nix_dependencies,
+    push_action_uses, push_ci_branches, push_docs_gate_job, push_docs_gate_keys,
+    push_extra_setup_steps_with_context, push_generated_workflow_header, push_hosted_kvm_step,
+    push_independent_source_concurrency, push_install_nix_step_with_cache,
+    push_native_nix_runner_step_with_context, push_required_env_step_with_context,
+    push_required_secrets_header, push_source_head_checkout_with_version, runs_on, shell_word,
+    yaml_double_quote, yaml_json_scalar,
+};
 use crate::config::NixBuildConfig;
 use anyhow::ensure;
+use std::fmt::Write as _;
 
 pub(super) fn render(
     runner: &ResolvedRunner,
@@ -53,20 +63,22 @@ pub(super) fn render(
     if !options.push_tags.is_empty() {
         workflow.push_str("    tags:\n");
         for pattern in &options.push_tags {
-            workflow.push_str(&format!("      - \"{}\"\n", yaml_double_quote(pattern)));
+            writeln!(workflow, "      - \"{}\"", yaml_double_quote(pattern)).expect("write");
         }
     }
     workflow
         .push_str("  pull_request:\n  workflow_dispatch:\n\npermissions:\n  contents: read\n\n");
     push_independent_source_concurrency(&mut workflow);
-    workflow.push_str(&format!(
+    write!(
+        workflow,
         "jobs:\n  build:\n    name: build (${{{{ matrix.group }}}})\n    runs-on: {}\n",
         if native_runners {
             "${{ matrix.runner }}".to_owned()
         } else {
             runs_on(runner)
         }
-    ));
+    )
+    .expect("write");
     let build_needs = if options.dependency_installables.is_empty() {
         Vec::new()
     } else {
@@ -74,22 +86,30 @@ pub(super) fn render(
     };
     push_docs_gate_keys(&mut workflow, Platform::Github, &build_needs);
     if let Some(timeout) = options.timeout_minutes {
-        workflow.push_str(&format!("    timeout-minutes: {timeout}\n"));
+        writeln!(workflow, "    timeout-minutes: {timeout}").expect("write");
     }
-    workflow.push_str(&format!("    strategy:\n      fail-fast: false\n      max-parallel: {}\n      matrix:\n        include:\n", options.max_parallel.unwrap_or(2)));
+    write!(
+        workflow,
+        "    strategy:\n      fail-fast: false\n      max-parallel: {}\n      matrix:\n        include:\n",
+        options.max_parallel.unwrap_or(2)
+    ).expect("write");
     for (name, members) in &options.groups {
-        workflow.push_str(&format!(
+        write!(
+            workflow,
             "          - group: \"{}\"\n            installables: {}\n",
             yaml_double_quote(name),
             yaml_json_scalar(&serde_json::to_string(members)?)
-        ));
+        )
+        .expect("write");
         if native_runners {
             let system = options.group_system(members)?;
-            workflow.push_str(&format!(
+            write!(
+                workflow,
                 "            system: \"{}\"\n            runner: \"{}\"\n",
                 yaml_double_quote(system),
-                yaml_double_quote(&options.system_runners[system]),
-            ));
+                yaml_double_quote(&options.system_runners[system])
+            )
+            .expect("write");
         }
     }
     // Producer shell startup files/configuration cannot participate in bootstrap.
@@ -113,7 +133,7 @@ pub(super) fn render(
             w.push_str("          BASH_ENV: ''\n          ENV: ''\n");
             for key in ["NIX_CONFIG", "NIX_USER_CONF_FILES", "NIX_PATH"] {
                 if let Some(value) = options.extra_env.get(key) {
-                    w.push_str(&format!("          {key}: {}\n", yaml_json_scalar(value)));
+                    writeln!(w, "          {key}: {}", yaml_json_scalar(value)).expect("write");
                 }
             }
         });
@@ -127,9 +147,10 @@ pub(super) fn render(
         None => "vars.SIMIT_CI_ENGINE_REVISION".to_owned(),
     };
     push_engine_cache_restore(&mut workflow, &revision);
-    workflow.push_str(&format!(
+    write!(
+        workflow,
         "      - name: Provision grouped-build Rust engine\n        shell: bash\n        env:\n          SIMIT_CI_ENGINE_REVISION: ${{{{ {revision} }}}}\n"
-    ));
+    ).expect("write");
     workflow.push_str(r#"          BASH_ENV: ''
           ENV: ''
           NIX_CONFIG: 'experimental-features = nix-command flakes'
@@ -152,19 +173,19 @@ pub(super) fn render(
 "#);
     push_engine_cache_save(&mut workflow, &revision);
     push_required_env_step_with_context(&mut workflow, &options.required_secrets, |w| {
-        push_producer_env(w, options)
+        push_producer_env(w, options);
     });
     if options.kvm {
         push_hosted_kvm_step(&mut workflow, native_runners);
     }
     push_extra_setup_steps_with_context(&mut workflow, extra_setup, |w| {
-        push_producer_env(w, options)
+        push_producer_env(w, options);
     });
     push_extra_setup_steps_with_context(&mut workflow, &options.extra_setup, |w| {
-        push_producer_env(w, options)
+        push_producer_env(w, options);
     });
     push_required_env_step_with_context(&mut workflow, &options.required_env, |w| {
-        push_producer_env(w, options)
+        push_producer_env(w, options);
     });
     nix_dependencies::import(&mut workflow, runner, options, installables)?;
     push_input_cache_restore(&mut workflow, options);
@@ -193,15 +214,21 @@ pub(super) fn render(
         };
         spec.validate()?;
         let quoted = shell_word(&serde_json::to_string(&spec)?);
-        workflow.push_str(&format!("            {})\n              (umask 077; set -C; printf '%s' {quoted} > \"$SIMIT_NIX_BUILD_RESULTS/group-spec.json\")\n              ;;\n", shell_word(name)));
+        write!(
+            workflow,
+            "            {})\n              (umask 077; set -C; printf '%s' {quoted} > \"$SIMIT_NIX_BUILD_RESULTS/group-spec.json\")\n              ;;\n",
+            shell_word(name)
+        ).expect("write");
     }
     workflow.push_str("            *) echo 'Unknown Nix execution group' >&2; exit 1 ;;\n          esac\n          \"$SIMIT_CI_ENGINE\" ci nix-group --spec \"$SIMIT_NIX_BUILD_RESULTS/group-spec.json\"\n");
     push_input_cache_save(&mut workflow, options);
     push_diagnostics_fallback(&mut workflow, options);
-    workflow.push_str(&format!(
+    write!(
+        workflow,
         "      - name: Upload Nix build evidence\n        if: {}\n",
         StepCondition::Always.expression()
-    ));
+    )
+    .expect("write");
     push_action_uses(
         &mut workflow,
         Platform::Github,
@@ -210,9 +237,13 @@ pub(super) fn render(
         nix_build_action_version(runner, options, "v7.0.2", "v4.6.2"),
         "v4.6.2",
     );
-    workflow.push_str(&format!("\n        with:\n          name: nix-build-${{{{ strategy.job-index }}}}\n          retention-days: {}\n          if-no-files-found: error\n          path: |\n            ${{{{ runner.temp }}}}/simit-nix-build-${{{{ strategy.job-index }}}}\n", options.artifact_retention_days.unwrap_or(14)));
+    write!(
+        workflow,
+        "\n        with:\n          name: nix-build-${{{{ strategy.job-index }}}}\n          retention-days: {}\n          if-no-files-found: error\n          path: |\n            ${{{{ runner.temp }}}}/simit-nix-build-${{{{ strategy.job-index }}}}\n",
+        options.artifact_retention_days.unwrap_or(14)
+    ).expect("write");
     for path in &options.artifact_paths {
-        workflow.push_str(&format!("            {path}\n"));
+        writeln!(workflow, "            {path}").expect("write");
     }
     nix_dependencies::job(
         &mut workflow,
@@ -261,7 +292,12 @@ fn engine_cache_key(revision: &str) -> String {
 /// restore misses and provisioning fails as before. Only the save, an action
 /// that cannot be guarded by a script, stays conditional (an optional step).
 fn push_engine_cache_restore(workflow: &mut String, revision: &str) {
-    workflow.push_str(&format!("      - name: Restore grouped-build engine\n        id: simit-engine-cache\n        uses: {}\n        with:\n          path: ${{{{ runner.temp }}}}/simit-engine-cache\n          key: {}\n", cache_action("restore"), engine_cache_key(revision)));
+    write!(
+        workflow,
+        "      - name: Restore grouped-build engine\n        id: simit-engine-cache\n        uses: {}\n        with:\n          path: ${{{{ runner.temp }}}}/simit-engine-cache\n          key: {}\n",
+        cache_action("restore"),
+        engine_cache_key(revision)
+    ).expect("write");
     workflow.push_str(r#"      - name: Import grouped-build engine
         shell: bash
         env:
@@ -310,12 +346,20 @@ fn push_engine_cache_save(workflow: &mut String, revision: &str) {
             echo '::warning::Grouped-build engine failed to export; not saving it'
           fi
 "#);
-    workflow.push_str(&format!("      - name: Save grouped-build engine\n        if: ${{{{ steps.simit-engine-cache-save.outputs.save == 'true' }}}}\n        uses: {}\n        with:\n          path: ${{{{ runner.temp }}}}/simit-engine-cache\n          key: {}\n", cache_action("save"), engine_cache_key(revision)));
+    write!(
+        workflow,
+        "      - name: Save grouped-build engine\n        if: ${{{{ steps.simit-engine-cache-save.outputs.save == 'true' }}}}\n        uses: {}\n        with:\n          path: ${{{{ runner.temp }}}}/simit-engine-cache\n          key: {}\n",
+        cache_action("save"),
+        engine_cache_key(revision)
+    ).expect("write");
 }
 
 fn push_input_cache_hits(workflow: &mut String, options: &NixBuildConfig) {
     for index in 0..options.cache_installables.len() {
-        workflow.push_str(&format!("          SIMIT_NIX_CACHE_HIT_{index}: ${{{{ steps.simit-nix-cache-{index}.outputs.cache-hit }}}}\n"));
+        writeln!(
+            workflow,
+            "          SIMIT_NIX_CACHE_HIT_{index}: ${{{{ steps.simit-nix-cache-{index}.outputs.cache-hit }}}}"
+        ).expect("write");
     }
 }
 
@@ -341,13 +385,19 @@ fn push_input_cache_restore(workflow: &mut String, options: &NixBuildConfig) {
           }
 "#);
     for (index, installable) in options.cache_installables.iter().enumerate() {
-        workflow.push_str(&format!(
-            "          resolve {index} {}\n",
+        writeln!(
+            workflow,
+            "          resolve {index} {}",
             shell_word(installable)
-        ));
+        )
+        .expect("write");
     }
     for index in 0..options.cache_installables.len() {
-        workflow.push_str(&format!("      - name: Restore cached Nix input {index}\n        id: simit-nix-cache-{index}\n        uses: {}\n        with:\n          path: ${{{{ runner.temp }}}}/simit-nix-cache/{index}\n          key: ${{{{ steps.simit-nix-cache.outputs.key-{index} }}}}\n", cache_action("restore")));
+        write!(
+            workflow,
+            "      - name: Restore cached Nix input {index}\n        id: simit-nix-cache-{index}\n        uses: {}\n        with:\n          path: ${{{{ runner.temp }}}}/simit-nix-cache/{index}\n          key: ${{{{ steps.simit-nix-cache.outputs.key-{index} }}}}\n",
+            cache_action("restore")
+        ).expect("write");
     }
     workflow.push_str("      - name: Import cached Nix inputs\n        shell: bash\n        env:\n          SIMIT_NIX_GROUP: ${{ matrix.group }}\n");
     push_input_cache_hits(workflow, options);
@@ -358,11 +408,13 @@ fn push_input_cache_restore(workflow: &mut String, options: &NixBuildConfig) {
             .iter()
             .map(|member| shell_word(member.split_once('^').map_or(member, |(path, _)| path)))
             .collect();
-        workflow.push_str(&format!(
-            "            {}) members=({}) ;;\n",
+        writeln!(
+            workflow,
+            "            {}) members=({}) ;;",
             shell_word(name),
             attrs.join(" ")
-        ));
+        )
+        .expect("write");
     }
     workflow.push_str(r#"            *) echo 'Unknown Nix execution group' >&2; exit 1 ;;
           esac
@@ -387,7 +439,7 @@ fn push_input_cache_restore(workflow: &mut String, options: &NixBuildConfig) {
           }
 "#);
     for index in 0..options.cache_installables.len() {
-        workflow.push_str(&format!("          import_input {index}\n"));
+        writeln!(workflow, "          import_input {index}").expect("write");
     }
 }
 
@@ -396,10 +448,11 @@ fn push_input_cache_save(workflow: &mut String, options: &NixBuildConfig) {
     if options.cache_installables.is_empty() {
         return;
     }
-    workflow.push_str(&format!(
+    write!(
+        workflow,
         "      - name: Export cached Nix inputs\n        id: simit-nix-cache-save\n        if: {}\n        shell: bash\n        env:\n",
         StepCondition::NotCancelled.wrapped()
-    ));
+    ).expect("write");
     push_input_cache_hits(workflow, options);
     push_producer_env_lines(workflow, options);
     workflow.push_str(&r#"        run: |
@@ -426,10 +479,14 @@ fn push_input_cache_save(workflow: &mut String, options: &NixBuildConfig) {
           }
 "#.replace("MAX_KIB", &INPUT_CACHE_MAX_KIB.to_string()));
     for index in 0..options.cache_installables.len() {
-        workflow.push_str(&format!("          export_input {index}\n"));
+        writeln!(workflow, "          export_input {index}").expect("write");
     }
     for index in 0..options.cache_installables.len() {
-        workflow.push_str(&format!("      - name: Save cached Nix input {index}\n        if: ${{{{ !cancelled() && steps.simit-nix-cache-save.outputs.save-{index} == 'true' }}}}\n        uses: {}\n        with:\n          path: ${{{{ runner.temp }}}}/simit-nix-cache/{index}\n          key: ${{{{ steps.simit-nix-cache.outputs.key-{index} }}}}\n", cache_action("save")));
+        write!(
+            workflow,
+            "      - name: Save cached Nix input {index}\n        if: ${{{{ !cancelled() && steps.simit-nix-cache-save.outputs.save-{index} == 'true' }}}}\n        uses: {}\n        with:\n          path: ${{{{ runner.temp }}}}/simit-nix-cache/{index}\n          key: ${{{{ steps.simit-nix-cache.outputs.key-{index} }}}}\n",
+            cache_action("save")
+        ).expect("write");
     }
 }
 
@@ -439,22 +496,31 @@ fn push_diagnostics_fallback(workflow: &mut String, options: &NixBuildConfig) {
     }
     // The collectors must survive failed engine provisioning or admission.
     // Render static member arms so the fallback needs only the job's shell.
-    workflow.push_str(&format!(
+    write!(
+        workflow,
         "      - name: Retain uncollected group diagnostics\n        if: {}\n",
         StepCondition::NotCancelled.wrapped()
-    ));
+    )
+    .expect("write");
     workflow.push_str("        env:\n          SIMIT_NIX_GROUP: ${{ matrix.group }}\n          SIMIT_NIX_BUILD_RESULTS: ${{ runner.temp }}/simit-nix-build-${{ strategy.job-index }}\n");
     push_producer_env_lines(workflow, options);
     workflow.push_str("        run: |\n          group_root=\"$SIMIT_NIX_BUILD_RESULTS\"\n          collector_failed=0\n          case \"$SIMIT_NIX_GROUP\" in\n");
     for (name, members) in &options.groups {
-        workflow.push_str(&format!("            {})\n", shell_word(name)));
+        writeln!(workflow, "            {})", shell_word(name)).expect("write");
         for (index, installable) in members.iter().enumerate() {
-            workflow.push_str(&format!("              export INSTALLABLE={}\n              export SIMIT_NIX_BUILD_RESULTS=\"$group_root/{index}\"\n              mkdir -p \"$SIMIT_NIX_BUILD_RESULTS\"\n              if [ ! -e \"$SIMIT_NIX_BUILD_RESULTS/diagnostics-complete\" ]; then\n", shell_word(installable)));
+            write!(
+                workflow,
+                "              export INSTALLABLE={}\n              export SIMIT_NIX_BUILD_RESULTS=\"$group_root/{index}\"\n              mkdir -p \"$SIMIT_NIX_BUILD_RESULTS\"\n              if [ ! -e \"$SIMIT_NIX_BUILD_RESULTS/diagnostics-complete\" ]; then\n",
+                shell_word(installable)
+            ).expect("write");
             for (hook, script) in options.post_build_always.iter().enumerate() {
                 let quoted = shell_word(script).replace('\n', "\n          ");
                 let wrapper = shell_word(crate::ci_runtime::group::HOOK_FILE_COMMAND)
                     .replace('\n', "\n          ");
-                workflow.push_str(&format!("                (umask 077; set -C; printf '%s' {quoted} > \"$SIMIT_NIX_BUILD_RESULTS/fallback-diagnostic-{hook}.script\")\n                status=0\n                SIMIT_NIX_HOOK_FILE=\"$SIMIT_NIX_BUILD_RESULTS/fallback-diagnostic-{hook}.script\" bash -e -o pipefail -c {wrapper} || status=$?\n                printf '%s\\n' \"$status\" > \"$SIMIT_NIX_BUILD_RESULTS/fallback-diagnostic-{hook}.status\"\n                if [ \"$status\" -ne 0 ]; then collector_failed=1; fi\n"));
+                write!(
+                    workflow,
+                    "                (umask 077; set -C; printf '%s' {quoted} > \"$SIMIT_NIX_BUILD_RESULTS/fallback-diagnostic-{hook}.script\")\n                status=0\n                SIMIT_NIX_HOOK_FILE=\"$SIMIT_NIX_BUILD_RESULTS/fallback-diagnostic-{hook}.script\" bash -e -o pipefail -c {wrapper} || status=$?\n                printf '%s\\n' \"$status\" > \"$SIMIT_NIX_BUILD_RESULTS/fallback-diagnostic-{hook}.status\"\n                if [ \"$status\" -ne 0 ]; then collector_failed=1; fi\n"
+                ).expect("write");
             }
             workflow.push_str("                printf 'completed\\n' > \"$SIMIT_NIX_BUILD_RESULTS/diagnostics-complete\"\n              fi\n");
         }
@@ -472,9 +538,11 @@ fn push_producer_env(workflow: &mut String, options: &NixBuildConfig) {
 
 pub(super) fn push_producer_env_lines(workflow: &mut String, options: &NixBuildConfig) {
     for (name, value) in &options.extra_env {
-        workflow.push_str(&format!(
-            "          {name}: \"{}\"\n",
+        writeln!(
+            workflow,
+            "          {name}: \"{}\"",
             yaml_double_quote(value)
-        ));
+        )
+        .expect("write");
     }
 }

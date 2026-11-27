@@ -614,7 +614,7 @@ fn flake_configuration_resolves_from_non_cargo_members_and_stops_at_git_boundari
     write(
         temp.path(),
         "bin/nix",
-        &format!("#!/bin/sh\nprintf '%s\\n' '{}'\n", json),
+        &format!("#!/bin/sh\nprintf '%s\\n' '{json}'\n"),
     );
     fs::set_permissions(
         temp.path().join("bin/nix"),
@@ -2372,14 +2372,14 @@ fn independent_publication_qualifies_native_components_and_keeps_version_drift_s
             .unwrap()
             .contains("builtins.currentSystem")
     );
-    let publishes: Vec<_> = workflow["jobs"]
+    let publish_jobs: Vec<_> = workflow["jobs"]
         .as_mapping()
         .unwrap()
         .keys()
         .filter_map(|k| k.as_str())
         .filter(|k| k.starts_with("publish-") && *k != "publish-report")
         .collect();
-    assert!(publishes.is_empty());
+    assert!(publish_jobs.is_empty());
     assert!(text.contains("git verify-tag"));
     assert!(text.contains("git rev-parse --verify \"refs/tags/${tag}^{commit}\""));
     assert!(text.contains("checkout_sha=\"$(git rev-parse --verify HEAD)\""));

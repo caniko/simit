@@ -1,6 +1,6 @@
 use super::{
     backend, canonical_digest,
-    contract::*,
+    contract::{Backend, EffectivePlan, Nar, Outcome, Plan, PlatformResult, VERSION, name, runner},
     process::{nix_args, run},
 };
 use anyhow::{Result, bail, ensure};
@@ -61,7 +61,7 @@ fn relative(s: &str) -> bool {
 pub fn file_digest(path: &Path) -> Result<String> {
     let mut f = fs::File::open(path)?;
     let mut hash = Sha256::new();
-    let mut buf = [0; 65536];
+    let mut buf = vec![0; 65536];
     loop {
         let n = f.read(&mut buf)?;
         if n == 0 {
@@ -106,7 +106,7 @@ pub fn inventory(root: &Path) -> Result<BTreeMap<String, String>> {
                     .checked_add(meta.len())
                     .ok_or_else(|| anyhow::anyhow!("artifact size overflow"))?;
                 ensure!(
-                    *total <= MAX_BYTES && entries.len() < 100000,
+                    *total <= MAX_BYTES && entries.len() < 100_000,
                     "artifact too large"
                 );
                 if rel != "review-result.json" {
@@ -170,7 +170,7 @@ pub fn closure_info(paths: &[String], store: Option<&str>) -> Result<BTreeMap<St
 }
 pub fn validate_closure(roots: &[String], map: &BTreeMap<String, Nar>) -> Result<()> {
     ensure!(
-        !roots.is_empty() && !map.is_empty() && map.len() <= 100000,
+        !roots.is_empty() && !map.is_empty() && map.len() <= 100_000,
         "empty/oversized closure"
     );
     let mut total = 0u64;
@@ -250,7 +250,7 @@ pub fn validate_result(plan: &Plan, result: &PlatformResult) -> Result<()> {
     ensure!(copy.digest == e.digest, "effective plan digest mismatch");
     match (&plan.request.compiler_cache, &e.compiler_cache) {
         (Some(_), Some(receipt)) => {
-            super::kvrocks::validate_cache_receipt(plan, &e.system, receipt)?
+            super::kvrocks::validate_cache_receipt(plan, &e.system, receipt)?;
         }
         (None, None) => ensure!(
             result.compiler_cache_cleanup.is_none(),
@@ -301,7 +301,19 @@ pub fn validate_result(plan: &Plan, result: &PlatformResult) -> Result<()> {
         );
         return Ok(());
     }
-    if !nixpkgs {
+    if nixpkgs {
+        ensure!(
+            e.flake_reference.is_none() && e.lock.is_none(),
+            "legacy backend must not invent a flake lock"
+        );
+        for t in &e.targets {
+            ensure!(
+                t.installable
+                    .starts_with(&format!("nixpkgs:{}/{}/", plan.target.commit, e.system)),
+                "wrong Nixpkgs installable"
+            );
+        }
+    } else {
         ensure!(
             e.flake_reference.as_deref() == Some(&backend::flake_ref(plan)),
             "wrong recipe reference"
@@ -338,23 +350,14 @@ pub fn validate_result(plan: &Plan, result: &PlatformResult) -> Result<()> {
             expected == actual && e.targets.len() == expected.len(),
             "missing/unrequested outputs"
         );
-    } else {
-        ensure!(
-            e.flake_reference.is_none() && e.lock.is_none(),
-            "legacy backend must not invent a flake lock"
-        );
-        for t in &e.targets {
-            ensure!(
-                t.installable
-                    .starts_with(&format!("nixpkgs:{}/{}/", plan.target.commit, e.system)),
-                "wrong Nixpkgs installable"
-            );
-        }
     }
     for t in &e.targets {
         store_path(&t.derivation)?;
         ensure!(
-            t.derivation.ends_with(".drv") && !t.outputs.is_empty(),
+            t.derivation
+                .rsplit_once('.')
+                .is_some_and(|(_, ext)| ext == "drv")
+                && !t.outputs.is_empty(),
             "invalid derivation"
         );
         for (n, p) in &t.outputs {

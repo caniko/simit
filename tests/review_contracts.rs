@@ -156,7 +156,7 @@ fn legacy_reports_keep_their_identity_and_cached_passes_require_admission_and_cl
     let encoded = serde_json::to_value(&legacy).unwrap();
     assert!(encoded.get("compiler_cache_cleanup").is_none());
     assert!(encoded["effective"].get("compiler_cache").is_none());
-    let mut cached = p.clone();
+    let mut cached = p;
     cached.request.expected_head = Some(HEAD.into());
     cached.request.expected_base = Some(BASE.into());
     cached.request.test_profile = "checks-rebuild-v1".into();
@@ -307,7 +307,7 @@ fn strict_request_fields_selectors_and_platforms() {
     let mut v = serde_json::to_value(&r).unwrap();
     v["extra_nix_config"] = json!("sandbox=false");
     assert!(serde_json::from_value::<Request>(v).is_err());
-    let mut r = r.clone();
+    let mut r = r;
     r.revision = Some("main".into());
     assert!(r.validate().is_err());
     r.revision = None;

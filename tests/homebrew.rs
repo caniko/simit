@@ -148,10 +148,10 @@ fn render_without_version_uses_package_version() {
 fn bump_writes_formula_with_real_sha256s() {
     let temp = init_package(
         "0.9.0",
-        r#"
+        r"
 [homebrew.platforms]
 darwin_intel = true
-"#,
+",
     );
     let tap = temp.path().join("tap");
     let archives = fixture_archives(temp.path());
@@ -183,10 +183,10 @@ darwin_intel = true
 fn bump_omits_disabled_platforms() {
     let temp = init_package(
         "0.9.0",
-        r#"
+        r"
 [homebrew.platforms]
 linux_arm = false
-"#,
+",
     );
     let tap = temp.path().join("tap");
     let archives = fixture_archives(temp.path())
@@ -301,12 +301,12 @@ fn contract_sha256_fields_match_rs_harbor_when_available() {
 
     let temp = init_package(
         "0.9.0",
-        r#"
+        r"
 [homebrew.platforms]
 darwin_arm = false
 darwin_intel = false
 linux_arm = false
-"#,
+",
     );
     let tap = temp.path().join("tap");
     let archive = temp.path().join("linux_intel.tar.gz");

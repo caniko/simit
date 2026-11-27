@@ -108,7 +108,7 @@ fn full_plan_patches_changed_project_policy_without_resolving_trust() {
     .unwrap();
     // An untracked trust root is not what the publishing workflows fetch.
     let git = |args: &[&str]| {
-        let output = std::process::Command::new("git")
+        let output = Command::new("git")
             .current_dir(root)
             .env("GIT_AUTHOR_NAME", "fixture")
             .env("GIT_AUTHOR_EMAIL", "fixture@example.invalid")
@@ -1743,8 +1743,7 @@ fn generates_forgejo_nix_workflows() {
     assert!(publish.contains("keys/maintainers.gpg"));
     assert!(publish.contains("git verify-tag \"$tag\""));
     assert!(
-        publish
-            .contains(r#"$(cargo pkgid -p demo | awk -F'[#@]' 'NF > 1 {print $NF}' | tail -n 1"#)
+        publish.contains(r"$(cargo pkgid -p demo | awk -F'[#@]' 'NF > 1 {print $NF}' | tail -n 1")
     );
     assert!(!publish.contains("inputs:\n"));
     assert!(publish.contains("CRATES_IO_API_TOKEN: ${{ secrets.CRATES_IO_API_TOKEN }}"));
@@ -3335,8 +3334,8 @@ fn crow_audit_provisions_database_in_its_own_step() {
                 fs::create_dir_all(cargo.join("advisory-db")).unwrap();
                 fs::write(cargo.join("advisory-db/keep"), "keep").unwrap();
             }
-            let tmp = home.join("tmp");
-            fs::create_dir(&tmp).unwrap();
+            let scratch = home.join("tmp");
+            fs::create_dir(&scratch).unwrap();
             let inherited_path = std::env::var_os("PATH").unwrap();
             let paths: Vec<_> = std::env::split_paths(&inherited_path).collect();
             let coreutils = paths.iter().find(|p| p.join("mktemp").is_file()).unwrap();
@@ -3348,7 +3347,7 @@ fn crow_audit_provisions_database_in_its_own_step() {
                 .arg(&command)
                 .current_dir(root)
                 .env("HOME", &home)
-                .env("TMPDIR", &tmp)
+                .env("TMPDIR", &scratch)
                 .env("FIXTURE_AUDIT", &audit_tool)
                 .env("NIX_BIN", &nix_bin)
                 .env_remove("CARGO_HOME")
@@ -3372,7 +3371,7 @@ fn crow_audit_provisions_database_in_its_own_step() {
                     "keep"
                 );
             }
-            assert_eq!(fs::read_dir(tmp).unwrap().count(), 0);
+            assert_eq!(fs::read_dir(scratch).unwrap().count(), 0);
             assert!(fs::read_dir(root).unwrap().all(|entry| {
                 !entry
                     .unwrap()
@@ -5195,8 +5194,7 @@ fn forgejo_nix_with_om_ci_replace_emits_om_ci_step() {
     assert!(publish.contains("OMNIX_REF:"));
     assert!(publish.contains("nix run \"$OMNIX_REF\" -- ci run"));
     assert!(
-        publish
-            .contains(r#"$(cargo pkgid -p demo | awk -F'[#@]' 'NF > 1 {print $NF}' | tail -n 1"#)
+        publish.contains(r"$(cargo pkgid -p demo | awk -F'[#@]' 'NF > 1 {print $NF}' | tail -n 1")
     );
     assert!(publish.contains("nix develop -c cargo publish --dry-run"));
     assert!(!publish.contains("run: nix flake check"));
@@ -5510,7 +5508,7 @@ fn generates_github_plain_cargo_workflows() {
     assert!(publish.contains("simit changelog release <version>"));
     assert!(publish.contains("run: cargo publish --dry-run"));
     assert!(
-        publish.contains(r#"cargo pkgid -p demo | awk -F'[#@]' 'NF > 1 {print $NF}' | tail -n 1"#)
+        publish.contains(r"cargo pkgid -p demo | awk -F'[#@]' 'NF > 1 {print $NF}' | tail -n 1")
     );
     assert!(!publish.contains("CARGO_REGISTRY_TOKEN"));
     assert!(!publish.contains("CRATES_IO_API_TOKEN"));
@@ -5674,7 +5672,7 @@ fn forgejo_auto_runtime_uses_rust_container_even_when_flake_exists() {
     );
     assert_verified_cargo_tools(&publish);
     assert!(
-        publish.contains(r#"cargo pkgid -p demo | awk -F'[#@]' 'NF > 1 {print $NF}' | tail -n 1"#)
+        publish.contains(r"cargo pkgid -p demo | awk -F'[#@]' 'NF > 1 {print $NF}' | tail -n 1")
     );
 }
 
@@ -6810,31 +6808,19 @@ fn workspace_publish_tag_validation_is_package_scoped_for_diverging_versions() {
         .unwrap();
     assert!(status.success());
 
-    let member_a_publish = read(
-        &temp
-            .path()
-            .join(".forgejo/workflows/publish-crate-member-a.yaml"),
-    );
-    assert_yaml_parses(&member_a_publish);
-    assert!(
-        member_a_publish
-            .contains(r#"cargo pkgid -p member-a | awk -F'[#@]' 'NF > 1 {print $NF}' | tail -n 1"#)
-    );
-    assert!(!member_a_publish.contains("cargo pkgid -p member-b"));
-    assert!(!member_a_publish.contains("cargo metadata --no-deps --format-version 1"));
-
-    let member_b_publish = read(
-        &temp
-            .path()
-            .join(".forgejo/workflows/publish-crate-member-b.yaml"),
-    );
-    assert_yaml_parses(&member_b_publish);
-    assert!(
-        member_b_publish
-            .contains(r#"cargo pkgid -p member-b | awk -F'[#@]' 'NF > 1 {print $NF}' | tail -n 1"#)
-    );
-    assert!(!member_b_publish.contains("cargo pkgid -p member-a"));
-    assert!(!member_b_publish.contains("cargo metadata --no-deps --format-version 1"));
+    for (member, other) in [("member-a", "member-b"), ("member-b", "member-a")] {
+        let workflow = read(
+            &temp
+                .path()
+                .join(format!(".forgejo/workflows/publish-crate-{member}.yaml")),
+        );
+        assert_yaml_parses(&workflow);
+        assert!(workflow.contains(&format!(
+            r"cargo pkgid -p {member} | awk -F'[#@]' 'NF > 1 {{print $NF}}' | tail -n 1"
+        )));
+        assert!(!workflow.contains(&format!("cargo pkgid -p {other}")));
+        assert!(!workflow.contains("cargo metadata --no-deps --format-version 1"));
+    }
 }
 
 #[test]
@@ -7247,9 +7233,9 @@ fn cli_flags_override_persisted_ci_values() {
     let temp = init_package(false);
     fs::write(
         temp.path().join("simit.toml"),
-        r#"[ci]
+        r"[ci]
 with_audit = false
-"#,
+",
     )
     .unwrap();
 

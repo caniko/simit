@@ -137,7 +137,7 @@ impl Fixture {
         )
     }
 
-    fn admit(&self, source: &Path, revision: &str) -> Result<super::super::source::Submodules> {
+    fn admit(&self, source: &Path, revision: &str) -> Result<Submodules> {
         let state = self.state.path().to_owned();
         admit_submodules(
             &move || data_command("git", &state),

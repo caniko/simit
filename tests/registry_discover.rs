@@ -12,7 +12,10 @@ use simit::registry::{self, DiscoverOptions, FeatureStatus};
 use simit::render::flake;
 use tempfile::TempDir;
 
-#[allow(dead_code)]
+#[allow(
+    dead_code,
+    reason = "This integration target uses only part of the shared fixture module"
+)]
 mod common;
 
 static ENV_LOCK: Mutex<()> = Mutex::new(());
@@ -176,8 +179,8 @@ fn canonical(path: &Path) -> Utf8PathBuf {
     Utf8PathBuf::from_path_buf(fs::canonicalize(path).unwrap()).unwrap()
 }
 
-fn discover(root: &Path, opts: DiscoverOptions) -> registry::DiscoverReport {
-    registry::discover_under(root, &opts).unwrap()
+fn discover(root: &Path, opts: &DiscoverOptions) -> registry::DiscoverReport {
+    registry::discover_under(root, opts).unwrap()
 }
 
 #[test]
@@ -185,7 +188,7 @@ fn empty_temp_dir_returns_empty_report() {
     let _env = EnvGuard::new();
     let root = TempDir::new().unwrap();
 
-    let report = discover(root.path(), DiscoverOptions::default());
+    let report = discover(root.path(), &DiscoverOptions::default());
 
     assert!(report.registered.is_empty());
     assert!(report.refreshed.is_empty());
@@ -200,7 +203,7 @@ fn simit_managed_crate_is_registered_with_managed_flake() {
     init_package(root.path(), "managed");
     add_managed_flake(root.path());
 
-    let report = discover(root.path(), DiscoverOptions::default());
+    let report = discover(root.path(), &DiscoverOptions::default());
     let key = canonical(root.path());
     let registry = registry::load().unwrap();
 
@@ -219,7 +222,7 @@ fn hooks_only_crate_is_registered_with_managed_flake() {
     fs::write(root.path().join("flake.nix"), "{ custom = \"owned\"; }\n").unwrap();
     add_hooks_only_flake(root.path());
 
-    let report = discover(root.path(), DiscoverOptions::default());
+    let report = discover(root.path(), &DiscoverOptions::default());
     let key = canonical(root.path());
     let registry = registry::load().unwrap();
 
@@ -236,7 +239,7 @@ fn unsimit_crate_is_skipped_as_empty() {
     let root = TempDir::new().unwrap();
     init_package(root.path(), "plain");
 
-    let report = discover(root.path(), DiscoverOptions::default());
+    let report = discover(root.path(), &DiscoverOptions::default());
 
     assert!(report.registered.is_empty());
     assert_eq!(report.skipped_empty, [canonical(root.path())]);
@@ -249,7 +252,7 @@ fn package_name_does_not_require_cargo_metadata_for_skipped_crate() {
     let root = TempDir::new().unwrap();
     init_package_with_broken_registry_dependency(root.path(), "plain");
 
-    let report = discover(root.path(), DiscoverOptions::default());
+    let report = discover(root.path(), &DiscoverOptions::default());
 
     assert!(report.registered.is_empty());
     assert_eq!(report.skipped_empty, [canonical(root.path())]);
@@ -264,7 +267,7 @@ fn package_name_does_not_require_cargo_metadata_for_include_empty_crate() {
 
     let report = discover(
         root.path(),
-        DiscoverOptions {
+        &DiscoverOptions {
             include_empty: true,
             ..DiscoverOptions::default()
         },
@@ -284,7 +287,7 @@ fn generic_changelog_does_not_make_crate_simit_managed() {
     init_package(root.path(), "plain");
     fs::write(root.path().join("CHANGELOG.md"), "# Changelog\n\n").unwrap();
 
-    let report = discover(root.path(), DiscoverOptions::default());
+    let report = discover(root.path(), &DiscoverOptions::default());
 
     assert!(report.registered.is_empty());
     assert_eq!(report.skipped_empty, [canonical(root.path())]);
@@ -298,7 +301,7 @@ fn generic_flake_does_not_make_crate_simit_managed() {
     init_package(root.path(), "plain");
     fs::write(root.path().join("flake.nix"), "{ outputs = _: {}; }\n").unwrap();
 
-    let report = discover(root.path(), DiscoverOptions::default());
+    let report = discover(root.path(), &DiscoverOptions::default());
 
     assert!(report.registered.is_empty());
     assert_eq!(report.skipped_empty, [canonical(root.path())]);
@@ -317,7 +320,7 @@ fn generic_ci_registers_as_hand_rolled() {
     )
     .unwrap();
 
-    let report = discover(root.path(), DiscoverOptions::default());
+    let report = discover(root.path(), &DiscoverOptions::default());
 
     assert_eq!(report.registered, [canonical(root.path())]);
     assert!(report.skipped_empty.is_empty());
@@ -338,7 +341,7 @@ fn marked_ci_with_unmarked_supplementary_workflow_stays_managed() {
     )
     .unwrap();
 
-    let report = discover(root.path(), DiscoverOptions::default());
+    let report = discover(root.path(), &DiscoverOptions::default());
 
     assert_eq!(report.registered, [canonical(root.path())]);
     let registry = registry::load().unwrap();
@@ -365,7 +368,7 @@ fn edited_marked_ci_with_unmarked_supplementary_workflow_stays_drift() {
     )
     .unwrap();
 
-    let report = discover(root.path(), DiscoverOptions::default());
+    let report = discover(root.path(), &DiscoverOptions::default());
 
     assert_eq!(report.registered, [canonical(root.path())]);
     let registry = registry::load().unwrap();
@@ -392,7 +395,7 @@ nix_builds = [".#demo"]
     init_managed_github_ci(root.path());
     fs::remove_file(root.path().join(".github/workflows/nix-builds.yaml")).unwrap();
 
-    let report = discover(root.path(), DiscoverOptions::default());
+    let report = discover(root.path(), &DiscoverOptions::default());
 
     assert_eq!(report.registered, [canonical(root.path())]);
     let registry = registry::load().unwrap();
@@ -414,7 +417,7 @@ fn hand_rolled_ci_registers_with_include_empty() {
 
     let report = discover(
         root.path(),
-        DiscoverOptions {
+        &DiscoverOptions {
             include_empty: true,
             ..DiscoverOptions::default()
         },
@@ -434,7 +437,7 @@ fn include_empty_registers_unsimit_crate() {
 
     let report = discover(
         root.path(),
-        DiscoverOptions {
+        &DiscoverOptions {
             include_empty: true,
             ..DiscoverOptions::default()
         },
@@ -452,7 +455,7 @@ fn nested_workspace_registers_parent_and_does_not_visit_members() {
 
     let report = discover(
         root.path(),
-        DiscoverOptions {
+        &DiscoverOptions {
             include_empty: true,
             ..DiscoverOptions::default()
         },
@@ -475,7 +478,7 @@ fn sibling_crates_are_both_registered() {
 
     let report = discover(
         root.path(),
-        DiscoverOptions {
+        &DiscoverOptions {
             include_empty: true,
             ..DiscoverOptions::default()
         },
@@ -498,7 +501,7 @@ fn max_depth_zero_only_checks_root() {
 
     let report = discover(
         root.path(),
-        DiscoverOptions {
+        &DiscoverOptions {
             max_depth: 0,
             include_empty: true,
             ..DiscoverOptions::default()
@@ -516,7 +519,7 @@ fn deny_listed_target_dir_is_skipped() {
 
     let report = discover(
         root.path(),
-        DiscoverOptions {
+        &DiscoverOptions {
             include_empty: true,
             ..DiscoverOptions::default()
         },
@@ -533,7 +536,7 @@ fn hidden_dir_is_skipped() {
 
     let report = discover(
         root.path(),
-        DiscoverOptions {
+        &DiscoverOptions {
             include_empty: true,
             ..DiscoverOptions::default()
         },
@@ -553,7 +556,7 @@ fn symlink_loop_with_follow_symlinks_terminates() {
 
     let report = discover(
         root.path(),
-        DiscoverOptions {
+        &DiscoverOptions {
             follow_symlinks: true,
             include_empty: true,
             ..DiscoverOptions::default()
@@ -593,11 +596,11 @@ fn rerun_preserves_first_seen_for_existing_entry() {
         ..DiscoverOptions::default()
     };
 
-    let first_report = discover(root.path(), opts.clone());
+    let first_report = discover(root.path(), &opts);
     let key = first_report.registered[0].clone();
     let first_seen = registry::load().unwrap().projects[&key].first_seen;
     thread::sleep(Duration::from_millis(5));
-    let second_report = discover(root.path(), opts);
+    let second_report = discover(root.path(), &opts);
     let second_seen = registry::load().unwrap().projects[&key].first_seen;
 
     assert_eq!(second_report.refreshed, [key]);
@@ -614,7 +617,7 @@ fn broken_manifest_is_reported_without_aborting_walk() {
 
     let report = discover(
         root.path(),
-        DiscoverOptions {
+        &DiscoverOptions {
             include_empty: true,
             ..DiscoverOptions::default()
         },

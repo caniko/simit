@@ -4,6 +4,7 @@
 //! does not invoke Crow or talk to a Crow server.
 
 use std::collections::BTreeMap;
+use std::fmt::Write as _;
 use std::path::PathBuf;
 
 use anyhow::{Context, Result, bail};
@@ -114,15 +115,19 @@ impl Step {
     }
 }
 
+#[expect(
+    clippy::needless_pass_by_value,
+    reason = "Keep the public renderer's owned request API"
+)]
 pub fn files(request: FilesRequest<'_>) -> Result<Vec<GeneratedFile>> {
-    files_for_scope(request, false)
+    files_for_scope(&request, false)
 }
 
-pub(crate) fn primary_files(request: FilesRequest<'_>) -> Result<Vec<GeneratedFile>> {
+pub(crate) fn primary_files(request: &FilesRequest<'_>) -> Result<Vec<GeneratedFile>> {
     files_for_scope(request, true)
 }
 
-fn files_for_scope(request: FilesRequest<'_>, primary_only: bool) -> Result<Vec<GeneratedFile>> {
+fn files_for_scope(request: &FilesRequest<'_>, primary_only: bool) -> Result<Vec<GeneratedFile>> {
     if request.options.independent_lanes {
         bail!("independent_lanes requires GitHub Actions Rust/Nix CI");
     }
@@ -133,7 +138,7 @@ fn files_for_scope(request: FilesRequest<'_>, primary_only: bool) -> Result<Vec<
         bail!("--with-msrv requires package.rust-version in Cargo.toml");
     }
 
-    let image = image_for(&request)?;
+    let image = image_for(request);
     let suffix = request.file_suffix;
     let mut files = if !request.options.repository_checks
         && (request.options.check_command.is_some()
@@ -210,7 +215,10 @@ fn files_for_scope(request: FilesRequest<'_>, primary_only: bool) -> Result<Vec<
     Ok(files)
 }
 
-#[allow(clippy::too_many_arguments)]
+#[allow(
+    clippy::too_many_arguments,
+    reason = "The workflow consumes separate resolved configuration, runner, and package inputs"
+)]
 fn build_workflow(
     config: &CrowCiConfig,
     runtime: Runtime,
@@ -268,9 +276,9 @@ fn build_workflow(
         let command = if runtime == Runtime::Cargo {
             format!("rustup component add clippy rustfmt && {command}")
         } else {
-            crate::render::ci::project_check_command(runtime, command)
+            ci::project_check_command(runtime, command)
         };
-        steps.push(step(crate::render::ci::STEP_PROJECT_CHECK, image, command));
+        steps.push(step(ci::STEP_PROJECT_CHECK, image, command));
     } else {
         if runtime == Runtime::Nix
             && options.om_ci != OmCiMode::Replace
@@ -281,7 +289,7 @@ fn build_workflow(
         if options.repository_checks {
             steps.push(step(
                 if runtime == Runtime::Nix {
-                    crate::render::ci::STEP_FORMAT
+                    ci::STEP_FORMAT
                 } else {
                     STEP_CARGO_FMT
                 },
@@ -290,10 +298,7 @@ fn build_workflow(
                     // Crow preprocesses dollars before invoking the shell. Escape
                     // this generated shell/Nix command, including \${...}, so its
                     // runtime expressions survive that separate expansion layer.
-                    format!(
-                        "{prefix}{}",
-                        crate::render::ci::NIX_FORMAT_COMMAND.replace('$', "$$")
-                    )
+                    format!("{prefix}{}", ci::NIX_FORMAT_COMMAND.replace('$', "$$"))
                 } else {
                     format!("{prefix}cargo fmt --all -- --check")
                 },
@@ -536,19 +541,14 @@ fn artifacts_workflow(
     }
 }
 
-fn image_for(request: &FilesRequest<'_>) -> Result<String> {
+fn image_for(request: &FilesRequest<'_>) -> String {
     match request.runtime {
-        Runtime::Cargo => Ok(request
+        Runtime::Cargo => request
             .crow
             .image
             .clone()
-            .unwrap_or_else(|| rust_container(request.package))),
-        Runtime::Nix => Ok(request
-            .crow
-            .nix_image
-            .clone()
-            .or_else(|| request.crow.image.clone())
-            .unwrap_or_else(|| DEFAULT_CROW_NIX_IMAGE.to_owned())),
+            .unwrap_or_else(|| rust_container(request.package)),
+        Runtime::Nix => nix_image(request.crow),
     }
 }
 
@@ -647,7 +647,7 @@ fn add_nix_environment(steps: &mut [Step]) {
 
 fn apply_step_runner_labels(steps: &mut [Step], runners: &BTreeMap<String, ResolvedRunner>) {
     for step in steps {
-        let Some(runner) = crate::render::ci::step_runner_override(runners, &step.name) else {
+        let Some(runner) = ci::step_runner_override(runners, &step.name) else {
             continue;
         };
         for label in &runner.labels {
@@ -706,7 +706,7 @@ pub fn codeberg_pages_file(
     runner: &ResolvedRunner,
     pages: &ci::CodebergPagesOptions,
 ) -> Result<GeneratedFile> {
-    let image = nix_image(config)?;
+    let image = nix_image(config);
     let mut deploy = Step::new("deploy-pages", &image);
     for setup in &pages.extra_setup {
         deploy = deploy.command(setup.clone());
@@ -750,7 +750,7 @@ pub fn vscode_extension_file(
     runner: &ResolvedRunner,
     vscode: &crate::config::ResolvedVscode,
 ) -> Result<GeneratedFile> {
-    let image = nix_image(config)?;
+    let image = nix_image(config);
     let mut publish = Step::new("publish-vscode-extension", &image)
         .commands(vscode.prepublish_commands.clone())
         .command(vscode.package_command.clone())
@@ -781,7 +781,7 @@ pub fn jetbrains_plugin_file(
     runner: &ResolvedRunner,
     jetbrains: &crate::config::ResolvedJetbrains,
 ) -> Result<GeneratedFile> {
-    let image = nix_image(config)?;
+    let image = nix_image(config);
     let mut publish = Step::new("publish-jetbrains-plugin", &image)
         .commands(jetbrains.prepublish_commands.clone())
         .command(format!(
@@ -827,7 +827,7 @@ pub fn python_ci_file(
             "check_command, with_nix_cargo_cache and nix_flake_check=false require Rust language CI"
         );
     }
-    let image = nix_image(config)?;
+    let image = nix_image(config);
     let selected = |component| components.is_empty() || components.contains(&component);
     let mut steps = Vec::new();
     if !options.extra_setup.is_empty() {
@@ -898,8 +898,15 @@ pub fn nix_flake_ci_file(
     nix_builds: &[String],
     components: &[crate::config::CiComponent],
 ) -> Result<GeneratedFile> {
+    #[derive(Serialize)]
+    struct NixWorkflow {
+        #[serde(flatten)]
+        workflow: Workflow,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        clone: Option<Value>,
+    }
     use crate::config::CiComponent;
-    let image = nix_image(config)?;
+    let image = nix_image(config);
     let selected = |component| components.contains(&component);
     let mut steps = Vec::new();
     if selected(CiComponent::FlakeWiring) {
@@ -944,13 +951,6 @@ pub fn nix_flake_ci_file(
         bail!("Crow Nix-only CI requires [ci].nix_builds or a flake check");
     }
     add_nix_environment(&mut steps);
-    #[derive(Serialize)]
-    struct NixWorkflow {
-        #[serde(flatten)]
-        workflow: Workflow,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        clone: Option<Value>,
-    }
     let workflow = NixWorkflow {
         workflow: Workflow {
             name: "ci".to_owned(),
@@ -1040,7 +1040,7 @@ fn pypi_publish_file(
     if options.pypi_trusted_publishing {
         bail!("PyPI trusted publishing requires GitHub Actions");
     }
-    let image = nix_image(config)?;
+    let image = nix_image(config);
     let mut publish = Step::new("publish-pypi", &image);
     for command in build_commands {
         publish = publish.command(command.clone());
@@ -1064,12 +1064,12 @@ fn pypi_publish_file(
     })
 }
 
-fn nix_image(config: &CrowCiConfig) -> Result<String> {
-    Ok(config
+fn nix_image(config: &CrowCiConfig) -> String {
+    config
         .nix_image
         .clone()
         .or_else(|| config.image.clone())
-        .unwrap_or_else(|| DEFAULT_CROW_NIX_IMAGE.to_owned()))
+        .unwrap_or_else(|| DEFAULT_CROW_NIX_IMAGE.to_owned())
 }
 
 fn apply_common_options(steps: &mut [Step], options: &CiOptions) {
@@ -1098,7 +1098,7 @@ pub fn prebuild_file(
     prebuild: &PrebuildConfig,
     attic: Option<&AtticConfig>,
 ) -> Result<GeneratedFile> {
-    let image = nix_image(config)?;
+    let image = nix_image(config);
     let mut step = Step::new("prebuild", &image).command("mkdir -p .simit-prebuild");
     for (index, installable) in nix_builds.iter().enumerate() {
         step = step.command(format!(
@@ -1176,7 +1176,7 @@ pub fn qualify_files(
     prebuild: &PrebuildConfig,
 ) -> Result<Vec<GeneratedFile>> {
     prebuild.validate_qualification()?;
-    let image = nix_image(config)?;
+    let image = nix_image(config);
     let installables = prebuild
         .qualify
         .iter()
@@ -1204,14 +1204,23 @@ pub fn qualify_files(
     let mut files = Vec::new();
     let mut previous = Vec::<String>::new();
     for (job, mut command, installable) in jobs {
+        // Flattening adds a workflow dependency, not a step dependency (which
+        // cannot serialize separate Crow workflows).
+        #[derive(Serialize)]
+        struct QualificationWorkflow {
+            #[serde(flatten)]
+            workflow: Workflow,
+            #[serde(skip_serializing_if = "Vec::is_empty")]
+            depends_on: Vec<String>,
+        }
         let mut lfs_command = "nix build --inputs-from . nixpkgs#git-lfs --no-link --no-update-lock-file --print-out-paths".to_owned();
         let mut frozen_command = "nix build --stdin --out-link \"$${evidence}/result\" --print-build-logs --no-update-lock-file".to_owned();
         for bounded in [&mut command, &mut lfs_command, &mut frozen_command] {
             if let Some(jobs) = prebuild.qualify_max_jobs {
-                bounded.push_str(&format!(" --max-jobs {jobs}"));
+                write!(bounded, " --max-jobs {jobs}").expect("write");
             }
             if let Some(cores) = prebuild.qualify_cores {
-                bounded.push_str(&format!(" --cores {cores}"));
+                write!(bounded, " --cores {cores}").expect("write");
             }
         }
         if prebuild.qualify_capture_results && installable.is_some() {
@@ -1322,15 +1331,6 @@ fi
             workspace: None,
             steps: vec![step],
         };
-        // Flattening adds a workflow dependency, not a step dependency (which
-        // cannot serialize separate Crow workflows).
-        #[derive(Serialize)]
-        struct QualificationWorkflow {
-            #[serde(flatten)]
-            workflow: Workflow,
-            #[serde(skip_serializing_if = "Vec::is_empty")]
-            depends_on: Vec<String>,
-        }
         let name = workflow.name.clone();
         let workflow = QualificationWorkflow {
             workflow,
@@ -1452,7 +1452,7 @@ pub fn release_file(
             "Crow release workflows do not support [release.pypi]; use an Actions release provider to publish the wheels"
         );
     }
-    let image = nix_image(config)?;
+    let image = nix_image(config);
     let mut build = Step::new("release", &image)
         .command("test -n \"$${CI_COMMIT_TAG:-}\"".to_owned())
         .command("test \"$${CI_COMMIT_TAG}\" = \"$${CI_COMMIT_TAG#v}\" || true".to_owned())
@@ -1467,7 +1467,7 @@ pub fn release_file(
         build = build.command(command.clone());
     }
     for attr in inputs.artifacts.effective_nix_bundle_attrs() {
-        build = build.command(format!("nix build .#{} --out-link release/{}", attr, attr));
+        build = build.command(format!("nix build .#{attr} --out-link release/{attr}"));
     }
     if let Some(attic) = inputs.attic {
         let token_secret = attic
@@ -1571,20 +1571,14 @@ mod tests {
             labels: vec!["agent=current".into()],
         };
         let mut runners = BTreeMap::from([(STEP_CARGO_FMT.to_owned(), legacy.clone())]);
-        assert_eq!(
-            crate::render::ci::step_runner_override(&runners, "format"),
-            Some(&legacy)
-        );
+        assert_eq!(ci::step_runner_override(&runners, "format"), Some(&legacy));
         let mut steps = vec![Step::new("format", "nix")];
         apply_step_runner_labels(&mut steps, &runners);
         assert_eq!(steps[0].environment["SIMIT_RUNNER_AGENT"], "legacy");
         runners.insert("format".into(), current.clone());
+        assert_eq!(ci::step_runner_override(&runners, "format"), Some(&current));
         assert_eq!(
-            crate::render::ci::step_runner_override(&runners, "format"),
-            Some(&current)
-        );
-        assert_eq!(
-            crate::render::ci::step_runner_override(&runners, STEP_CARGO_FMT),
+            ci::step_runner_override(&runners, STEP_CARGO_FMT),
             Some(&legacy)
         );
     }
@@ -1595,12 +1589,12 @@ mod tests {
     #[test]
     fn nested_maturin_publish_commands_each_enter_the_directory_once() {
         use std::os::unix::fs::PermissionsExt;
-        let runner = crate::user_config::ResolvedRunner::literal("crow").unwrap();
+        let runner = ResolvedRunner::literal("crow").unwrap();
         let file = maturin_publish_file(
             CrowWorkflowFormat::Yaml,
             &CrowCiConfig::default(),
             &runner,
-            &ci::CiOptions::default(),
+            &CiOptions::default(),
             "packages/demo",
         )
         .unwrap();
@@ -1638,15 +1632,12 @@ mod tests {
 
     #[test]
     fn uses_documented_default_image_for_nix_workflows() {
-        assert_eq!(
-            nix_image(&CrowCiConfig::default()).unwrap(),
-            DEFAULT_CROW_NIX_IMAGE
-        );
+        assert_eq!(nix_image(&CrowCiConfig::default()), DEFAULT_CROW_NIX_IMAGE);
     }
 
     #[test]
     fn pages_build_creates_the_result_link_it_checks() {
-        let runner = crate::user_config::ResolvedRunner::literal("crow").unwrap();
+        let runner = ResolvedRunner::literal("crow").unwrap();
         let pages = ci::CodebergPagesOptions {
             repo: "caniko/site".to_owned(),
             owner: "caniko".to_owned(),
@@ -1670,7 +1661,7 @@ mod tests {
 
     #[test]
     fn qualify_job_names_disambiguate_shared_final_attributes() {
-        let names = super::qualify_job_names(
+        let names = qualify_job_names(
             &[
                 ".#checks.x86_64-linux.test",
                 ".#checks.aarch64-linux.test",
@@ -1690,12 +1681,9 @@ mod tests {
                 "packages-x86-64-linux-server-2",
             ]
         );
+        assert_eq!(qualify_job_names(&[".#docs"], &["flake-check"]), ["docs"]);
         assert_eq!(
-            super::qualify_job_names(&[".#docs"], &["flake-check"]),
-            ["docs"]
-        );
-        assert_eq!(
-            super::qualify_job_names(
+            qualify_job_names(
                 &[".#checks.x86_64-linux.flake-wiring"],
                 &["flake-check", "flake-wiring"],
             ),

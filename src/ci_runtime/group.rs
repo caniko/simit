@@ -388,7 +388,10 @@ pub fn execute_with(
         ensure!(!checks.is_empty(), "Check inventory is empty or invalid");
         for (name, derivation) in checks {
             ensure!(
-                store_path(&derivation) && derivation.ends_with(".drv"),
+                store_path(&derivation)
+                    && derivation
+                        .rsplit_once('.')
+                        .is_some_and(|(_, ext)| ext == "drv"),
                 "invalid check derivation"
             );
             let attr = if identifier(&name) {
@@ -654,13 +657,12 @@ fn output_map_valid(raw: &[u8]) -> bool {
         .is_some_and(|rows| {
             !rows.is_empty()
                 && rows.iter().all(|row| {
-                    row["drvPath"]
-                        .as_str()
-                        .is_some_and(|s| store_path(s) && s.ends_with(".drv"))
-                        && row["outputs"].as_object().is_some_and(|outputs| {
-                            !outputs.is_empty()
-                                && outputs.values().all(|p| p.as_str().is_some_and(store_path))
-                        })
+                    row["drvPath"].as_str().is_some_and(|s| {
+                        store_path(s) && s.rsplit_once('.').is_some_and(|(_, ext)| ext == "drv")
+                    }) && row["outputs"].as_object().is_some_and(|outputs| {
+                        !outputs.is_empty()
+                            && outputs.values().all(|p| p.as_str().is_some_and(store_path))
+                    })
                 })
         })
 }

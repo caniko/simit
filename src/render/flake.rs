@@ -1,4 +1,5 @@
 use std::collections::BTreeSet;
+use std::fmt::Write as _;
 use std::path::PathBuf;
 
 use anyhow::{Result, bail};
@@ -38,7 +39,7 @@ const PRE_COMMIT_PACKAGE: &str = "          pre-commit\n";
 const TREEFMT_SHELL_PACKAGE: &str = "          treefmtEval.config.build.wrapper\n";
 const CARGO_AUDIT_PACKAGE: &str = "          cargo-audit\n";
 const CARGO_DENY_PACKAGE: &str = "          cargo-deny\n";
-const RELEASE_DEV_SHELL_PACKAGES: &str = r#"          cargo-about
+const RELEASE_DEV_SHELL_PACKAGES: &str = r"          cargo-about
           cargo-audit
           cargo-cyclonedx
           cargo-deny
@@ -58,7 +59,7 @@ const RELEASE_DEV_SHELL_PACKAGES: &str = r#"          cargo-about
           zip
           reprepro
            taplo
-"#;
+";
 const MATURIN_PACKAGE: &str = "          maturin\n";
 const PRE_COMMIT_ENABLED_PACKAGES: &str = "        ] ++ pre-commit-check.enabledPackages;\n";
 const SHELL_HOOK: &str = "        shellHook = pre-commit-check.shellHook;\n";
@@ -106,11 +107,11 @@ pub fn files_with_components(
         },
         GeneratedFile {
             relative_path: PathBuf::from("nix/treefmt.nix"),
-            content: treefmt_nix(languages, rust_edition),
+            content: treefmt_nix(*languages, rust_edition),
         },
         GeneratedFile {
             relative_path: PathBuf::from("nix/pre-commit.nix"),
-            content: pre_commit_nix(languages, rust_version, audit_tools, components),
+            content: pre_commit_nix(*languages, rust_version, audit_tools, components),
         },
     ];
     if let Some(version) = rust_version {
@@ -151,11 +152,11 @@ pub fn python_files(
         },
         GeneratedFile {
             relative_path: PathBuf::from("nix/treefmt.nix"),
-            content: treefmt_nix(languages, "2024"),
+            content: treefmt_nix(*languages, "2024"),
         },
         GeneratedFile {
             relative_path: PathBuf::from("nix/pre-commit.nix"),
-            content: pre_commit_nix(languages, None, AuditTools::default(), components),
+            content: pre_commit_nix(*languages, None, AuditTools::default(), components),
         },
     ]
 }
@@ -168,11 +169,11 @@ pub fn generic_files(languages: &Languages, components: &[FlakeComponent]) -> Ve
         },
         GeneratedFile {
             relative_path: PathBuf::from("nix/treefmt.nix"),
-            content: treefmt_nix(languages, "2024"),
+            content: treefmt_nix(*languages, "2024"),
         },
         GeneratedFile {
             relative_path: PathBuf::from("nix/pre-commit.nix"),
-            content: pre_commit_nix(languages, None, AuditTools::default(), components),
+            content: pre_commit_nix(*languages, None, AuditTools::default(), components),
         },
     ]
 }
@@ -188,11 +189,11 @@ const FMT_TOOLCHAIN_BINDING: &str =
 
 fn fmt_toolchain_binding(content: &str, anchor: &str) -> Result<String> {
     use rnix::ast::{AttrpathValue, Expr};
-    fn selector_tokens(function: impl rnix::ast::AstNode) -> String {
+    fn selector_tokens(function: &impl rnix::ast::AstNode) -> String {
         function
             .syntax()
             .descendants_with_tokens()
-            .filter_map(|node| node.into_token())
+            .filter_map(rnix::NodeOrToken::into_token)
             .filter(|token| {
                 !matches!(
                     token.kind(),
@@ -271,7 +272,7 @@ fn fmt_toolchain_binding(content: &str, anchor: &str) -> Result<String> {
             _ => None,
         };
         if let Some(Expr::Select(function)) = function {
-            let selector = selector_tokens(function);
+            let selector = selector_tokens(&function);
             for library in ["harbor.lib.rust", "harbor-rs.lib", "rs-harbor.lib"] {
                 if selector == format!("{library}.mkToolchain") {
                     return Ok(FMT_TOOLCHAIN_BINDING.replace("rs-harbor.lib", library));
@@ -296,7 +297,7 @@ fn fmt_toolchain_binding(content: &str, anchor: &str) -> Result<String> {
 ///
 /// The binding is inserted with the surrounding indentation immediately
 /// before the first treefmtEval line, so canonically generated flakes keep
-/// matching HOOK_BINDINGS verbatim and later ensures stay idempotent.
+/// matching `HOOK_BINDINGS` verbatim and later ensures stay idempotent.
 fn migrate_treefmt_call(patched: &mut String) -> Result<()> {
     if !patched.contains(BARE_TREEFMT_CALL) {
         return Ok(());
@@ -310,7 +311,7 @@ fn migrate_treefmt_call(patched: &mut String) -> Result<()> {
                     "expected a treefmtEval call site importing ./nix/treefmt.nix to anchor the fmtToolchain binding",
                 )
             })?;
-        let line_start = patched[..call_pos].rfind('\n').map(|i| i + 1).unwrap_or(0);
+        let line_start = patched[..call_pos].rfind('\n').map_or(0, |i| i + 1);
         let indent: String = patched[line_start..call_pos]
             .chars()
             .take_while(|ch| ch.is_whitespace())
@@ -738,7 +739,7 @@ fn has_docs_shell(content: &str) -> bool {
     }
 
     let mut in_dev_shells = false;
-    let mut dev_shell_depth = 0i32;
+    let mut dev_shell_depth = 0isize;
 
     for line in content.lines() {
         let trimmed = line.trim();
@@ -772,10 +773,12 @@ fn has_docs_shell(content: &str) -> bool {
     false
 }
 
-fn brace_delta(line: &str) -> i32 {
-    let opens = line.chars().filter(|&ch| ch == '{').count() as i32;
-    let closes = line.chars().filter(|&ch| ch == '}').count() as i32;
-    opens - closes
+fn brace_delta(line: &str) -> isize {
+    line.bytes().fold(0, |depth, byte| match byte {
+        b'{' => depth + 1,
+        b'}' => depth - 1,
+        _ => depth,
+    })
 }
 
 /// Does every recognized policy import explicitly receive rustfmtPackage?
@@ -948,7 +951,7 @@ fn treefmt_module_pattern(module_content: &str) -> Option<rnix::ast::Pattern> {
     };
     match lambda.param()? {
         rnix::ast::Param::Pattern(pattern) => Some(pattern),
-        _ => None,
+        rnix::ast::Param::IdentParam(_) => None,
     }
 }
 
@@ -1043,7 +1046,7 @@ pub fn is_generated_treefmt(content: &str, languages: &Languages, rust_edition: 
     }
     match (
         tokens(content),
-        tokens(&treefmt_nix(languages, rust_edition)),
+        tokens(&treefmt_nix(*languages, rust_edition)),
     ) {
         (Some(actual), Some(expected)) => actual == expected,
         _ => false,
@@ -1529,8 +1532,10 @@ fn python_template(project: &python::Project) -> String {
         project
             .scripts
             .iter()
-            .map(|script| format!("            \"{script}\"\n"))
-            .collect::<String>()
+            .fold(String::new(), |mut output, script| {
+                writeln!(output, "            \"{script}\"").expect("write");
+                output
+            })
     };
     let dev_group = if project.dependency_groups.iter().any(|group| group == "dev") {
         "dev"
@@ -1550,8 +1555,7 @@ fn python_template(project: &python::Project) -> String {
     let first_script = project
         .scripts
         .first()
-        .map(String::as_str)
-        .unwrap_or(project.name.as_str());
+        .map_or(project.name.as_str(), String::as_str);
 
     format!(
         r#"{{
@@ -1784,15 +1788,15 @@ fn cross_template_with_msrv(
   # Advertise the canix Attic cache so cross builds substitute prebuilt
   # toolchains and cross artifacts instead of rebuilding them locally.
   nixConfig = {{
-    extra-substituters = ["{canix_url}"];
+    extra-substituters = ["{CANIX_CACHE_URL}"];
     extra-trusted-public-keys = [
-      "{canix_key}"
-      "{nixos_key}"
+      "{CANIX_CACHE_KEY}"
+      "{NIXOS_CACHE_KEY}"
     ];
   }};
 
   inputs = {{
-    harbor.url = "git+https://github.com/caniko/harbor.git?ref=feat/harbor-monorepo-components&rev={harbor_rev}";
+    harbor.url = "git+https://github.com/caniko/harbor.git?ref=feat/harbor-monorepo-components&rev={HARBOR_REV}";
 
     nixpkgs.follows = "harbor/nixpkgs";
     rust-overlay.follows = "harbor/rust-overlay";
@@ -2020,12 +2024,6 @@ fn cross_template_with_msrv(
     }});
 }}
 "#,
-        canix_url = CANIX_CACHE_URL,
-        canix_key = CANIX_CACHE_KEY,
-        nixos_key = NIXOS_CACHE_KEY,
-        target_list = target_list,
-        default_attr = default_attr,
-        harbor_rev = HARBOR_REV,
     );
     content = content.replace(DEVSHELL_PACKAGES_MARKER, DEVSHELL_PACKAGES);
     content = content.replace("@@MSRV_SHELL@@", &msrv_shell(rust_version, "msrv"));
@@ -2059,7 +2057,7 @@ fn dev_shell_packages_start(content: &str) -> usize {
         .expect("generated flake template has dev shell packages")
 }
 
-fn treefmt_nix(languages: &Languages, rust_edition: &str) -> String {
+fn treefmt_nix(languages: Languages, rust_edition: &str) -> String {
     let mut content = String::new();
     // rustfmtPackage comes from the harbor pinned nightly profile via the
     // generated flake (fmtToolchain); never float nightly.latest here, or
@@ -2075,7 +2073,7 @@ fn treefmt_nix(languages: &Languages, rust_edition: &str) -> String {
     if languages.rust {
         content.push_str("\n  programs.rustfmt = {\n");
         content.push_str("    enable = true;\n");
-        content.push_str(&format!("    edition = \"{rust_edition}\";\n"));
+        writeln!(content, "    edition = \"{rust_edition}\";").expect("write");
         content.push_str("    package = rustfmtPackage;\n");
         content.push_str("  };\n");
     }
@@ -2148,7 +2146,7 @@ fn has_treefmt_wrapper_argument(content: &str) -> bool {
 fn has_treefmt_shell_package(content: &str) -> bool {
     use rnix::ast::{Attr, AttrpathValue};
 
-    fn includes_wrapper<T: rnix::ast::AstNode>(value: T) -> bool {
+    fn includes_wrapper<T: rnix::ast::AstNode>(value: &T) -> bool {
         value
             .syntax()
             .descendants()
@@ -2156,7 +2154,7 @@ fn has_treefmt_shell_package(content: &str) -> bool {
             .any(|select| {
                 let tokens: String = select
                     .descendants_with_tokens()
-                    .filter_map(|node| node.into_token())
+                    .filter_map(rnix::NodeOrToken::into_token)
                     .filter(|token| {
                         !matches!(
                             token.kind(),
@@ -2200,7 +2198,7 @@ fn has_treefmt_shell_package(content: &str) -> bool {
             if !in_shell {
                 return false;
             }
-            binding.value().is_some_and(includes_wrapper)
+            binding.value().as_ref().is_some_and(includes_wrapper)
         })
 }
 
@@ -2230,7 +2228,7 @@ fn has_pre_commit_shell_hook(content: &str) -> bool {
 }
 
 fn pre_commit_nix(
-    languages: &Languages,
+    languages: Languages,
     rust_version: Option<&str>,
     audit_tools: AuditTools,
     components: &[FlakeComponent],
@@ -2313,12 +2311,15 @@ fn pre_commit_nix(
         content.push_str("\n  cargo-msrv = {\n");
         content.push_str("    enable = true;\n");
         content.push_str("    name = \"cargo check MSRV\";\n");
-        content.push_str(&format!(
-                "    entry = \"${{pkgs.rust-bin.stable.\"{toolchain_version}\".default}}/bin/cargo check --workspace --all-features\";\n"
-            ));
-        content.push_str(&format!(
-            "    extraPackages = [pkgs.rust-bin.stable.\"{toolchain_version}\".default];\n"
-        ));
+        writeln!(
+            content,
+            "    entry = \"${{pkgs.rust-bin.stable.\"{toolchain_version}\".default}}/bin/cargo check --workspace --all-features\";"
+        ).expect("write");
+        writeln!(
+            content,
+            "    extraPackages = [pkgs.rust-bin.stable.\"{toolchain_version}\".default];"
+        )
+        .expect("write");
         content.push_str("    pass_filenames = false;\n");
         content.push_str("    stages = [\"pre-push\" \"manual\"];\n");
         content.push_str("  };\n");
@@ -2449,7 +2450,7 @@ mod tests {
             uv_python: true,
             ..Languages::default()
         };
-        let policy = treefmt_nix(&languages, "2024");
+        let policy = treefmt_nix(languages, "2024");
         assert!(is_generated_treefmt(
             &format!("# owned policy\n{policy}"),
             &languages,
@@ -2472,7 +2473,7 @@ mod tests {
             ..Languages::default()
         };
         assert!(!is_generated_treefmt(
-            &treefmt_nix(&rust, "2021"),
+            &treefmt_nix(rust, "2021"),
             &rust,
             "2024"
         ));
@@ -2481,7 +2482,7 @@ mod tests {
     #[test]
     fn treefmt_module_takes_rustfmt_package_only_for_rust() {
         let rust = treefmt_nix(
-            &Languages {
+            Languages {
                 rust: true,
                 nix: true,
                 ..Languages::default()
@@ -2493,7 +2494,7 @@ mod tests {
         assert!(!rust.contains("nightly.latest"));
 
         let python_only = treefmt_nix(
-            &Languages {
+            Languages {
                 nix: true,
                 toml: true,
                 ..Languages::default()
@@ -2634,6 +2635,9 @@ mod tests {
 
     #[test]
     fn migrate_treefmt_call_upgrades_bare_call_site() {
+        fn indent_of(line: &str) -> &str {
+            &line[..line.len() - line.trim_start().len()]
+        }
         let mut patched = OLD_WIRED_FLAKE.to_owned();
         migrate_treefmt_call(&mut patched).unwrap();
         assert!(patched.contains(
@@ -2655,9 +2659,6 @@ mod tests {
             .position(|line| line.contains("rustfmtPackage = fmtToolchain.rustToolchain"))
             .expect("migrated flake has a pinned call site");
         assert_eq!(binding_line + 1, call_line);
-        fn indent_of(line: &str) -> &str {
-            &line[..line.len() - line.trim_start().len()]
-        }
         assert_eq!(indent_of(lines[binding_line]), indent_of(lines[call_line]));
         // Idempotent: a second pass changes nothing.
         let mut twice = patched.clone();
@@ -2961,7 +2962,7 @@ mod tests {
             tex: true,
             ..Languages::default()
         };
-        let content = treefmt_nix(&languages, "2024");
+        let content = treefmt_nix(languages, "2024");
         assert!(content.contains("programs.alejandra.enable = true;"));
         assert!(content.contains("\"*.ts\""));
         assert!(content.contains("\"*.json\""));
@@ -2977,7 +2978,7 @@ mod tests {
             ..Languages::default()
         };
         let components = [FlakeComponent::Treefmt, FlakeComponent::NixFlakeCheck];
-        let content = pre_commit_nix(&languages, None, AuditTools::default(), &components);
+        let content = pre_commit_nix(languages, None, AuditTools::default(), &components);
 
         assert!(has_required_pre_commit_with_components(
             &content,

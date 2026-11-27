@@ -31,7 +31,7 @@ pub fn digest(bytes: &[u8]) -> String {
     format!("{:x}", Sha256::digest(bytes))
 }
 
-/// serde_json's default sorted maps give one canonical representation recursively.
+/// `serde_json`'s default sorted maps give one canonical representation recursively.
 pub fn canonical_digest<T: Serialize>(value: &T) -> Result<String> {
     Ok(digest(&serde_json::to_vec(&serde_json::to_value(value)?)?))
 }

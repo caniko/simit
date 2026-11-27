@@ -1,6 +1,6 @@
 use std::{fs, path::Path, process::Command};
 
-pub fn script(root: &Path, workflow: &serde_yaml::Value, job: &str, script: &str) -> String {
+pub(crate) fn script(root: &Path, workflow: &serde_yaml::Value, job: &str, script: &str) -> String {
     // Execute the generated job-budget step, then emulate Actions' output
     // expansion. The caller and native runner retain their production code.
     let output_file = tempfile::NamedTempFile::new().unwrap();

@@ -101,7 +101,7 @@ fn badges(
             "docs",
             "enabled",
             "6f42c1",
-            docs_link(workspace_root, &package),
+            Some(docs_link(workspace_root, &package)),
         ));
     }
     // Advertise crates.io only when this project publishes there; an unset
@@ -270,11 +270,11 @@ fn workflow_link(workspace_root: &Path, candidates: &[&str]) -> Option<String> {
         .map(|candidate| (*candidate).to_owned())
 }
 
-fn docs_link(workspace_root: &Path, package: &Package) -> Option<String> {
+fn docs_link(workspace_root: &Path, package: &Package) -> String {
     if workspace_root.join("docs/book.toml").exists() {
-        Some("docs".to_owned())
+        "docs".to_owned()
     } else {
-        Some(format!("https://docs.rs/{}", package.name))
+        format!("https://docs.rs/{}", package.name)
     }
 }
 

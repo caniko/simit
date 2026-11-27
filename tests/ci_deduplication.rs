@@ -1,3 +1,4 @@
+use std::fmt::Write as _;
 use std::{fs, path::Path};
 
 use tempfile::TempDir;
@@ -896,10 +897,12 @@ fn github_ci_gates_every_job_on_a_cheap_root_docs_classification() {
         let needs = job["needs"].as_sequence().unwrap();
         let mut condition = "${{ !cancelled() && needs.changes.outputs.code != 'false'".to_owned();
         for need in &needs[1..] {
-            condition.push_str(&format!(
+            write!(
+                condition,
                 " && needs.{}.result == 'success'",
                 need.as_str().unwrap()
-            ));
+            )
+            .expect("write");
         }
         condition.push_str(" }}");
         assert_eq!(job["if"], condition, "{id:?}");

@@ -11,6 +11,10 @@ use crate::registry::{self, FeatureStatus};
 use crate::render::release_workflow::{self, ReleaseWorkflowInputs};
 use crate::user_config::{ResolvedRunner, UserConfig};
 
+#[expect(
+    clippy::needless_pass_by_value,
+    reason = "Keep the public command entry point's owned argument API"
+)]
 pub fn run(command: InitReleaseCommand) -> Result<()> {
     let mode = CheckPrintMode::parse("init release", command.check, command.print, command.diff)?;
 
@@ -151,7 +155,7 @@ pub fn run(command: InitReleaseCommand) -> Result<()> {
         }
         CheckPrintMode::Check { diff } => plan
             .check(workspace_root, diff)
-            .and_then(|_| upgrade::update_readme_badges_if_present(workspace_root, true, diff)),
+            .and_then(|()| upgrade::update_readme_badges_if_present(workspace_root, true, diff)),
         CheckPrintMode::Write => {
             plan.write(workspace_root)?;
             upgrade::update_readme_badges_if_present(workspace_root, false, false)?;
@@ -193,8 +197,7 @@ fn resolve_release_runner(
             Ok(user_config) if platform == Platform::Forgejo => {
                 user_config.explicit_label_is_trusted_forgejo_nix_runner(&runner)?
             }
-            Err(_) => false,
-            Ok(_) => false,
+            Err(_) | Ok(_) => false,
         };
         return Ok((runner, preinstalled_nix));
     }

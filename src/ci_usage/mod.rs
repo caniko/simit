@@ -9,6 +9,7 @@ mod github;
 mod http;
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::fmt::Write as _;
 
 use anyhow::{Context, Result, bail, ensure};
 use chrono::{DateTime, Duration, NaiveDate, Utc};
@@ -19,6 +20,10 @@ pub use cli::UsageArgs;
 const SCHEMA_VERSION: u32 = 1;
 
 /// Run one usage report for the already parsed command line.
+#[expect(
+    clippy::needless_pass_by_value,
+    reason = "Keep the public API's owned argument type"
+)]
 pub fn run(args: UsageArgs) -> Result<()> {
     let window = Window::parse(&args.since, args.until.as_deref(), Utc::now())?;
     let specs = parse_repos(&args.repos)?;
@@ -623,9 +628,9 @@ fn print_table(headers: &[&str], rows: Vec<Vec<String>>, right_from: usize) {
                 line.push_str("  ");
             }
             if index < right_from {
-                line.push_str(&format!("{cell:<width$}", width = widths[index]));
+                write!(line, "{cell:<width$}", width = widths[index]).expect("write");
             } else {
-                line.push_str(&format!("{cell:>width$}", width = widths[index]));
+                write!(line, "{cell:>width$}", width = widths[index]).expect("write");
             }
         }
         line.trim_end().to_owned()
@@ -693,6 +698,10 @@ mod tests {
     }
 
     #[test]
+    #[expect(
+        clippy::float_cmp,
+        reason = "The selected fixture durations are exactly representable"
+    )]
     fn percentile_uses_nearest_rank() {
         let mut durations = vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0];
         assert_eq!(percentile(&mut durations, 95), 10.0);
@@ -702,6 +711,10 @@ mod tests {
     }
 
     #[test]
+    #[expect(
+        clippy::float_cmp,
+        reason = "The compared fixture totals and averages are exactly representable"
+    )]
     fn report_sorts_by_total_time_and_computes_rollups() {
         let mut builder = Builder::default();
         builder.extend(vec![
@@ -736,6 +749,10 @@ mod tests {
     }
 
     #[test]
+    #[expect(
+        clippy::float_cmp,
+        reason = "A quota denial must contribute exactly zero time"
+    )]
     fn quota_rows_do_not_count_as_timed_runs() {
         let mut builder = Builder::default();
         builder.extend(vec![Sample {

@@ -44,7 +44,7 @@ pub fn crate_from_provider_zip(zip_bytes: &[u8], crate_name: &str) -> Result<Vec
             && member.is_file()
             && member
                 .unix_mode()
-                .is_none_or(|mode| mode & 0o170000 == 0o100000)
+                .is_none_or(|mode| mode & 0o170_000 == 0o100_000)
             && member.size() > 0
             && member.size() <= MAX_CRATE_BYTES,
         "release artifact member identity, type or size is invalid"

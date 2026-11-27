@@ -1333,8 +1333,7 @@ fn qualifier_source_hashes_include_dash_and_option_like_tracked_filenames() {
         ".github/workflows/review-compatibility.yml",
     ] {
         let template =
-            fs::read_to_string(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(path))
-                .unwrap();
+            fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join(path)).unwrap();
         let command = template
             .lines()
             .find(|line| line.contains("git ls-files -z"))

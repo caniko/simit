@@ -99,7 +99,12 @@ pub(super) fn push_job(
 "#);
     }
     w.push_str("            cp -p \"$binary\" \"$stage/files/$prefix$name\"\n            files+=(\"$prefix$name\")\n          done\n");
-    let archive_command = match (job.windows(), job.archive.ends_with(".zip")) {
+    let archive_command = match (
+        job.windows(),
+        job.archive
+            .rsplit_once('.')
+            .is_some_and(|(_, ext)| ext == "zip"),
+    ) {
         (true, true) => {
             r#""$(cygpath -u "${SYSTEMROOT:-${SystemRoot:?}}")/System32/tar.exe" -a -cf"#
         }

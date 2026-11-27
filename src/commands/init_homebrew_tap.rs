@@ -12,6 +12,10 @@ use crate::config::{ProjectConfig, ResolvedHomebrew};
 use crate::registry::{self, FeatureStatus};
 use crate::render::homebrew_formula::{self, Sha256Set};
 
+#[expect(
+    clippy::needless_pass_by_value,
+    reason = "Keep the public command entry point's owned argument API"
+)]
 pub fn run(command: InitHomebrewTapCommand) -> Result<()> {
     let mode = CheckPrintMode::parse(
         "init homebrew-tap",

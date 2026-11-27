@@ -20,7 +20,7 @@ pub(super) fn collect(spec: &RepoSpec, window: &Window) -> Result<(Vec<Sample>, 
     let token =
         std::env::var("CROW_TOKEN").context("CROW_TOKEN is required for crow: repositories")?;
     let base = format!("{}/api/v1", server.trim_end_matches('/'));
-    let api = JsonApi::new(&base, token, "Crow", "application/json", false)?;
+    let api = JsonApi::new(&base, &token, "Crow", "application/json", false)?;
     let owner = &spec.owner;
     let name = &spec.name;
     let repo = format!("{owner}/{name}");
@@ -56,7 +56,7 @@ pub(super) fn collect(spec: &RepoSpec, window: &Window) -> Result<(Vec<Sample>, 
                 .as_u64()
                 .with_context(|| format!("Crow pipeline for {repo} is missing number"))?;
             let detail = api.get(&format!("repos/{id}/pipelines/{number}"))?;
-            samples.extend(parse_pipeline(&repo, &detail)?);
+            samples.extend(parse_pipeline(&repo, &detail));
         }
         if pipelines.len() < PER_PAGE || page_entirely_before_window {
             break;
@@ -71,18 +71,18 @@ pub(super) fn collect(spec: &RepoSpec, window: &Window) -> Result<(Vec<Sample>, 
     Ok((samples, Vec::new()))
 }
 
-fn parse_pipeline(repo: &str, pipeline: &Value) -> Result<Vec<Sample>> {
+fn parse_pipeline(repo: &str, pipeline: &Value) -> Vec<Sample> {
     let workflows = pipeline["workflows"].as_array();
     let mut samples = Vec::new();
     if let Some(workflows) = workflows {
         for workflow in workflows {
-            samples.extend(parse_workflow(repo, workflow)?);
+            samples.extend(parse_workflow(repo, workflow));
         }
     }
     // Pipeline-level errors carry scheduling failures (typically no agent or a
     // quota denial) before any workflow exists. Workflow-level errors are
     // already represented in step rows, so only use these when nothing ran.
-    if workflows.is_none_or(|workflows| workflows.is_empty()) {
+    if workflows.is_none_or(Vec::is_empty) {
         for error in pipeline["errors"].as_array().into_iter().flatten() {
             if error["is_warning"].as_bool() == Some(true) {
                 continue;
@@ -122,10 +122,10 @@ fn parse_pipeline(repo: &str, pipeline: &Value) -> Result<Vec<Sample>> {
             });
         }
     }
-    Ok(samples)
+    samples
 }
 
-fn parse_workflow(repo: &str, workflow: &Value) -> Result<Vec<Sample>> {
+fn parse_workflow(repo: &str, workflow: &Value) -> Vec<Sample> {
     let name = workflow["pipeline_name"]
         .as_str()
         .or_else(|| workflow["name"].as_str())
@@ -188,7 +188,7 @@ fn parse_workflow(repo: &str, workflow: &Value) -> Result<Vec<Sample>> {
             quota_denied: true,
             runner: None,
         });
-        return Ok(samples);
+        return samples;
     }
     if samples.is_empty()
         && let (Some(started), Some(finished)) = (
@@ -215,7 +215,7 @@ fn parse_workflow(repo: &str, workflow: &Value) -> Result<Vec<Sample>> {
             });
         }
     }
-    Ok(samples)
+    samples
 }
 
 fn unix_time(value: &Value) -> Option<DateTime<Utc>> {
@@ -275,7 +275,7 @@ mod tests {
     #[test]
     fn workflow_steps_become_timed_rows_and_attribute_oom() {
         let value: Value = serde_json::from_str(PIPELINE).unwrap();
-        let samples = parse_pipeline("caniko/bekiper", &value).unwrap();
+        let samples = parse_pipeline("caniko/bekiper", &value);
         assert_eq!(samples.len(), 4);
         assert_eq!(samples[0].workflow, "qualify-flake-check");
         assert_eq!(samples[0].unit, "clone");
@@ -295,7 +295,7 @@ mod tests {
     #[test]
     fn missing_agent_is_a_scheduling_failure_named_after_its_workflow() {
         let value: Value = serde_json::from_str(QUOTA).unwrap();
-        let samples = parse_pipeline("caniko/bekiper", &value).unwrap();
+        let samples = parse_pipeline("caniko/bekiper", &value);
         assert_eq!(samples.len(), 1);
         assert_eq!(samples[0].workflow, "annotation-browser");
         assert_eq!(samples[0].unit, "(not started)");
@@ -317,7 +317,7 @@ mod tests {
             "error": "CI quota denied (linux): the CI time quota \"CI quota (all)\" is used up",
             "children": [{ "name": "clone", "state": "skipped", "started": 0, "finished": 0 }]
         });
-        let samples = parse_workflow("caniko/bekiper", &workflow).unwrap();
+        let samples = parse_workflow("caniko/bekiper", &workflow);
         assert_eq!(samples.len(), 1);
         assert_eq!(samples[0].workflow, "qualify-flake-check");
         assert!(samples[0].quota_denied);

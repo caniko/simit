@@ -225,7 +225,9 @@ impl Supervisor {
         )?;
         artifact::store_path(&derivation)?;
         ensure!(
-            derivation.ends_with(".drv"),
+            derivation
+                .rsplit_once('.')
+                .is_some_and(|(_, ext)| ext == "drv"),
             "unfrozen sandbox admission derivation"
         );
         let root = self.roots.path().join("sandbox-admission");
