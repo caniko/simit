@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Added: Crow native Cargo CI can run one aggregate workspace lane, with
+  package exclusions and feature selection, shared Cargo state, optional
+  compiler caching, and filtered triggers. Native checks now use `--locked`.
+- Added: Crow supports manual and local gates. Native Crow and Actions can
+  check all tracked Rust files, including files Cargo fmt does not discover.
+- Added: `simit ci usage --budget-minutes` reports budget use and a 30-day
+  estimate in text and JSON.
+
 - Fixed: grouped Nix builds reuse the cached Simit engine instead of compiling
   it in every group job. The import used `nix copy --all`, which a multi-user
   daemon rejects for a `file://` cache (`path ... is not valid`); the export now

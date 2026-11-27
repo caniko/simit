@@ -321,6 +321,7 @@ pub fn run(command: InitCiCommand) -> Result<()> {
         .or_else(|| user_config.ci.tools.omnix.r#ref.clone())
         .unwrap_or_else(|| resolved.omnix_ref.clone());
     let mut options = resolved.ci_options(&cfg, with_artifacts, omnix_ref.clone());
+    crate::ci_resolution::apply_cargo_metadata(&mut options, &metadata)?;
     options.publish_crates = publish_crates;
     let runner_override =
         if platform == Platform::Github && cfg.ci.platform != Some(Platform::Github) {
@@ -371,7 +372,11 @@ pub fn run(command: InitCiCommand) -> Result<()> {
         && resolved.workspace_strategy == crate::cli::WorkspaceStrategy::Members;
     let generation_packages =
         if resolved.workspace_strategy == crate::cli::WorkspaceStrategy::Aggregate {
-            packages.first().into_iter().collect::<Vec<_>>()
+            packages
+                .iter()
+                .find(|package| !options.exclude_packages.contains(&package.name))
+                .into_iter()
+                .collect::<Vec<_>>()
         } else {
             packages.iter().collect::<Vec<_>>()
         };
@@ -394,18 +399,6 @@ pub fn run(command: InitCiCommand) -> Result<()> {
         };
         let package_options = CiOptions {
             repository_checks: index == 0,
-            workspace_has_doctests: resolved.workspace_strategy
-                == crate::cli::WorkspaceStrategy::Aggregate
-                && packages.iter().any(cargo::Package::has_doctests),
-            workspace_has_features: resolved.workspace_strategy
-                == crate::cli::WorkspaceStrategy::Aggregate
-                && packages.iter().any(|package| !package.features.is_empty()),
-            workspace_has_library: resolved.workspace_strategy
-                == crate::cli::WorkspaceStrategy::Aggregate
-                && packages.iter().any(cargo::Package::has_library_target),
-            workspace_has_binary: resolved.workspace_strategy
-                == crate::cli::WorkspaceStrategy::Aggregate
-                && packages.iter().any(cargo::Package::has_binary_target),
             homebrew,
             chocolatey,
             scoop,
@@ -1675,9 +1668,7 @@ fn run_crow(
     let cli_overrides = ci_cli_overrides(command);
     let resolved =
         ResolvedCiInputs::resolve(workspace_root, cfg, &cli_overrides, Some(&inference))?;
-    if resolved.workspace_strategy == crate::cli::WorkspaceStrategy::Aggregate {
-        bail!("aggregate workspace CI is only supported for Actions workflows");
-    }
+    let aggregate = resolved.workspace_strategy == crate::cli::WorkspaceStrategy::Aggregate;
     if resolved.publish_strategy == crate::config::PublishStrategy::Coordinated {
         bail!(
             "coordinated workspace publication is only supported for Actions workflows on GitHub in v1"
@@ -1690,11 +1681,16 @@ fn run_crow(
     let windows_packagers = command.with_chocolatey || command.with_scoop;
     let with_artifacts = resolved.with_artifacts || command.with_homebrew || windows_packagers;
     let publish_crates = resolved.publish_crates || with_artifacts;
+    if aggregate && publish_crates {
+        bail!("aggregate workspace CI cannot be combined with crate or platform publishing");
+    }
     let omnix_ref = resolved.omnix_ref.clone();
     let mut crow = cfg.ci.crow.clone();
     if let Some(format) = command.crow_format {
         crow.format = format;
     }
+    crow.validate_runtime(resolved.runtime)?;
+    crow.validate_step_runners(!resolved.step_runners.is_empty())?;
     let runners = crow_runners(&resolved, windows_packagers);
     let step_runners = resolved
         .step_runners
@@ -1714,10 +1710,17 @@ fn run_crow(
         .iter()
         .any(|package| package.name == "simit");
     let mut options = resolved.ci_options(cfg, with_artifacts, omnix_ref);
+    crate::ci_resolution::apply_cargo_metadata(&mut options, metadata)?;
     options.publish_crates = publish_crates;
-    let multi_package_workspace = metadata.workspace_members.len() > 1;
+    let multi_package_workspace = metadata.workspace_members.len() > 1 && !aggregate;
+    let aggregate_package = crate::ci_resolution::crow_aggregate_package(&options, &packages);
+    let generation_packages = if aggregate {
+        aggregate_package.into_iter().collect::<Vec<_>>()
+    } else {
+        packages.iter().collect::<Vec<_>>()
+    };
     let mut files = Vec::new();
-    for (index, package) in packages.iter().enumerate() {
+    for (index, package) in generation_packages.into_iter().enumerate() {
         let homebrew = if command.with_homebrew {
             Some(homebrew_options(cfg, &command.homebrew, package)?)
         } else {
@@ -1765,6 +1768,17 @@ fn run_crow(
             options: package_options,
             step_runners: &step_runners,
         })?);
+    }
+    if !command.primary_only
+        && let Some(package) = aggregate_package.or_else(|| packages.first())
+    {
+        files.extend(crate::render::crow::manual_gate_files(
+            &crow,
+            resolved.runtime,
+            package,
+            &runners.ci,
+            &cfg.ci.manual_gates,
+        )?);
     }
 
     if !command.primary_only
@@ -2950,6 +2964,7 @@ pub(crate) fn is_ci_managed_workflow_name(name: &std::ffi::OsStr) -> bool {
             | "publish-jetbrains-plugin.yaml"
             | "publish-jetbrains-plugin.yml"
     ) || name.starts_with("build-")
+        || name.starts_with("manual-")
         || name.starts_with("ci-")
         || name.starts_with("nix-builds-")
         || name.starts_with("prebuild-")

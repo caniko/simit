@@ -219,9 +219,21 @@ pub struct CiOptions {
     pub repository_checks: bool,
     /// An aggregate selector can include libraries beyond its representative package.
     pub workspace_has_doctests: bool,
-    pub workspace_has_features: bool,
-    pub workspace_has_library: bool,
+    pub workspace_has_non_empty_default_feature: bool,
+    pub workspace_has_any_feature: bool,
+    pub workspace_lib_members: Vec<String>,
+    pub workspace_bin_members: Vec<String>,
+    pub lib_has_any_feature: bool,
+    pub lib_has_non_empty_default_feature: bool,
+    pub bin_has_any_feature: bool,
+    pub bin_has_non_empty_default_feature: bool,
     pub workspace_has_binary: bool,
+    pub exclude_packages: Vec<String>,
+    pub package_features: BTreeMap<String, Vec<String>>,
+    pub clippy_all_targets: bool,
+    pub format_all_rust_files: bool,
+    pub format_excludes: Vec<String>,
+    pub format_edition: Option<String>,
     pub all_features: bool,
     pub unit_tests_only: bool,
     pub nix_substituters: Vec<String>,
@@ -284,9 +296,21 @@ impl Default for CiOptions {
             components: Vec::new(),
             repository_checks: true,
             workspace_has_doctests: false,
-            workspace_has_features: false,
-            workspace_has_library: false,
+            workspace_has_non_empty_default_feature: false,
+            workspace_has_any_feature: false,
+            workspace_lib_members: Vec::new(),
+            workspace_bin_members: Vec::new(),
+            lib_has_any_feature: false,
+            lib_has_non_empty_default_feature: false,
+            bin_has_any_feature: false,
+            bin_has_non_empty_default_feature: false,
             workspace_has_binary: false,
+            exclude_packages: Vec::new(),
+            package_features: BTreeMap::new(),
+            clippy_all_targets: true,
+            format_all_rust_files: false,
+            format_excludes: Vec::new(),
+            format_edition: None,
             all_features: true,
             unit_tests_only: false,
             nix_substituters: Vec::new(),
@@ -3221,8 +3245,7 @@ fn push_cargo_ci_steps(
         return;
     }
     if options.repository_checks {
-        workflow
-            .push_str("      - name: Format check\n        run: cargo fmt --all -- --check\n\n");
+        workflow.push_str(&cargo_format_step(package, options));
     }
     push_test_steps(workflow, runtime, package, options);
     push_quality_ci_steps(workflow, runtime, options);
@@ -3402,10 +3425,7 @@ fn ci_workflow_multi_job(
             }
             Runtime::Cargo => {
                 if options.repository_checks {
-                    capture(
-                        STEP_CARGO_FMT,
-                        "      - name: Format check\n        run: cargo fmt --all -- --check\n\n",
-                    );
+                    capture(STEP_CARGO_FMT, &cargo_format_step(package, options));
                 }
 
                 let mut test = String::new();
@@ -3848,6 +3868,7 @@ pub(crate) fn target_smokes_file_with_nix_setup(
         // Reuse the gate evidence upload: it runs when the smoke started,
         // pass or fail, and never publishes for a skipped smoke.
         let gate = crate::config::RequiredGate {
+            secret: None,
             id: smoke.id.clone(),
             run: smoke.run.clone(),
             runtime: None,
@@ -6020,7 +6041,7 @@ fn push_nix_publish_legacy_steps(
     ));
 }
 
-fn rust_container(package: &Package) -> String {
+pub(super) fn rust_container(package: &Package) -> String {
     let Some(rust_version) = package.rust_version.as_deref() else {
         return "rust:bookworm".to_owned();
     };
@@ -6115,12 +6136,163 @@ fn push_sccache_stats_step(workflow: &mut String, platform: Platform, runtime: R
 pub(super) fn unit_test_target_args(package: &Package, options: &CiOptions) -> &'static str {
     if !options.unit_tests_only {
         ""
-    } else if !(package.has_library_target() || options.workspace_has_library)
-        && (package.has_binary_target() || options.workspace_has_binary)
-    {
+    } else if !package.has_library_target() && package.has_binary_target() {
         " --bins"
     } else {
         " --lib"
+    }
+}
+
+pub(super) fn test_selections<'a>(
+    package: &Package,
+    options: &'a CiOptions,
+    no_default: bool,
+) -> Vec<(String, &'static str, Option<&'a [String]>)> {
+    if options.workspace_strategy != WorkspaceStrategy::Aggregate || !options.unit_tests_only {
+        return vec![(
+            package_selector(package, options),
+            unit_test_target_args(package, options),
+            None,
+        )];
+    }
+    if options.workspace_bin_members.is_empty() {
+        return vec![(package_selector(package, options), " --lib", None)];
+    }
+    if options.workspace_lib_members.is_empty() {
+        return vec![(package_selector(package, options), " --bins", None)];
+    }
+    [
+        (
+            &options.workspace_lib_members,
+            " --lib",
+            options.lib_has_any_feature,
+            options.lib_has_non_empty_default_feature,
+        ),
+        (
+            &options.workspace_bin_members,
+            " --bins",
+            options.bin_has_any_feature,
+            options.bin_has_non_empty_default_feature,
+        ),
+    ]
+    .into_iter()
+    .filter(|&(_, _, any, default)| !no_default || if options.all_features { any } else { default })
+    .map(|(members, target, _, _)| (member_selector(members), target, Some(members.as_slice())))
+    .collect()
+}
+
+fn member_selector(members: &[String]) -> String {
+    let mut selector = String::new();
+    for name in members {
+        write!(selector, " -p {}", shell_word(name)).expect("write");
+    }
+    selector
+}
+
+pub(super) fn feature_args(
+    options: &CiOptions,
+    members: Option<&[String]>,
+    no_default: bool,
+) -> String {
+    if no_default {
+        return " --no-default-features".to_owned();
+    }
+    if options.all_features {
+        return " --all-features".to_owned();
+    }
+    if options.workspace_strategy != WorkspaceStrategy::Aggregate {
+        return String::new();
+    }
+    let features = options
+        .package_features
+        .iter()
+        .filter(|(package, _)| match members {
+            Some(members) => members.contains(package),
+            None => !options.exclude_packages.contains(package),
+        })
+        .flat_map(|(package, features)| {
+            features
+                .iter()
+                .map(move |feature| format!("{package}/{feature}"))
+        })
+        .collect::<Vec<_>>();
+    if features.is_empty() {
+        String::new()
+    } else {
+        format!(" --features {}", shell_word(&features.join(",")))
+    }
+}
+
+pub(super) fn clippy_targets(package: &Package, options: &CiOptions) -> &'static str {
+    if options.clippy_all_targets {
+        " --all-targets"
+    } else if options.workspace_strategy == WorkspaceStrategy::Aggregate {
+        match (
+            options.workspace_lib_members.is_empty(),
+            options.workspace_has_binary,
+        ) {
+            (false, false) => " --lib",
+            (true, true) => " --bins",
+            _ => " --lib --bins",
+        }
+    } else {
+        match (package.has_library_target(), package.has_binary_target()) {
+            (true, false) => " --lib",
+            (false, true) => " --bins",
+            _ => " --lib --bins",
+        }
+    }
+}
+
+pub(super) fn cargo_format_command(package: &Package, options: &CiOptions) -> String {
+    if !options.format_all_rust_files {
+        return "cargo fmt --all -- --check".to_owned();
+    }
+    let edition = shell_word(
+        options
+            .format_edition
+            .as_deref()
+            .or(package.edition.as_deref())
+            .unwrap_or("2021"),
+    );
+    let mut excludes = String::new();
+    for glob in &options.format_excludes {
+        write!(excludes, " {}", shell_quote(&format!(":!{glob}"))).expect("write");
+    }
+    let check = if excludes.is_empty() {
+        format!("rustfmt --edition {edition} --check --")
+    } else {
+        // File mode follows `mod` declarations; stdin `--check` isolates the
+        // file, matches CRLF/UTF-8 BOM handling, and discovers rustfmt.toml
+        // from the repository working directory. Because rustfmt currently
+        // exits 0 on stdin diffs, treat non-empty diff output as a failure too.
+        let script = format!(
+            "out=$(mktemp) || exit 1; trap 'rm -f \"$out\"' 0; failed=0; \
+               for f do \
+                   if ! rustfmt --edition {edition} --check < \"$f\" > \"$out\"; then \
+                       if [ -s \"$out\" ]; then printf 'Diff in %s:\\n' \"$f\"; cat \"$out\"; fi; \
+                       exit 1; \
+                   fi; \
+                   if [ -s \"$out\" ]; then \
+                       printf 'Diff in %s:\\n' \"$f\"; cat \"$out\"; failed=1; \
+                   fi; \
+               done; exit \"$failed\""
+        );
+        format!("sh -c {} _", shell_quote(&script))
+    };
+    // Crow's POSIX shell has no pipefail. Scope cleanup to this command even
+    // when Crow runs all the build commands in a single shell.
+    format!(
+        "(tmp=$(mktemp) && trap 'rm -f \"$tmp\"' 0 && git ls-files -z -- '*.rs'{excludes} > \"$tmp\" && xargs -0 -r {check} < \"$tmp\")"
+    )
+}
+
+fn cargo_format_step(package: &Package, options: &CiOptions) -> String {
+    let command = cargo_format_command(package, options);
+    if options.format_all_rust_files {
+        format!("      - name: Format check\n        run: |\n          {command}\n\n")
+    } else {
+        format!("      - name: Format check\n        run: {command}\n\n")
     }
 }
 
@@ -6131,7 +6303,6 @@ fn push_test_steps(
     options: &CiOptions,
 ) {
     let prefix = command_prefix(runtime);
-    let targets = unit_test_target_args(package, options);
     // Cargo may prefer an off-PATH $CARGO_HOME/bin; invoke the verified tool directly.
     let nextest = match runtime {
         Runtime::Cargo => "cargo-nextest nextest run",
@@ -6146,73 +6317,45 @@ fn push_test_steps(
             workflow.push_str(command_prefix(runtime));
             workflow.push_str("cargo-nextest --version\n\n");
         }
-        workflow.push_str(if options.all_features {
-            "      - name: Test all features\n"
-        } else {
-            "      - name: Test\n"
-        });
-        workflow.push_str("        run: ");
-        workflow.push_str(prefix);
-        workflow.push_str(nextest);
-        push_package_selector(workflow, package, options);
-        workflow.push_str(targets);
-        if options.all_features {
-            workflow.push_str(" --all-features");
-        }
-        workflow.push_str("\n\n");
+    }
+    let harness = if options.with_nextest {
+        nextest
     } else {
-        workflow.push_str(if options.all_features {
-            "      - name: Test all features\n"
+        "cargo test"
+    };
+    let no_default = needs_no_default_pass(package, options);
+    for pass in [false, true].into_iter().filter(|pass| !pass || no_default) {
+        let name = if pass {
+            "Test no default features"
+        } else if options.all_features {
+            "Test all features"
         } else {
-            "      - name: Test\n"
-        });
-        workflow.push_str("        run: ");
-        workflow.push_str(prefix);
-        workflow.push_str("cargo test");
-        push_package_selector(workflow, package, options);
-        workflow.push_str(targets);
-        if options.all_features {
-            workflow.push_str(" --all-features");
-        }
-        workflow.push_str("\n\n");
-    }
-    if has_features(package, options) {
-        workflow.push_str("      - name: Test no default features\n");
-        workflow.push_str("        run: ");
-        workflow.push_str(prefix);
-        workflow.push_str(if options.with_nextest {
-            nextest
-        } else {
-            "cargo test"
-        });
-        push_package_selector(workflow, package, options);
-        workflow.push_str(targets);
-        workflow.push_str(" --no-default-features\n\n");
-    }
-    if options.with_nextest
-        && !options.unit_tests_only
-        && (package.has_doctests() || options.workspace_has_doctests)
-    {
-        let mut modes = vec![(
-            "Doctests",
-            if options.all_features {
-                " --all-features"
-            } else {
-                ""
-            },
-        )];
-        if has_features(package, options) {
-            modes.push(("Doctests no default features", " --no-default-features"));
-        }
-        for (name, features) in modes {
-            write!(
+            "Test"
+        };
+        for (selector, targets, members) in test_selections(package, options, pass) {
+            let features = feature_args(options, members, pass);
+            let suffix = if members.is_some() { targets } else { "" };
+            writeln!(
                 workflow,
-                "      - name: {name}\n        run: {prefix}cargo test --doc"
+                "      - name: {name}{suffix}\n        run: {prefix}{harness}{selector}{targets}{features}\n"
             )
             .expect("write");
-            push_package_selector(workflow, package, options);
-            workflow.push_str(features);
-            workflow.push_str("\n\n");
+        }
+    }
+    if options.with_nextest && !options.unit_tests_only && has_doctests(package, options) {
+        let selector = package_selector(package, options);
+        for pass in [false, true].into_iter().filter(|pass| !pass || no_default) {
+            let name = if pass {
+                "Doctests no default features"
+            } else {
+                "Doctests"
+            };
+            let features = feature_args(options, None, pass);
+            writeln!(
+                workflow,
+                "      - name: {name}\n        run: {prefix}cargo test --doc{selector}{features}\n"
+            )
+            .expect("write");
         }
     }
 }
@@ -6224,27 +6367,25 @@ fn push_clippy_steps(
     options: &CiOptions,
 ) {
     let prefix = command_prefix(runtime);
-    workflow.push_str(if options.all_features {
-        "      - name: Clippy all features\n"
-    } else {
-        "      - name: Clippy\n"
-    });
-    workflow.push_str("        run: ");
-    workflow.push_str(prefix);
-    workflow.push_str("cargo clippy");
-    push_package_selector(workflow, package, options);
-    workflow.push_str(" --all-targets");
-    if options.all_features {
-        workflow.push_str(" --all-features");
-    }
-    workflow.push_str(" -- --deny warnings\n\n");
-    if has_features(package, options) {
-        workflow.push_str("      - name: Clippy no default features\n");
-        workflow.push_str("        run: ");
-        workflow.push_str(prefix);
-        workflow.push_str("cargo clippy");
-        push_package_selector(workflow, package, options);
-        workflow.push_str(" --all-targets --no-default-features -- --deny warnings\n\n");
+    let selector = package_selector(package, options);
+    let targets = clippy_targets(package, options);
+    for pass in [false, true]
+        .into_iter()
+        .filter(|pass| !pass || needs_no_default_pass(package, options))
+    {
+        let name = if pass {
+            "Clippy no default features"
+        } else if options.all_features {
+            "Clippy all features"
+        } else {
+            "Clippy"
+        };
+        let features = feature_args(options, None, pass);
+        writeln!(
+            workflow,
+            "      - name: {name}\n        run: {prefix}cargo clippy{selector}{targets}{features} -- --deny warnings\n"
+        )
+        .expect("write");
     }
 }
 
@@ -6304,7 +6445,7 @@ fn push_msrv_step(workflow: &mut String, runtime: Runtime, package: &Package, op
         return;
     }
     workflow.push_str("      - name: Check MSRV\n        run: |\n");
-    for line in msrv_check_command(runtime, package, options).lines() {
+    for line in msrv_check_command(runtime, package, options, false).lines() {
         workflow.push_str("          ");
         workflow.push_str(line);
         workflow.push('\n');
@@ -6316,9 +6457,10 @@ pub(super) fn msrv_check_command(
     runtime: Runtime,
     package: &Package,
     options: &CiOptions,
+    locked: bool,
 ) -> String {
     let version = package.rust_version.as_deref().expect("validated MSRV");
-    let mut command = String::from("set -eu\n");
+    let mut command = String::from("(\nset -eu\n");
     if runtime == Runtime::Nix {
         // A shell named `msrv` is not sufficient evidence of the actual compiler.
         // Fail closed if a custom flake accidentally aliases its default shell.
@@ -6336,10 +6478,14 @@ pub(super) fn msrv_check_command(
         .expect("write");
     }
     push_package_selector(&mut command, package, options);
+    if locked {
+        command.push_str(" --locked");
+    }
     command.push_str(" --all-targets");
     if options.all_features {
         command.push_str(" --all-features");
     }
+    command.push_str("\n)");
     command
 }
 
@@ -6415,11 +6561,20 @@ fn push_audit_step(workflow: &mut String, runtime: Runtime) {
 }
 
 fn push_package_selector(workflow: &mut String, package: &Package, options: &CiOptions) {
+    workflow.push_str(&package_selector(package, options));
+}
+
+pub(super) fn package_selector(package: &Package, options: &CiOptions) -> String {
     if options.workspace_strategy == WorkspaceStrategy::Aggregate {
-        workflow.push_str(" --workspace");
+        let mut selector = " --workspace".to_owned();
+        for name in &options.exclude_packages {
+            write!(selector, " --exclude {}", shell_word(name)).expect("write");
+        }
+        selector
     } else if options.package_scoped {
-        workflow.push_str(" -p ");
-        workflow.push_str(&shell_word(&package.name));
+        format!(" -p {}", shell_word(&package.name))
+    } else {
+        String::new()
     }
 }
 
@@ -6475,9 +6630,8 @@ pub(crate) fn release_plz_checks(
             workflow,
             "      - name: Format check\n        run: |\n          # Expand formatter variables inside the Nix shell.\n          # shellcheck disable=SC2016\n          nix develop -c {NIX_FORMAT_COMMAND}\n\n"
         ).expect("write");
-    } else {
-        workflow
-            .push_str("      - name: Format check\n        run: cargo fmt --all -- --check\n\n");
+    } else if let Some(package) = packages.first() {
+        workflow.push_str(&cargo_format_step(package, options));
     }
     if needs_nix {
         if options.independent_lanes {
@@ -6561,8 +6715,22 @@ fn trim_trailing_blank_lines(workflow: &mut String) {
     }
 }
 
-fn has_features(package: &Package, options: &CiOptions) -> bool {
-    !package.features.is_empty() || options.workspace_has_features
+pub(super) fn needs_no_default_pass(package: &Package, options: &CiOptions) -> bool {
+    let aggregate = options.workspace_strategy == WorkspaceStrategy::Aggregate;
+    match (aggregate, options.all_features) {
+        (true, true) => options.workspace_has_any_feature,
+        (true, false) => options.workspace_has_non_empty_default_feature,
+        (false, true) => package.has_any_feature(),
+        (false, false) => package.has_non_empty_default_feature(),
+    }
+}
+
+pub(super) fn has_doctests(package: &Package, options: &CiOptions) -> bool {
+    if options.workspace_strategy == WorkspaceStrategy::Aggregate {
+        options.workspace_has_doctests
+    } else {
+        package.has_doctests()
+    }
 }
 
 fn push_self_check_steps(

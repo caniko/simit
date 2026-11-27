@@ -165,6 +165,12 @@ PATH="$bin" {name} --version"#
         script.push_str(command);
         script.replace('$', "$$")
     }
+
+    pub(super) fn crow_scoped(self, command: &str) -> String {
+        // Combined lanes run multiple installers in one shell. Each installer
+        // needs its own EXIT trap and must not overwrite another tool's PATH.
+        format!("(\n{}\n)", self.crow(command))
+    }
 }
 
 #[cfg(all(test, target_os = "linux"))]

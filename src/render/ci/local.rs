@@ -37,6 +37,10 @@ fn workflow_label(path: &Path) -> Option<String> {
 fn workflow_steps(files: &[GeneratedFile]) -> Result<Vec<(String, String, String)>> {
     let mut steps = Vec::new();
     for file in files {
+        if file.relative_path.starts_with(".crow") {
+            crow_workflow_steps(file, &mut steps)?;
+            continue;
+        }
         let Some(label) = workflow_label(&file.relative_path) else {
             continue;
         };
@@ -67,6 +71,97 @@ fn workflow_steps(files: &[GeneratedFile]) -> Result<Vec<(String, String, String
     Ok(steps)
 }
 
+fn crow_workflow_steps(
+    file: &GeneratedFile,
+    output: &mut Vec<(String, String, String)>,
+) -> Result<()> {
+    use serde_yaml::Value;
+
+    let Some(stem) = file
+        .relative_path
+        .file_stem()
+        .and_then(|stem| stem.to_str())
+    else {
+        return Ok(());
+    };
+    // Only replay CI lanes, never workflows that can publish or deploy.
+    let label = match stem {
+        "build" | "ci" => "",
+        stem => match stem
+            .strip_prefix("build-")
+            .or_else(|| stem.strip_prefix("ci-"))
+        {
+            Some(label) => label,
+            None => return Ok(()),
+        },
+    };
+    let source = if file
+        .relative_path
+        .extension()
+        .is_some_and(|ext| ext == "jsonnet")
+    {
+        // Simit's Jsonnet output is JSON with a generated marker comment.
+        file.content.split_once('\n').map_or("", |(_, json)| json)
+    } else {
+        &file.content
+    };
+    let workflow: Value = serde_yaml::from_str(source)?;
+    let manual_only = |value: &Value| {
+        value
+            .get("when")
+            .and_then(Value::as_sequence)
+            .is_some_and(|triggers| {
+                !triggers.is_empty()
+                    && triggers.iter().all(|trigger| {
+                        let event = &trigger["event"];
+                        event.as_str() == Some("manual")
+                            || event.as_sequence().is_some_and(|events| {
+                                !events.is_empty()
+                                    && events.iter().all(|event| event.as_str() == Some("manual"))
+                            })
+                    })
+            })
+    };
+    if manual_only(&workflow) {
+        return Ok(());
+    }
+    for step in workflow
+        .get("steps")
+        .and_then(Value::as_sequence)
+        .into_iter()
+        .flatten()
+    {
+        let Some(name) = step.get("name").and_then(Value::as_str) else {
+            continue;
+        };
+        if name == "nix-config" || manual_only(step) {
+            continue;
+        }
+        let command = step
+            .get("commands")
+            .and_then(Value::as_sequence)
+            .into_iter()
+            .flatten()
+            .filter_map(Value::as_str)
+            .filter(|command| {
+                !matches!(
+                    *command,
+                    crate::render::crow::SCCACHE_PROBE
+                        | crate::render::crow::SCCACHE_STATS
+                        | crate::render::crow::PIN_CONTAINER_TOOLCHAIN
+                )
+            })
+            .map(|command| command.trim_end().replace("$$", "$"))
+            .filter(|command| !runner_only(command))
+            .collect::<Vec<_>>()
+            .join("\n");
+        if !command.is_empty() {
+            output.push((label.to_owned(), name.to_owned(), command));
+        }
+    }
+    Ok(())
+}
+
 fn single_quoted(text: &str) -> String {
     format!("'{}'", text.replace('\'', r"'\''"))
 }
@@ -74,7 +169,7 @@ fn single_quoted(text: &str) -> String {
 pub fn local_gate_script(files: &[GeneratedFile], ci: &CiConfig) -> Result<GeneratedFile> {
     let steps = workflow_steps(files)?;
     if steps.is_empty() && ci.local_gate_steps.is_empty() {
-        bail!("[ci].local_gate needs GitHub/Forgejo Actions CI workflows to derive steps from");
+        bail!("[ci].local_gate needs Actions or Crow CI workflows to derive steps from");
     }
     let mut workflows_per_command: BTreeMap<&str, usize> = BTreeMap::new();
     for (_, _, command) in &steps {
@@ -83,7 +178,7 @@ pub fn local_gate_script(files: &[GeneratedFile], ci: &CiConfig) -> Result<Gener
     let mut script = format!(
         "#!/usr/bin/env bash\n{GENERATED_WORKFLOW_MARKER}\n\
 # Runs the generated CI checks locally, in CI order. Each step runs like a\n\
-# hosted Actions step (bash -eo pipefail) without the runner's job env.\n\
+# hosted CI step (bash -eo pipefail) without the runner's job env.\n\
 #   bash {LOCAL_GATE_PATH} --list              list steps\n\
 #   SIMIT_LOCAL_ONLY='<regex>' bash {LOCAL_GATE_PATH}  run matching steps only\n\
 set -euo pipefail\n\

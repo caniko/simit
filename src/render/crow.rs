@@ -25,6 +25,8 @@ use crate::user_config::{ResolvedCiRunners, ResolvedRunner};
 use super::{cargo_tools::Tool, ci};
 
 const DEFAULT_CROW_NIX_IMAGE: &str = "ghcr.io/cachix/devenv:latest";
+pub(super) const SCCACHE_PROBE: &str = "command -v sccache >/dev/null 2>&1 || { echo 'sccache is enabled but missing from the Crow image' >&2; exit 1; }";
+pub(super) const SCCACHE_STATS: &str = "sccache --show-stats || true";
 
 pub struct FilesRequest<'a> {
     pub format: CrowWorkflowFormat,
@@ -53,6 +55,22 @@ struct Workflow {
     #[serde(skip_serializing_if = "Option::is_none")]
     workspace: Option<Workspace>,
     steps: Vec<Step>,
+}
+
+#[derive(Serialize)]
+struct WorkflowWithClone {
+    #[serde(flatten)]
+    workflow: Workflow,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    clone: Option<Value>,
+}
+
+fn clone_step(depth: u32) -> Value {
+    json!([{
+        "name": "clone",
+        "image": CROW_CLONE_PLUGIN,
+        "settings": { "depth": depth, "lfs": false },
+    }])
 }
 
 #[derive(Debug, Serialize)]
@@ -128,6 +146,10 @@ pub(crate) fn primary_files(request: &FilesRequest<'_>) -> Result<Vec<GeneratedF
 }
 
 fn files_for_scope(request: &FilesRequest<'_>, primary_only: bool) -> Result<Vec<GeneratedFile>> {
+    request.crow.validate_runtime(request.runtime)?;
+    request
+        .crow
+        .validate_step_runners(!request.step_runners.is_empty())?;
     if request.options.independent_lanes {
         bail!("independent_lanes requires GitHub Actions Rust/Nix CI");
     }
@@ -152,20 +174,23 @@ fn files_for_scope(request: &FilesRequest<'_>, primary_only: bool) -> Result<Vec
         vec![GeneratedFile {
             relative_path: crow_path("build", suffix, request.format),
             content: render_workflow(
-                named(
-                    build_workflow(
-                        request.crow,
-                        request.runtime,
-                        request.package,
-                        &image,
-                        request.self_check,
-                        request.runners,
-                        &request.options,
-                        request.step_runners,
+                WorkflowWithClone {
+                    workflow: named(
+                        build_workflow(
+                            request.crow,
+                            request.runtime,
+                            request.package,
+                            &image,
+                            request.self_check,
+                            request.runners,
+                            &request.options,
+                            request.step_runners,
+                        ),
+                        "build",
+                        suffix,
                     ),
-                    "build",
-                    suffix,
-                ),
+                    clone: request.crow.shallow_clone.then(|| clone_step(1)),
+                },
                 request.format,
             )?,
         }]
@@ -231,6 +256,18 @@ fn build_workflow(
 ) -> Workflow {
     let mut steps = Vec::new();
     let prefix = command_prefix(runtime);
+    let locked = if runtime == Runtime::Cargo {
+        " --locked"
+    } else {
+        ""
+    };
+    let tool_command = |tool: Tool, command: &str| {
+        if config.combine_steps {
+            tool.crow_scoped(command)
+        } else {
+            tool.crow(command)
+        }
+    };
     let mut setup = Step::new("project-setup", image);
     setup = setup.commands(options.extra_setup.clone());
     if !options.extra_setup.is_empty() {
@@ -274,7 +311,7 @@ fn build_workflow(
             steps.push(step("nix-check", image, command.to_owned()));
         }
         let command = if runtime == Runtime::Cargo {
-            format!("rustup component add clippy rustfmt && {command}")
+            with_rust_component("clippy", &with_rust_component("rustfmt", command))
         } else {
             ci::project_check_command(runtime, command)
         };
@@ -300,7 +337,10 @@ fn build_workflow(
                     // runtime expressions survive that separate expansion layer.
                     format!("{prefix}{}", ci::NIX_FORMAT_COMMAND.replace('$', "$$"))
                 } else {
-                    format!("{prefix}cargo fmt --all -- --check")
+                    with_rust_component(
+                        "rustfmt",
+                        &ci::cargo_format_command(package, options).replace('$', "$$"),
+                    )
                 },
             ));
         }
@@ -312,16 +352,10 @@ fn build_workflow(
                     format!("{prefix}cargo-nextest --version"),
                 ));
             }
-            let selector = package_selector(package, options);
-            let mut modes = vec![if options.all_features {
-                " --all-features"
-            } else {
-                ""
-            }];
-            if !package.features.is_empty() {
-                modes.push(" --no-default-features");
-            }
-            for (index, features) in modes.into_iter().enumerate() {
+            let selector = ci::package_selector(package, options);
+            let mut combined_nextest = Vec::new();
+            let no_default = ci::needs_no_default_pass(package, options);
+            for pass in [false, true].into_iter().filter(|pass| !pass || no_default) {
                 let harness = match (options.with_nextest, runtime) {
                     (true, Runtime::Cargo) => "cargo-nextest nextest run",
                     (true, Runtime::Nix) => "cargo nextest run",
@@ -332,37 +366,64 @@ fn build_workflow(
                 } else {
                     STEP_CARGO_TEST
                 };
-                let name = if index == 0 {
-                    name.to_owned()
-                } else {
+                let name = if pass {
                     format!("{name}-no-default-features")
-                };
-                let targets = ci::unit_test_target_args(package, options);
-                let test = format!("{prefix}{harness}{features}{selector}{targets}");
-                let command = if options.with_nextest && runtime == Runtime::Cargo {
-                    Tool::Nextest.crow(&test)
                 } else {
-                    test
+                    name.to_owned()
                 };
-                steps.push(step(&name, image, command));
-                if options.with_nextest && !options.unit_tests_only && package.has_doctests() {
+                for (selection, targets, members) in ci::test_selections(package, options, pass) {
+                    let features = ci::feature_args(options, members, pass);
+                    let test = format!("{prefix}{harness}{locked}{features}{selection}{targets}");
+                    let name = if members.is_some() {
+                        format!("{name}-{}", targets.trim_start_matches(" --"))
+                    } else {
+                        name.clone()
+                    };
+                    if options.with_nextest && runtime == Runtime::Cargo {
+                        if config.combine_steps {
+                            combined_nextest.push(test);
+                        } else {
+                            steps.push(step(name, image, Tool::Nextest.crow(&test)));
+                        }
+                    } else {
+                        steps.push(step(name, image, test.replace('$', "$$")));
+                    }
+                }
+                if options.with_nextest
+                    && !options.unit_tests_only
+                    && ci::has_doctests(package, options)
+                {
+                    let features = ci::feature_args(options, None, pass);
                     steps.push(step(
                         format!("{name}-doctests"),
                         image,
-                        format!("{prefix}cargo test --doc{features}{selector}"),
+                        format!("{prefix}cargo test{locked} --doc{features}{selector}")
+                            .replace('$', "$$"),
                     ));
                 }
-                let name = if index == 0 {
-                    STEP_CARGO_CLIPPY.to_owned()
-                } else {
+                let name = if pass {
                     format!("{STEP_CARGO_CLIPPY}-no-default-features")
+                } else {
+                    STEP_CARGO_CLIPPY.to_owned()
                 };
+                let targets = ci::clippy_targets(package, options);
+                let features = ci::feature_args(options, None, pass);
+                let command = format!(
+                    "{prefix}cargo clippy{locked}{targets}{features}{selector} -- --deny warnings"
+                )
+                .replace('$', "$$");
+                let command = if runtime == Runtime::Cargo && (!config.combine_steps || !pass) {
+                    with_rust_component("clippy", &command)
+                } else {
+                    command
+                };
+                steps.push(step(name, image, command));
+            }
+            if !combined_nextest.is_empty() {
                 steps.push(step(
-                    name,
+                    "cargo-nextest",
                     image,
-                    format!(
-                        "{prefix}cargo clippy --all-targets{features}{selector} -- --deny warnings"
-                    ),
+                    Tool::Nextest.crow_scoped(&combined_nextest.join("\n")),
                 ));
             }
         }
@@ -371,8 +432,8 @@ fn build_workflow(
                 STEP_CARGO_DOC,
                 image,
                 format!(
-                    "{prefix}cargo doc{} --no-deps --all-features",
-                    package_selector(package, options)
+                    "{prefix}cargo doc{locked}{} --no-deps --all-features",
+                    ci::package_selector(package, options)
                 ),
             ));
         }
@@ -380,7 +441,8 @@ fn build_workflow(
             steps.push(step(
                 "cargo-msrv",
                 image,
-                ci::msrv_check_command(runtime, package, options).replace('$', "$$"),
+                ci::msrv_check_command(runtime, package, options, runtime == Runtime::Cargo)
+                    .replace('$', "$$"),
             ));
         }
         if options.repository_checks && options.with_audit {
@@ -391,15 +453,20 @@ fn build_workflow(
                     "tmp=$$(mktemp -d) && trap 'rm -rf \"$$tmp\"' EXIT && {tools}{clone} \"$$tmp/advisory-db\" && {tools}cargo-audit audit --db \"$$tmp/advisory-db\" --no-fetch"
                 )
             } else {
-                Tool::Audit.crow(&format!(
-                    "{clone} \"$bin/advisory-db\"\ncargo-audit audit --db \"$bin/advisory-db\" --no-fetch"
-                ))
+                tool_command(
+                    Tool::Audit,
+                    &format!(
+                        "{clone} \"$bin/advisory-db\"\ncargo-audit audit --db \"$bin/advisory-db\" --no-fetch"
+                    ),
+                )
             };
             steps.push(step("cargo-audit", image, command));
         }
         if options.repository_checks && options.with_deny {
             let command = match runtime {
-                Runtime::Cargo => Tool::Deny.crow("cargo-deny deny check bans licenses sources"),
+                Runtime::Cargo => {
+                    tool_command(Tool::Deny, "cargo-deny deny check bans licenses sources")
+                }
                 Runtime::Nix => format!("{prefix}cargo deny check bans licenses sources"),
             };
             steps.push(step("cargo-deny", image, command));
@@ -410,13 +477,16 @@ fn build_workflow(
                     .command(format!("nix run \"{}\" -- ci run", options.omnix_ref)),
             );
         }
-        if options.om_ci != OmCiMode::Replace && package.is_publishable() {
+        if options.om_ci != OmCiMode::Replace
+            && package.is_publishable()
+            && options.workspace_strategy != crate::cli::WorkspaceStrategy::Aggregate
+        {
             steps.push(step(
                 STEP_CARGO_PACKAGE,
                 image,
                 format!(
-                    "{prefix}cargo package --allow-dirty --list{}",
-                    package_selector(package, options)
+                    "{prefix}cargo package{locked} --allow-dirty --list{}",
+                    ci::package_selector(package, options)
                 ),
             ));
         }
@@ -425,6 +495,9 @@ fn build_workflow(
         let mut command = String::from("cargo run -- init ci --ci-provider crow");
         if self_check.workspace {
             command.push_str(" --workspace");
+        }
+        if options.workspace_strategy == crate::cli::WorkspaceStrategy::Aggregate {
+            command.push_str(" --workspace-strategy aggregate");
         }
         for package in self_check.packages {
             command.push_str(" --package ");
@@ -441,8 +514,33 @@ fn build_workflow(
         }
     }
 
+    if config.combine_steps {
+        steps.sort_by_key(|step| match step.name.as_str() {
+            "project-setup" => 0,
+            STEP_CARGO_FMT => 1,
+            name if name.starts_with(STEP_CARGO_CLIPPY) => 2,
+            name if (name.starts_with(STEP_CARGO_TEST) || name.starts_with("cargo-nextest"))
+                && !name.ends_with("-doctests") =>
+            {
+                3
+            }
+            name if name.ends_with("-doctests") => 4,
+            _ => 5,
+        });
+        steps = vec![
+            Step::new("cargo-ci", image).commands(steps.into_iter().flat_map(|step| step.commands)),
+        ];
+    }
+    if runtime == Runtime::Cargo {
+        for step in &mut steps {
+            cargo_environment(step, config);
+            if !matches!(step.name.as_str(), "cargo-msrv" | "cargo-audit") {
+                pin_container_toolchain(step);
+            }
+        }
+    }
     apply_step_runner_labels(&mut steps, step_runners);
-    add_environment(&mut steps, options);
+    add_environment(&mut steps, options, config.cargo_home.as_deref());
     if runtime == Runtime::Nix {
         add_nix_environment(&mut steps);
     }
@@ -457,10 +555,7 @@ fn build_workflow(
         name: "build".to_owned(),
         labels: labels(config, &runners.ci),
         platform: config.platform.clone(),
-        when: vec![
-            push_to_maintained_branches(),
-            condition("event", "pull_request"),
-        ],
+        when: build_triggers(config),
         skip_clone: config.skip_clone.then_some(true),
         variables: config.variables.clone(),
         workspace: config.workspace_base.as_ref().map(|base| Workspace {
@@ -469,6 +564,168 @@ fn build_workflow(
         }),
         steps,
     }
+}
+
+fn cargo_environment(step: &mut Step, config: &CrowCiConfig) {
+    if config.strip_ci_debug {
+        for key in [
+            "CARGO_INCREMENTAL",
+            "CARGO_PROFILE_DEV_DEBUG",
+            "CARGO_PROFILE_TEST_DEBUG",
+        ] {
+            step.environment.insert(key.to_owned(), json!("0"));
+        }
+    }
+    if let Some(jobs) = config.build_jobs {
+        step.environment
+            .insert("CARGO_BUILD_JOBS".to_owned(), json!(jobs.to_string()));
+    }
+    if let Some(cache) = &config.sccache
+        && cache.enabled
+        && (step.name == "cargo-ci"
+            || step.name.starts_with("cargo-test")
+            || step.name.starts_with("cargo-nextest")
+            || step.name.starts_with("cargo-clippy")
+            || matches!(
+                step.name.as_str(),
+                "cargo-msrv"
+                    | STEP_CARGO_DOC
+                    | STEP_SELF_CHECK
+                    | "release-self-check"
+                    | ci::STEP_PROJECT_CHECK
+                    | "project-check-push"
+                    | "project-check-pr"
+            ))
+    {
+        step.environment.extend(
+            cache
+                .env
+                .iter()
+                .map(|(key, value)| (key.clone(), json!(value))),
+        );
+        step.environment
+            .insert("RUSTC_WRAPPER".to_owned(), json!("sccache"));
+        if let Some(secret) = &cache.secret {
+            step.environment
+                .insert(secret.clone(), json!({ "from_secret": secret }));
+        }
+        step.commands.insert(0, SCCACHE_PROBE.to_owned());
+        step.commands.push(SCCACHE_STATS.to_owned());
+    }
+}
+
+// Ignore repository rust-toolchain overrides in CI, without overriding the
+// operator's explicit toolchain. Crow expands dollars before running the shell.
+pub(super) const PIN_CONTAINER_TOOLCHAIN: &str = r#"if [ -n "$${CI:-}" ] && [ -z "$${RUSTUP_TOOLCHAIN:-}" ] && command -v rustup >/dev/null 2>&1; then RUSTUP_TOOLCHAIN=$$(rustup default) || exit $$?; export RUSTUP_TOOLCHAIN="$${RUSTUP_TOOLCHAIN%% *}"; fi"#;
+
+fn pin_container_toolchain(step: &mut Step) {
+    step.commands.insert(0, PIN_CONTAINER_TOOLCHAIN.to_owned());
+}
+
+fn with_rust_component(component: &str, command: &str) -> String {
+    // The official Rust image uses rustup's minimal profile.
+    let probe = if component == "clippy" {
+        "cargo clippy"
+    } else {
+        component
+    };
+    format!("{probe} --version >/dev/null 2>&1 || rustup component add {component}\n{command}")
+}
+
+pub(crate) fn manual_gate_files(
+    config: &CrowCiConfig,
+    runtime: Runtime,
+    package: &Package,
+    runner: &ResolvedRunner,
+    gates: &[crate::config::RequiredGate],
+) -> Result<Vec<GeneratedFile>> {
+    use crate::config::GateRuntime;
+
+    gates
+        .iter()
+        .map(|gate| {
+            let name = format!("manual-{}", ci::sanitize_gate_id(&gate.id));
+            let runtime = match gate.runtime {
+                Some(GateRuntime::Cargo) => Runtime::Cargo,
+                Some(GateRuntime::Nix) => Runtime::Nix,
+                Some(GateRuntime::Shell) | None => runtime,
+            };
+            let image = match runtime {
+                Runtime::Cargo => config
+                    .image
+                    .clone()
+                    .unwrap_or_else(|| ci::rust_container(package)),
+                Runtime::Nix => config
+                    .nix_image
+                    .clone()
+                    .unwrap_or_else(|| DEFAULT_CROW_NIX_IMAGE.to_owned()),
+            };
+            // Use short flags and integer seconds so both GNU and BusyBox timeout accept it.
+            let timeout_seconds = gate.timeout_minutes.saturating_mul(60);
+            let command = format!(
+                "timeout -s TERM -k 30 {timeout_seconds} sh -ec {}",
+                shell_quote(&gate.run)
+            );
+            let mut step = step(&name, &image, command.replace('$', "$$"));
+            if runtime == Runtime::Nix {
+                add_nix_environment(std::slice::from_mut(&mut step));
+            } else {
+                step.environment.insert(
+                    "CARGO_HOME".to_owned(),
+                    json!(config.cargo_home.as_deref().unwrap_or("/tmp/.cargo")),
+                );
+                pin_container_toolchain(&mut step);
+            }
+            step.environment.extend(
+                gate.env
+                    .iter()
+                    .map(|(key, value)| (key.clone(), json!(value.replace('$', "$$")))),
+            );
+            if let Some(secret) = &gate.secret {
+                step = step.secret(secret);
+            }
+            let relative_path = crow_path(&name, None, config.format);
+            let workflow = Workflow {
+                name,
+                labels: labels(config, runner),
+                platform: config.platform.clone(),
+                when: vec![condition("event", "manual")],
+                skip_clone: config.skip_clone.then_some(true),
+                variables: config.variables.clone(),
+                workspace: config.workspace_base.as_ref().map(|base| Workspace {
+                    base: base.clone(),
+                    path: "src/${CI_REPO}".to_owned(),
+                }),
+                steps: vec![step],
+            };
+            Ok(GeneratedFile {
+                relative_path,
+                content: render_workflow(workflow, config.format)?,
+            })
+        })
+        .collect()
+}
+
+fn build_triggers(config: &CrowCiConfig) -> Vec<BTreeMap<String, Value>> {
+    let mut triggers = vec![
+        push_to_maintained_branches(),
+        condition("event", "pull_request"),
+    ];
+    let mut paths = BTreeMap::new();
+    for (key, patterns) in [
+        ("include", &config.paths_include),
+        ("exclude", &config.paths_exclude),
+    ] {
+        if !patterns.is_empty() {
+            paths.insert(key, patterns);
+        }
+    }
+    if !paths.is_empty() {
+        for trigger in &mut triggers {
+            trigger.insert("path".to_owned(), json!(paths));
+        }
+    }
+    triggers
 }
 
 fn publish_workflow(
@@ -482,14 +739,17 @@ fn publish_workflow(
     let mut publish = Step::new("publish", image)
         .command(format!(
             "{prefix}cargo publish --dry-run{}",
-            package_selector(package, options)
+            ci::package_selector(package, options)
         ))
         .command(format!(
             "{prefix}cargo publish{}",
-            package_selector(package, options)
+            ci::package_selector(package, options)
         ));
     for secret in &options.required_secrets {
         publish = publish.secret(secret);
+    }
+    if runtime == Runtime::Cargo {
+        pin_container_toolchain(&mut publish);
     }
     Workflow {
         name: "publish-crate".to_owned(),
@@ -520,7 +780,7 @@ fn artifacts_workflow(
     } else {
         format!(
             "{prefix}cargo build --release --locked{}",
-            package_selector(package, options)
+            ci::package_selector(package, options)
         )
     };
     let mut step = Step::new("build-release-artifacts", image)
@@ -528,6 +788,9 @@ fn artifacts_workflow(
         .command(build);
     for secret in &options.required_secrets {
         step = step.secret(secret);
+    }
+    if runtime == Runtime::Cargo {
+        pin_container_toolchain(&mut step);
     }
     Workflow {
         name: "release-artifacts".to_owned(),
@@ -547,30 +810,15 @@ fn image_for(request: &FilesRequest<'_>) -> String {
             .crow
             .image
             .clone()
-            .unwrap_or_else(|| rust_container(request.package)),
+            .unwrap_or_else(|| ci::rust_container(request.package)),
         Runtime::Nix => nix_image(request.crow),
     }
-}
-
-fn rust_container(package: &Package) -> String {
-    let Some(version) = package.rust_version.as_deref() else {
-        return "rust:bookworm".to_owned();
-    };
-    format!("rust:{version}-bookworm")
 }
 
 fn command_prefix(runtime: Runtime) -> &'static str {
     match runtime {
         Runtime::Cargo => "",
         Runtime::Nix => "nix develop -c ",
-    }
-}
-
-fn package_selector(package: &Package, options: &CiOptions) -> String {
-    if options.package_scoped {
-        format!(" -p {}", package.name)
-    } else {
-        String::new()
     }
 }
 
@@ -624,7 +872,7 @@ fn labels(config: &CrowCiConfig, runner: &ResolvedRunner) -> BTreeMap<String, St
     labels
 }
 
-fn add_environment(steps: &mut [Step], options: &CiOptions) {
+fn add_environment(steps: &mut [Step], options: &CiOptions, cargo_home: Option<&str>) {
     for step in steps {
         for (key, value) in &options.extra_env {
             step.environment
@@ -632,7 +880,7 @@ fn add_environment(steps: &mut [Step], options: &CiOptions) {
         }
         step.environment
             .entry("CARGO_HOME".to_owned())
-            .or_insert_with(|| Value::String("/tmp/.cargo".to_owned()));
+            .or_insert_with(|| json!(cargo_home.unwrap_or("/tmp/.cargo")));
     }
 }
 
@@ -819,6 +1067,10 @@ pub fn python_ci_file(
     check_outputs: &[String],
     components: &[crate::config::CiComponent],
 ) -> Result<GeneratedFile> {
+    config.validate_runtime(Runtime::Nix)?;
+    if options.format_all_rust_files {
+        bail!("[ci].format_all_rust_files requires runtime = \"cargo\"");
+    }
     if options.independent_lanes {
         bail!("independent_lanes requires GitHub Actions Rust/Nix CI");
     }
@@ -867,10 +1119,7 @@ pub fn python_ci_file(
         name: "ci".to_owned(),
         labels: labels(config, runner),
         platform: config.platform.clone(),
-        when: vec![
-            push_to_maintained_branches(),
-            condition("event", "pull_request"),
-        ],
+        when: build_triggers(config),
         skip_clone: config.skip_clone.then_some(true),
         variables: config.variables.clone(),
         workspace: config.workspace_base.as_ref().map(|base| Workspace {
@@ -898,14 +1147,8 @@ pub fn nix_flake_ci_file(
     nix_builds: &[String],
     components: &[crate::config::CiComponent],
 ) -> Result<GeneratedFile> {
-    #[derive(Serialize)]
-    struct NixWorkflow {
-        #[serde(flatten)]
-        workflow: Workflow,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        clone: Option<Value>,
-    }
     use crate::config::CiComponent;
+    config.validate_runtime(Runtime::Nix)?;
     let image = nix_image(config);
     let selected = |component| components.contains(&component);
     let mut steps = Vec::new();
@@ -951,15 +1194,12 @@ pub fn nix_flake_ci_file(
         bail!("Crow Nix-only CI requires [ci].nix_builds or a flake check");
     }
     add_nix_environment(&mut steps);
-    let workflow = NixWorkflow {
+    let workflow = WorkflowWithClone {
         workflow: Workflow {
             name: "ci".to_owned(),
             labels: labels(config, runner),
             platform: config.platform.clone(),
-            when: vec![
-                push_to_maintained_branches(),
-                condition("event", "pull_request"),
-            ],
+            when: build_triggers(config),
             skip_clone: config.skip_clone.then_some(true),
             variables: config.variables.clone(),
             workspace: config.workspace_base.as_ref().map(|base| Workspace {
@@ -970,13 +1210,7 @@ pub fn nix_flake_ci_file(
         },
         // Full history like the implicit clone (Nix rejects shallow flakes),
         // without the default LFS fetch.
-        clone: (!config.skip_clone).then(|| {
-            json!([{
-                "name": "clone",
-                "image": CROW_CLONE_PLUGIN,
-                "settings": { "depth": 0, "lfs": false },
-            }])
-        }),
+        clone: (!config.skip_clone).then(|| clone_step(0)),
     };
     Ok(GeneratedFile {
         relative_path: crow_path("ci", None, format),

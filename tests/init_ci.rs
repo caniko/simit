@@ -37,6 +37,151 @@ license = "MIT"
     temp
 }
 
+#[cfg(unix)]
+#[test]
+fn tracked_rust_format_excludes_modules_in_actions_and_crow() {
+    for (provider, platform, path) in [
+        ("actions", "github", ".github/workflows/ci.yaml"),
+        ("crow", "forgejo", ".crow/build.yaml"),
+    ] {
+        let temp = init_package(false);
+        let root = temp.path();
+        let git = |args: &[&str]| {
+            let output = Command::new("git")
+                .current_dir(root)
+                .args(args)
+                .output()
+                .unwrap();
+            assert!(output.status.success(), "{output:?}");
+        };
+        git(&["init", "-q"]);
+        let lib = root.join("src/lib.rs");
+        // Two-space indentation requires rustfmt to discover the root config.
+        let formatted = "mod excluded;\n\npub fn answer() -> u32 {\n  42\n}\n";
+        fs::write(&lib, formatted).unwrap();
+        fs::write(root.join("src/excluded.rs"), "fn  excluded( ) { }\n").unwrap();
+        fs::write(root.join("src/odd '$\nname.rs"), "fn odd() {}\n").unwrap();
+        fs::write(root.join("src/crlf.rs"), b"pub fn crlf() {}\r\n").unwrap();
+        fs::write(root.join("src/bom.rs"), b"\xef\xbb\xbfpub fn bom() {}\n").unwrap();
+        fs::write(root.join("rustfmt.toml"), "tab_spaces = 2\n").unwrap();
+        git(&["add", "--", "src"]);
+        fs::write(
+            root.join("simit.toml"),
+            format!(
+                "[ci]\nprovider = '{provider}'\nplatform = '{platform}'\nruntime = 'cargo'\nformat_all_rust_files = true\nformat_excludes = ['src/excluded.rs']\n"
+            ),
+        )
+        .unwrap();
+        let output = simit()
+            .current_dir(root)
+            .args(["init", "ci"])
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "{output:?}");
+        let yaml: serde_yaml::Value =
+            serde_yaml::from_str(&fs::read_to_string(root.join(path)).unwrap()).unwrap();
+        let command = if provider == "crow" {
+            let command = yaml["steps"]
+                .as_sequence()
+                .unwrap()
+                .iter()
+                .flat_map(|step| step["commands"].as_sequence().into_iter().flatten())
+                .filter_map(serde_yaml::Value::as_str)
+                .find(|command| command.contains("git ls-files"))
+                .unwrap();
+            let unescaped = command.replace("$$", "$");
+            assert_eq!(command, unescaped.replace('$', "$$"));
+            unescaped
+        } else {
+            yaml["jobs"]
+                .as_mapping()
+                .unwrap()
+                .values()
+                .flat_map(|job| job["steps"].as_sequence().into_iter().flatten())
+                .find(|step| step["name"] == "Format check")
+                .unwrap()["run"]
+                .as_str()
+                .unwrap()
+                .to_owned()
+        };
+        let run = || {
+            Command::new("sh")
+                .current_dir(root)
+                .args(["-ec", &command])
+                .output()
+                .unwrap()
+        };
+        let output = run();
+        assert!(output.status.success(), "{provider}: {output:?}");
+        fs::write(&lib, "mod excluded;\npub fn answer()->u32{42}\n").unwrap();
+        let output = run();
+        assert!(
+            !output.status.success() && !output.stdout.is_empty(),
+            "{output:?}"
+        );
+        fs::write(&lib, "mod excluded;\nfn invalid( {\n").unwrap();
+        let output = run();
+        assert!(
+            !output.status.success() && !output.stderr.is_empty(),
+            "{output:?}"
+        );
+    }
+}
+
+#[test]
+fn native_no_default_checks_require_a_distinct_feature_set() {
+    for (provider, platform, path) in [
+        ("crow", "forgejo", ".crow/build.yaml"),
+        ("actions", "github", ".github/workflows/ci.yaml"),
+    ] {
+        for (features, all_features, expect_no_default) in [
+            ("", true, false),
+            ("[features]\nopt = []", false, false),
+            ("[features]\ndefault = []\nopt = []", false, false),
+            ("[features]\ndefault = []", true, false),
+            ("[features]\nopt = []", true, true),
+            ("[features]\ndefault = ['opt']\nopt = []", false, true),
+        ] {
+            let temp = init_package(false);
+            let root = temp.path();
+            let manifest = root.join("Cargo.toml");
+            let text = fs::read_to_string(&manifest).unwrap();
+            fs::write(
+                manifest,
+                format!("{}\n{features}\n", text.replace("1.85", "1.93")),
+            )
+            .unwrap();
+            fs::write(
+            root.join("simit.toml"),
+            format!(
+                "[ci]\nprovider = '{provider}'\nplatform = '{platform}'\nruntime = 'cargo'\nall_features = {all_features}\n"
+            ),
+        )
+        .unwrap();
+            let output = simit()
+                .current_dir(root)
+                .args(["init", "ci"])
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            let workflow = fs::read_to_string(root.join(path)).unwrap();
+            assert_eq!(
+                workflow.contains("--no-default-features"),
+                expect_no_default,
+                "{workflow}"
+            );
+            if provider == "crow" {
+                assert!(workflow.contains("rust:1.93-trixie"));
+                assert!(workflow.contains("cargo test --locked"));
+            }
+        }
+    }
+}
+
 #[test]
 fn primary_plan_is_versioned_read_only_and_preserves_other_owners() {
     let temp = init_package(false);
@@ -3055,7 +3200,7 @@ fn crow_python_ci_keeps_the_crow_prebuild() {
     fs::write(
         temp.path().join("simit.toml"),
         format!(
-            "{config}\n[prebuild]\nprovider = \"crow\"\npublish_attic = true\nattic_app = \".#push-flake-inputs\"\nnix_builds = [\".#default\"]\n\n[release.attic]\ncache = \"demo\"\nurl = \"https://attic.example\"\ntoken_name = \"demo\"\ntoken_secret = \"ATTIC_TOKEN\"\n"
+            "{config}\n[ci.crow]\npaths_include = ['**/*.py']\npaths_exclude = ['docs/**']\n\n[prebuild]\nprovider = \"crow\"\npublish_attic = true\nattic_app = \".#push-flake-inputs\"\nnix_builds = [\".#default\"]\n\n[release.attic]\ncache = \"demo\"\nurl = \"https://attic.example\"\ntoken_name = \"demo\"\ntoken_secret = \"ATTIC_TOKEN\"\n"
         ),
     )
     .unwrap();
@@ -3081,6 +3226,12 @@ fn crow_python_ci_keeps_the_crow_prebuild() {
         String::from_utf8_lossy(&output.stderr)
     );
     assert_crow_push_only_maintained_branches(&temp.path().join(".crow/ci.yaml"));
+    let ci: serde_yaml::Value =
+        serde_yaml::from_str(&read(&temp.path().join(".crow/ci.yaml"))).unwrap();
+    for trigger in ci["when"].as_sequence().unwrap() {
+        assert_eq!(trigger["path"]["include"][0], "**/*.py");
+        assert_eq!(trigger["path"]["exclude"][0], "docs/**");
+    }
     assert!(temp.path().join(".crow/prebuild.yaml").is_file());
 }
 
@@ -3404,8 +3555,12 @@ fn crow_prebuilt_cargo_tools_run_in_their_own_gate_containers() {
         let command = |name: &str| {
             let step = steps.iter().find(|step| step["name"] == name).unwrap();
             let commands = step["commands"].as_sequence().unwrap();
-            assert_eq!(commands.len(), 1, "{name}");
-            commands[0].as_str().unwrap()
+            let pinned = runtime == "cargo" && matches!(name, "cargo-deny" | "cargo-nextest");
+            assert_eq!(commands.len(), 1 + usize::from(pinned), "{name}");
+            if pinned {
+                assert!(commands[0].as_str().unwrap().contains("$$(rustup default)"));
+            }
+            commands.last().unwrap().as_str().unwrap()
         };
         let nextest_check = steps.iter().any(|step| step["name"] == "nextest-tool");
         if runtime == "nix" {
@@ -6223,7 +6378,14 @@ check_command = "cargo xtask ci"
     assert!(status.success());
 
     let ci = read(&temp.path().join(".crow/build.yaml"));
-    assert!(ci.contains("rustup component add clippy rustfmt && cargo xtask ci"));
+    let (_, command) = ci.split_once("$$(rustup default)").unwrap();
+    let (_, command) = command
+        .split_once("cargo clippy --version >/dev/null 2>&1 || rustup component add clippy")
+        .unwrap();
+    let (_, command) = command
+        .split_once("rustfmt --version >/dev/null 2>&1 || rustup component add rustfmt")
+        .unwrap();
+    assert!(command.contains("cargo xtask ci"));
 }
 
 #[test]
@@ -6412,6 +6574,36 @@ fn aggregate_workspace_strategy_generates_one_workspace_workflow() {
         "run: nix develop -c cargo clippy --workspace --all-targets --all-features -- --deny warnings"
     ));
     assert!(!ci.contains("cargo package"));
+}
+
+#[test]
+fn actions_aggregate_ignores_excluded_packages_for_image_and_feature_passes() {
+    let temp = init_workspace_fixture();
+    let root = temp.path();
+    let beta = root.join("crates/beta/Cargo.toml");
+    fs::write(&beta, read(&beta).replace("1.85", "1.93")).unwrap();
+    for (excluded, image, no_default) in [
+        ("alpha", "rust:1.93-trixie", true),
+        ("beta", "rust:1.85-bookworm", false),
+    ] {
+        fs::write(root.join("simit.toml"), format!("[ci]\nplatform = 'forgejo'\nruntime = 'cargo'\nworkspace = true\nworkspace_strategy = 'aggregate'\nexclude_packages = ['{excluded}']\n")).unwrap();
+        let run = |args: &[&str]| {
+            simit_with_user_config(root)
+                .current_dir(root)
+                .args(args)
+                .output()
+                .unwrap()
+        };
+        let output = run(&["init", "ci"]);
+        assert!(output.status.success(), "{output:?}");
+        let ci = read(&root.join(".forgejo/workflows/ci.yaml"));
+        assert!(ci.contains(image), "{ci}");
+        assert_eq!(ci.contains("--no-default-features"), no_default, "{ci}");
+        let audit = run(&["projects", "audit", "--json", "."]);
+        assert!(audit.status.success(), "{audit:?}");
+        let audit: serde_json::Value = serde_json::from_slice(&audit.stdout).unwrap();
+        assert_eq!(audit["projects"][0]["ciStatus"], "managed", "{audit}");
+    }
 }
 
 #[test]
@@ -6738,6 +6930,83 @@ fn aggregate_workspace_strategy_can_limit_tests_to_library_targets() {
         ci.contains("run: nix develop -c cargo test --workspace --lib"),
         "generated CI:\n{ci}"
     );
+}
+
+#[test]
+fn aggregate_unit_tests_only_repeat_target_groups_with_distinct_features() {
+    for (provider, platform, path) in [
+        ("crow", "forgejo", ".crow/build.yaml"),
+        ("actions", "github", ".github/workflows/ci.yaml"),
+    ] {
+        let temp = init_workspace_fixture();
+        let root = temp.path();
+        let alpha = root.join("crates/alpha/Cargo.toml");
+        let alpha_manifest = read(&alpha);
+        let beta = root.join("crates/beta/Cargo.toml");
+        let manifest = read(&beta);
+        let beta_manifest = manifest.split("[features]").next().unwrap();
+        fs::remove_file(root.join("crates/beta/src/lib.rs")).unwrap();
+        fs::write(root.join("crates/beta/src/main.rs"), "fn main() {}\n").unwrap();
+        let optional = "\n[features]\nopt = []\n";
+        let default = "\n[features]\ndefault = ['opt']\nopt = []\n";
+        for (all_features, lib_features, bin_features, lib_repeats, bin_repeats) in [
+            (true, optional, "", true, false),
+            (false, default, optional, true, false),
+            (false, optional, default, false, true),
+        ] {
+            fs::write(&alpha, format!("{alpha_manifest}{lib_features}")).unwrap();
+            fs::write(&beta, format!("{beta_manifest}{bin_features}")).unwrap();
+            fs::write(
+                root.join("simit.toml"),
+                format!("[ci]\nprovider = '{provider}'\nplatform = '{platform}'\nruntime = 'cargo'\nworkspace = true\nworkspace_strategy = 'aggregate'\nunit_tests_only = true\nall_features = {all_features}\n"),
+            ).unwrap();
+            let output = simit()
+                .current_dir(root)
+                .args(["init", "ci"])
+                .output()
+                .unwrap();
+            assert!(output.status.success(), "{output:?}");
+            let workflow = read(&root.join(path));
+            for (target, repeats) in [(" --lib", lib_repeats), (" --bins", bin_repeats)] {
+                let passes: Vec<_> = workflow
+                    .lines()
+                    .filter(|line| line.contains("cargo test ") && line.contains(target))
+                    .map(|line| line.contains("--no-default-features"))
+                    .collect();
+                let expected: &[bool] = if repeats { &[false, true] } else { &[false] };
+                assert_eq!(passes, expected, "{provider}, {all_features}, {target}");
+            }
+        }
+    }
+}
+
+#[test]
+fn actions_cargo_runtime_survives_removing_workflows_on_a_flake_repo() {
+    let temp = init_package(true);
+    let root = temp.path();
+    fs::write(
+        root.join("flake.nix"),
+        "{ outputs = _: { checks = {}; }; }\n",
+    )
+    .unwrap();
+    let run = |args: &[&str]| {
+        let output = simit()
+            .current_dir(root)
+            .args(["init", "ci", "--platform", "github"])
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "{output:?}");
+    };
+    run(&["--runtime", "cargo"]);
+    let config: toml_edit::DocumentMut = read(&root.join("simit.toml")).parse().unwrap();
+    assert_eq!(
+        config["ci"].get("runtime").and_then(|item| item.as_str()),
+        Some("cargo")
+    );
+    fs::remove_dir_all(root.join(".github/workflows")).unwrap();
+    run(&[]);
+    assert!(read(&root.join(".github/workflows/ci.yaml")).contains("run: cargo test"));
 }
 
 #[test]

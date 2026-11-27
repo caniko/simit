@@ -143,15 +143,12 @@ fn cargo_split_jobs_keep_feature_and_msrv_selection() {
 }
 
 #[test]
-fn explicit_default_feature_policy_is_respected_by_nix_jobs() {
+fn nix_jobs_do_not_duplicate_empty_default_feature_checks() {
     let directory = fixture("nix", false, false);
     for name in ["ci", "publish-crate"] {
         let runs = commands(directory.path(), name);
         assert!(runs.iter().any(|run| run == "nix develop -c cargo test"));
-        assert!(
-            runs.iter()
-                .any(|run| run == "nix develop -c cargo test --no-default-features")
-        );
+        assert!(!runs.iter().any(|run| run.contains("--no-default-features")));
         assert!(!runs.iter().any(|run| run.contains("--all-features")));
     }
 }

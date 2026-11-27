@@ -57,6 +57,18 @@ pub struct Target {
 }
 
 impl Package {
+    pub fn has_any_feature(&self) -> bool {
+        self.features
+            .iter()
+            .any(|(name, features)| name != "default" || !features.is_empty())
+    }
+
+    pub fn has_non_empty_default_feature(&self) -> bool {
+        self.features
+            .get("default")
+            .is_some_and(|features| !features.is_empty())
+    }
+
     pub fn has_doctests(&self) -> bool {
         self.targets.iter().any(|target| target.doctest)
     }
@@ -99,6 +111,11 @@ impl Package {
             .as_ref()
             .is_none_or(|registries| !registries.is_empty())
     }
+}
+
+pub(crate) fn rust_version_key(version: &str) -> [u64; 3] {
+    let mut parts = version.split('.');
+    std::array::from_fn(|_| parts.next().and_then(|part| part.parse().ok()).unwrap_or(0))
 }
 
 #[derive(Debug, Clone, Deserialize)]

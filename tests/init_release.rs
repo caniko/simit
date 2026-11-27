@@ -345,8 +345,17 @@ fn release_validation_only_provisions_nix_for_gates_that_need_it() {
 
 #[test]
 fn forgejo_cargo_release_uses_forgejo_artifact_transport() {
+    let ci = r#"
+[ci]
+provider = "actions"
+platform = "github"
+[[ci.manual_gates]]
+id = "benchmark"
+run = "cargo bench"
+artifacts = { name = "result", paths = ["result/"] }
+"#;
     let workflow = render_release(
-        &CARGO_RELEASE
+        &format!("{ci}{CARGO_RELEASE}")
             .replace("[release.github]", "[release.codeberg]")
             .replace(
                 "build_commands = [\"rm -rf release\", \"mkdir release\"]\n",
@@ -359,6 +368,7 @@ fn forgejo_cargo_release_uses_forgejo_artifact_transport() {
     assert!(build.contains("https://code.forgejo.org/actions/upload-artifact@"));
     assert!(publish.contains("https://code.forgejo.org/actions/download-artifact@"));
     assert!(publish.contains("Publish Forgejo release"));
+    assert!(!workflow.contains("benchmark"));
     assert!(!publish.contains("has no Nix bundles or build_commands"));
     assert!(!build.contains("install-nix-action"));
 }
