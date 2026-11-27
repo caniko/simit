@@ -798,7 +798,7 @@ fn ancestor_locks_are_skipped_unless_they_own_or_declare_the_workspace_package()
                 "{output:?}"
             );
             assert_eq!(fs::read(root.join("node/package.json")).unwrap(), original);
-            assert!(git(root, &["tag", "--list"]).is_empty());
+            assert_eq!(git(root, &["tag", "--list"]), "");
         }
     }
 }

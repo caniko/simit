@@ -472,8 +472,8 @@ fn generated_caller_preserves_provider_values_as_data_exactly_once_at_project_ro
             root.path().canonicalize().unwrap().to_str().unwrap()
         );
         assert!(!root.path().join("injected").exists());
-        assert!(output.stdout.is_empty());
-        assert!(output.stderr.is_empty());
+        assert_eq!(output.stdout.as_slice(), b"");
+        assert_eq!(output.stderr.as_slice(), b"");
     }
 }
 
@@ -531,8 +531,8 @@ fn provider_staging_aliases_do_not_reach_gate_subprocesses() {
             !environment.contains("SIMIT_NATIVE_GATE_VALUE_"),
             "native alias leaked"
         );
-        assert!(output.stdout.is_empty());
-        assert!(output.stderr.is_empty());
+        assert_eq!(output.stdout.as_slice(), b"");
+        assert_eq!(output.stderr.as_slice(), b"");
     }
 }
 

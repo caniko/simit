@@ -227,12 +227,7 @@ fn max_depth_zero_only_inspects_root() {
         .output()
         .unwrap();
     assert!(output.status.success());
-    assert!(
-        registry_json(data_home.path())
-            .as_array()
-            .unwrap()
-            .is_empty()
-    );
+    assert_eq!(registry_json(data_home.path()).as_array().unwrap().len(), 0);
 }
 
 #[test]

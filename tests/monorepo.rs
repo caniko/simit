@@ -1246,8 +1246,8 @@ fn independent_cargo_prereleases_fail_before_release_mutation() {
             fs::read_to_string(root.join("crates/worker/Cargo.toml")).unwrap(),
             manifest
         );
-        assert!(fixture_git(root, &["status", "--porcelain"]).is_empty());
-        assert!(fixture_git(root, &["tag", "--list"]).is_empty());
+        assert_eq!(fixture_git(root, &["status", "--porcelain"]), "");
+        assert_eq!(fixture_git(root, &["tag", "--list"]), "");
     }
 }
 
@@ -1314,8 +1314,8 @@ fn component_bumps_reject_incompatible_local_dependency_requirements() {
             manifest
         );
         assert_eq!(fs::read(root.join("Cargo.lock")).unwrap(), lock);
-        assert!(fixture_git(root, &["status", "--porcelain"]).is_empty());
-        assert!(fixture_git(root, &["tag", "--list"]).is_empty());
+        assert_eq!(fixture_git(root, &["status", "--porcelain"]), "");
+        assert_eq!(fixture_git(root, &["tag", "--list"]), "");
         // A patch bump remains within the admitted requirement.
         let output = common::simit()
             .current_dir(root)
@@ -1490,7 +1490,7 @@ fn cargo_sync_up_refuses_to_move_tags_after_prerequisite_gate_failure() {
         fs::read(root.join("crates/worker/Cargo.toml")).unwrap(),
         manifest
     );
-    assert!(fixture_git(root, &["tag", "--list", "worker/v0.1.1"]).is_empty());
+    assert_eq!(fixture_git(root, &["tag", "--list", "worker/v0.1.1"]), "");
 }
 
 #[test]
@@ -1596,7 +1596,7 @@ fn cargo_release_rejects_gate_created_changes_and_commits() {
             fs::read(root.join("crates/worker/Cargo.toml")).unwrap(),
             before
         );
-        assert!(fixture_git(root, &["tag", "--list"]).is_empty());
+        assert_eq!(fixture_git(root, &["tag", "--list"]), "");
     }
 }
 
@@ -1768,7 +1768,7 @@ fn cargo_component_releases_reject_symlinked_changelogs() {
     );
     assert_eq!(fs::read_to_string(target).unwrap(), original);
     assert_eq!(fixture_git(root, &["rev-parse", "HEAD"]), head);
-    assert!(fixture_git(root, &["tag", "--list"]).is_empty());
+    assert_eq!(fixture_git(root, &["tag", "--list"]), "");
 }
 
 #[test]
@@ -2032,7 +2032,7 @@ fn component_release_mutates_only_its_package_and_adjacent_changelog() {
         .unwrap();
     assert!(output.status.success(), "{output:?}");
     assert_eq!(git(&["tag", "--list"]).trim(), "worker/v0.1.1");
-    assert!(git(&["status", "--porcelain"]).is_empty());
+    assert_eq!(git(&["status", "--porcelain"]), "");
     assert_eq!(
         fs::read_to_string(temp.path().join("Cargo.toml")).unwrap(),
         root
@@ -2379,7 +2379,7 @@ fn independent_publication_qualifies_native_components_and_keeps_version_drift_s
         .filter_map(|k| k.as_str())
         .filter(|k| k.starts_with("publish-") && *k != "publish-report")
         .collect();
-    assert!(publish_jobs.is_empty());
+    assert_eq!(publish_jobs.len(), 0);
     assert!(text.contains("git verify-tag"));
     assert!(text.contains("git rev-parse --verify \"refs/tags/${tag}^{commit}\""));
     assert!(text.contains("checkout_sha=\"$(git rev-parse --verify HEAD)\""));

@@ -751,7 +751,7 @@ mod tests {
         let mut request = request("inspect");
         let inspected = replay(&request, &forge, &crow).unwrap();
         assert_eq!(inspected.revision, REVISION);
-        assert!(inspected.requirements.is_empty());
+        assert_eq!(inspected.requirements.len(), 0);
         // The commit's real push status contexts bind to Crow workflow names.
         forge[BRANCH]["enable_status_check"] = json!(true);
         forge[BRANCH]["status_check_contexts"] = json!(
@@ -1265,7 +1265,7 @@ mod tests {
                             .into_bytes())
                     })
                     .unwrap();
-                    assert!(!admitted.is_empty(), "{runtime:?} {paths:?}");
+                    assert_ne!(admitted.len(), 0, "{runtime:?} {paths:?}");
                 }
             }
         }

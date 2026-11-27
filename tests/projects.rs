@@ -359,7 +359,7 @@ fn clear_state_removes_all_registry_entries() {
     assert!(stdout.contains("cleared project registry state"));
 
     let value = registry_json(data_home.path());
-    assert!(value.as_array().unwrap().is_empty());
+    assert_eq!(value.as_array().unwrap().len(), 0);
 }
 
 #[test]

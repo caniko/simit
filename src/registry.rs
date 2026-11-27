@@ -2751,7 +2751,7 @@ mod tests {
         );
         assert!(pages_is_supplementary);
         assert!(unmarked.iter().all(is_supplementary_workflow));
-        assert!(!marked.is_empty());
+        assert_ne!(marked.len(), 0);
     }
 
     /// The shape `github_pages_workflow` renders: every marker the GitHub
@@ -3085,9 +3085,9 @@ jobs:
         assert_eq!(audit.status, FeatureStatus::Absent);
         assert!(audit.provider.is_none());
         assert!(audit.platform.is_none());
-        assert!(audit.changed_files.is_empty());
-        assert!(audit.missing_files.is_empty());
-        assert!(audit.extra_generated_files.is_empty());
+        assert_eq!(audit.changed_files.len(), 0);
+        assert_eq!(audit.missing_files.len(), 0);
+        assert_eq!(audit.extra_generated_files.len(), 0);
     }
 
     #[test]

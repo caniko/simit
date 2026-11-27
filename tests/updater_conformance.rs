@@ -161,5 +161,5 @@ fn every_generated_workflow_shape_passes_updater_source_admission() {
             }
         }
     }
-    assert!(failures.is_empty(), "{}", failures.join("\n"));
+    assert_eq!(failures.len(), 0, "{}", failures.join("\n"));
 }

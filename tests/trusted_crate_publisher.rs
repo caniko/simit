@@ -160,7 +160,7 @@ fn assert_trusted_credential_boundary(mode: &str) {
                 .as_str()
                 .or_else(|| job["environment"]["name"].as_str())
                 .expect("publication credentials require a protected environment");
-            assert!(!environment.is_empty(), "{workflow_path}");
+            assert_ne!(environment.len(), 0, "{workflow_path}");
             assert!(
                 !environment.contains("${{"),
                 "candidate input must not select the credential environment: {workflow_path}"

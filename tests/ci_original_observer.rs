@@ -341,8 +341,8 @@ fn persistent_provider_error_retains_an_explicit_failed_receipt() {
     let r = receipt(&root);
     assert_eq!(r["capture_complete"], false);
     assert_eq!(r["qualified"], false);
-    assert!(!r["error"].as_str().unwrap().is_empty());
-    assert!(!r["members"].as_object().unwrap().is_empty());
+    assert_ne!(r["error"].as_str().unwrap(), "");
+    assert_ne!(r["members"].as_object().unwrap().len(), 0);
 }
 
 #[test]

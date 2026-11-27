@@ -1694,7 +1694,8 @@ mod tests {
         )
         .unwrap();
         let steps = push_steps(&workflow, false).unwrap();
-        assert!(steps.bound.is_empty() && steps.jobs.is_none());
+        assert_eq!(steps.bound.len(), 0);
+        assert!(steps.jobs.is_none());
         // Any other predicate is still bound or refused.
         let guarded: serde_yaml::Value =
             serde_yaml::from_str("jobs:\n  build:\n    steps:\n      - name: Test\n        if: ${{ vars.SKIP != '' }}\n        run: test\n")
@@ -1955,7 +1956,7 @@ mod tests {
         closed["state"] = json!("closed");
         *listed.borrow_mut() = json!([closed, open]);
         assert_eq!(replay(&request).unwrap().1.unwrap().id, "7");
-        assert!(writes.borrow().is_empty());
+        assert_eq!(writes.borrow().len(), 0);
         request.operation = "merge".into();
         request.change = Some("7".into());
         let (status, change) = replay(&request).unwrap();
@@ -1963,7 +1964,7 @@ mod tests {
             (status.as_str(), change.unwrap().merge_commit),
             ("pending", None)
         );
-        assert!(writes.borrow().is_empty());
+        assert_eq!(writes.borrow().len(), 0);
         for (key, value) in [
             ("mergeable_state", json!("dirty")),
             (
@@ -1981,7 +1982,7 @@ mod tests {
             changed[key] = value;
             *pull.borrow_mut() = changed;
             assert!(replay(&request).is_err(), "{key}");
-            assert!(writes.borrow().is_empty());
+            assert_eq!(writes.borrow().len(), 0);
         }
         *pull.borrow_mut() = {
             let mut clean = open.clone();
@@ -1991,7 +1992,7 @@ mod tests {
         // A target that moved past the candidate's source is never merged.
         *target.borrow_mut() = "6".repeat(40);
         assert_eq!(replay(&request).unwrap().0, "pending");
-        assert!(writes.borrow().is_empty());
+        assert_eq!(writes.borrow().len(), 0);
         *target.borrow_mut() = source.clone();
         // Linear history skips the allowed merge commit for squash.
         let (status, change) = replay(&request).unwrap();
@@ -2020,7 +2021,7 @@ mod tests {
             (change.state.as_str(), change.merge_commit),
             ("merged", Some("f".repeat(40)))
         );
-        assert!(writes.borrow().is_empty());
+        assert_eq!(writes.borrow().len(), 0);
         request.change = None;
         pull.borrow_mut()["merged_at"] = Value::Null;
         let mut retargeted = open;
@@ -2572,7 +2573,7 @@ mod tests {
                 .unwrap()
                 .push(steps[release].clone());
             assert!(replay(&request, &duplicate).is_err());
-            let mut duplicate = jobs.clone();
+            let mut duplicate = jobs;
             duplicate["jobs"][1]["name"] = duplicate["jobs"][0]["name"].clone();
             assert!(replay(&request, &duplicate).is_err());
         }
@@ -2730,11 +2731,7 @@ mod tests {
         assert_eq!(admitted[0].authority, "777");
         policy["required_status_checks"]["contexts"] = json!(["missing"]);
         assert!(protection_requirements(&policy, 777).is_err());
-        assert!(
-            protection_requirements(&Value::Null, 777)
-                .unwrap()
-                .is_empty()
-        );
+        assert_eq!(protection_requirements(&Value::Null, 777).unwrap().len(), 0);
     }
 
     #[test]
@@ -3012,10 +3009,11 @@ mod tests {
         })
         .unwrap();
         assert_eq!(paths, BTreeSet::from([".github/workflows/ci.yaml".into()]));
-        assert!(
+        assert_eq!(
             generator_workflow_paths(&runs, "custom-default", |_| Ok(false))
                 .unwrap()
-                .is_empty()
+                .len(),
+            0
         );
     }
 

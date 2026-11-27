@@ -2518,13 +2518,13 @@ if os.fork() == 0:
         let adopted = f.update(true).unwrap();
         assert_eq!(adopted.phase, "qualified");
         assert_eq!(adopted.managed["new-managed.txt"], None);
-        assert!(
+        assert_eq!(
             git(
                 &f.remote,
                 &["ls-tree", &adopted.candidate, "--", "new-managed.txt"]
             )
-            .unwrap()
-            .is_empty()
+            .unwrap(),
+            ""
         );
     }
 
@@ -2541,7 +2541,7 @@ if os.fork() == 0:
         .unwrap();
         assert_ne!(hashes(&f.source, paths(), None).unwrap(), committed);
         assert_eq!(hashes(&f.source, paths(), Some("HEAD")).unwrap(), committed);
-        assert!(git(&f.source, &["diff", "--cached"]).unwrap().is_empty());
+        assert_eq!(git(&f.source, &["diff", "--cached"]).unwrap(), "");
         git(&f.source, &["config", "core.filemode", "false"]).unwrap();
         assert_eq!(hashes(&f.source, paths(), None).unwrap(), committed);
         git(
@@ -3845,7 +3845,7 @@ else:
         assert_eq!(environment["GIT_TERMINAL_PROMPT"], "0");
         // Nix Python wrappers may normalize "1" to "true"; Python treats
         // every nonempty value as disabling user-site packages.
-        assert!(!environment["PYTHONNOUSERSITE"].is_empty());
+        assert_ne!(environment["PYTHONNOUSERSITE"], "");
     }
 
     #[test]
@@ -4008,7 +4008,8 @@ else:
         )
         .unwrap();
         let (plan, qualification) = merge(&["ci".into()]).unwrap();
-        assert!(plan.patches.is_empty() && plan.schema_matches());
+        assert_eq!(plan.patches.len(), 0);
+        assert!(plan.schema_matches());
         assert_eq!(plan.files[1].content, extra.files[1].content);
         assert_eq!(qualification, [".github/workflows/ci.yaml"]);
         let (plan, _) = merge(&["ci".into(), "ci-extra".into()]).unwrap();
@@ -4085,7 +4086,8 @@ else:
         fs::remove_file(&obsolete_path).unwrap();
         fs::write(&obsolete_path, &marked).unwrap();
         let (plan, qualification) = merge(&["ci".into()]).unwrap();
-        assert!(plan.patches.is_empty() && plan.schema_matches());
+        assert_eq!(plan.patches.len(), 0);
+        assert!(plan.schema_matches());
         assert_eq!(plan.files[1].relative_path, Path::new(release_path));
         assert_eq!(plan.obsolete, [PathBuf::from(obsolete)]);
         assert_eq!(qualification, [".github/workflows/ci.yaml"]);
@@ -4246,7 +4248,7 @@ assert nodes['decoy']['locked']['rev'] == '{decoy_revision}'
         f.control(
             &json!({"candidate":"pending","expectedWorkflows":[".github/workflows/ci.yaml"]}),
         );
-        assert!(f.update(true).unwrap().patches.is_empty());
+        assert_eq!(f.update(true).unwrap().patches.len(), 0);
     }
 
     #[test]
@@ -4344,7 +4346,7 @@ assert nodes['decoy']['locked']['rev'] == '{decoy_revision}'
             .map(|path| crate::review::read_json::<serde_json::Value>(&path).unwrap())
             .filter(|evidence| evidence[0]["operation"] == "admit")
             .collect::<Vec<_>>();
-        assert!(!admissions.is_empty());
+        assert_ne!(admissions.len(), 0);
         for evidence in admissions {
             assert_eq!(evidence[0]["schemaVersion"], 2);
             assert_eq!(evidence[0]["plan"]["patches"].as_array().unwrap().len(), 2);
@@ -5344,10 +5346,9 @@ assert nodes['decoy']['locked']['rev'] == '{decoy_revision}'
                 "{status}: {error}"
             );
             assert!(!f.root().join("receipt.json").exists());
-            assert!(
-                git(&f.remote, &["for-each-ref", "refs/heads/maintenance/"])
-                    .unwrap()
-                    .is_empty()
+            assert_eq!(
+                git(&f.remote, &["for-each-ref", "refs/heads/maintenance/"]).unwrap(),
+                ""
             );
             assert_eq!(f.remote_head(), source);
         }
@@ -5374,11 +5375,7 @@ assert nodes['decoy']['locked']['rev'] == '{decoy_revision}'
                     .contains("adapter rejected admit")
             );
             assert_eq!(f.remote_head(), retained.source);
-            assert!(
-                git(&f.remote, &["for-each-ref", &reference])
-                    .unwrap()
-                    .is_empty()
-            );
+            assert_eq!(git(&f.remote, &["for-each-ref", &reference]).unwrap(), "");
             assert_eq!(fs::read(f.root().join("receipt.json")).unwrap(), before);
             f.control(&json!({}));
             let adopted = f.update(true).unwrap();
@@ -5408,7 +5405,7 @@ assert nodes['decoy']['locked']['rev'] == '{decoy_revision}'
                 source
             );
             assert_eq!(f.pulls()[0]["state"], "merged");
-            assert!(f.maintenance_refs().is_empty(), "{style}");
+            assert_eq!(f.maintenance_refs(), "", "{style}");
             assert_eq!(f.update(true).unwrap().phase, "unchanged");
         }
     }
@@ -5461,7 +5458,7 @@ assert nodes['decoy']['locked']['rev'] == '{decoy_revision}'
             let pulls = f.pulls();
             assert_eq!(pulls[0]["state"], "closed", "{change}");
             assert_eq!(pulls[1]["state"], "merged", "{change}");
-            assert!(f.maintenance_refs().is_empty(), "{change}");
+            assert_eq!(f.maintenance_refs(), "", "{change}");
             assert!(
                 f.root()
                     .join(format!(
@@ -5485,7 +5482,7 @@ assert nodes['decoy']['locked']['rev'] == '{decoy_revision}'
         let landed = adopted.landed.unwrap();
         assert_ne!(landed, parked.candidate);
         assert_eq!(f.remote_head(), landed);
-        assert!(f.maintenance_refs().is_empty());
+        assert_eq!(f.maintenance_refs(), "");
     }
 
     #[test]
@@ -5563,7 +5560,7 @@ assert nodes['decoy']['locked']['rev'] == '{decoy_revision}'
             legacy.as_object_mut().unwrap().remove(key).unwrap();
         }
         save(&path, &legacy).unwrap();
-        assert!(!f.maintenance_refs().is_empty());
+        assert_ne!(f.maintenance_refs(), "");
         f.control(&json!({}));
         let adopted = f.update(true).unwrap();
         assert_eq!(adopted.phase, "qualified");
@@ -5574,7 +5571,7 @@ assert nodes['decoy']['locked']['rev'] == '{decoy_revision}'
         assert_eq!(adopted.candidate, pending.candidate);
         assert_eq!(adopted.landed, None);
         assert_eq!(f.remote_head(), pending.candidate);
-        assert!(f.maintenance_refs().is_empty());
+        assert_eq!(f.maintenance_refs(), "");
     }
 
     #[test]
@@ -5657,7 +5654,8 @@ assert nodes['decoy']['locked']['rev'] == '{decoy_revision}'
                 .is_some_and(|name| name.to_string_lossy().starts_with("rollout-"))
             {
                 let frozen: FrozenSelection = crate::review::read_json(&path).unwrap();
-                assert!(frozen.completed && frozen.projects.is_empty());
+                assert!(frozen.completed);
+                assert_eq!(frozen.projects.len(), 0);
             }
         }
         // Repeating it is a no-op; pruning deletes only the simit-shaped orphan.
@@ -5814,7 +5812,7 @@ assert nodes['decoy']['locked']['rev'] == '{decoy_revision}'
         f.publish(&f.source, "advance the parked target");
         let receipt = fs::read(f.root().join("receipt.json")).unwrap();
         let refs = f.maintenance_refs();
-        assert!(!refs.is_empty());
+        assert_ne!(refs, "");
         assert_eq!(f.update(false).unwrap().phase, "proposed");
         assert_eq!(fs::read(f.root().join("receipt.json")).unwrap(), receipt);
         assert_eq!(f.maintenance_refs(), refs);
@@ -5826,7 +5824,7 @@ assert nodes['decoy']['locked']['rev'] == '{decoy_revision}'
         fs::write(f.source.join("application.txt"), "moved target\n").unwrap();
         f.publish(&f.source, "advance the pending target");
         let refs = f.maintenance_refs();
-        assert!(!refs.is_empty());
+        assert_ne!(refs, "");
         assert_eq!(f.update(false).unwrap().phase, "preview");
         assert_eq!(f.maintenance_refs(), refs);
     }

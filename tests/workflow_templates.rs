@@ -707,7 +707,7 @@ fn configured_template_sources_are_in_the_actual_cargo_package_file_set() {
     let templates = manifest["package"]["metadata"]["simit"]["ci"]["workflow_templates"]
         .as_table()
         .unwrap();
-    assert!(!templates.is_empty());
+    assert_ne!(templates.len(), 0);
     let output = std::process::Command::new("cargo")
         .current_dir(root)
         .args(["package", "--list", "--allow-dirty", "--offline"])
@@ -964,9 +964,9 @@ fn active_workflow_hard_links_are_rejected_but_exact_destinations_remain_declare
         assert!(generate(&temp, &["--check", "--diff"]).status.success());
         let audit = audit_ci(temp.path()).unwrap();
         assert_eq!(audit.status, FeatureStatus::ManagedExtra);
-        assert!(audit.changed_files.is_empty());
-        assert!(audit.missing_files.is_empty());
-        assert!(audit.extra_generated_files.is_empty());
+        assert_eq!(audit.changed_files.len(), 0);
+        assert_eq!(audit.missing_files.len(), 0);
+        assert_eq!(audit.extra_generated_files.len(), 0);
         assert_eq!(fs::read(&active).unwrap(), foreign);
     }
 }
@@ -1792,12 +1792,14 @@ fn project_audit_emits_an_executable_repair_when_only_templates_remain() {
                     .unwrap_or_else(|error| panic!("{report:?}: {error}"));
                 let project = &report["projects"][0];
                 assert_eq!(project["ciStatus"], "drift", "{project:?}");
-                assert!(
-                    project["errors"].as_array().unwrap().is_empty(),
+                assert_eq!(
+                    project["errors"].as_array().unwrap().len(),
+                    0,
                     "{project:?}"
                 );
-                assert!(
-                    !project["missingFiles"].as_array().unwrap().is_empty(),
+                assert_ne!(
+                    project["missingFiles"].as_array().unwrap().len(),
+                    0,
                     "{project:?}"
                 );
                 let command = project["regenerateCommand"]

@@ -122,7 +122,7 @@ fn render_output_writes_file_without_stdout() {
         .unwrap();
 
     assert!(output.status.success());
-    assert!(output.stdout.is_empty());
+    assert_eq!(output.stdout.as_slice(), b"");
     let formula = read(&output_path);
     assert!(formula.contains("version \"1.2.3\""));
     assert_eq!(formula.matches("sha256 :no_check").count(), 3);

@@ -388,7 +388,7 @@ mod tests {
                 "x86_64-unknown-linux-musl".to_owned()
             ]
         );
-        assert!(archive_targets("").is_empty());
+        assert_eq!(archive_targets("").len(), 0);
     }
 
     #[test]

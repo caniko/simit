@@ -79,8 +79,8 @@ video = ["ffmpeg-python"]
 "#,
     );
     let parsed = simit::python::load_project(root.path()).unwrap();
-    assert!(parsed.scripts.is_empty());
-    assert!(parsed.optional_extras.is_empty());
+    assert_eq!(parsed.scripts.len(), 0);
+    assert_eq!(parsed.optional_extras.len(), 0);
 }
 
 #[test]

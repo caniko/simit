@@ -698,7 +698,7 @@ mod tests {
     }
 
     #[test]
-    #[expect(
+    #[allow(
         clippy::float_cmp,
         reason = "The selected fixture durations are exactly representable"
     )]
@@ -711,7 +711,7 @@ mod tests {
     }
 
     #[test]
-    #[expect(
+    #[allow(
         clippy::float_cmp,
         reason = "The compared fixture totals and averages are exactly representable"
     )]
@@ -749,7 +749,7 @@ mod tests {
     }
 
     #[test]
-    #[expect(
+    #[allow(
         clippy::float_cmp,
         reason = "A quota denial must contribute exactly zero time"
     )]

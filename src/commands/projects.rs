@@ -945,8 +945,14 @@ mod tests {
 
     #[test]
     fn attention_classifier_ignores_non_issue_hook_states() {
-        assert!(attention_items(&features(&[("hooks", FeatureStatus::Configured)])).is_empty());
-        assert!(attention_items(&features(&[("hooks", FeatureStatus::Installed)])).is_empty());
+        assert_eq!(
+            attention_items(&features(&[("hooks", FeatureStatus::Configured)])).len(),
+            0
+        );
+        assert_eq!(
+            attention_items(&features(&[("hooks", FeatureStatus::Installed)])).len(),
+            0
+        );
     }
 
     #[test]
@@ -958,6 +964,6 @@ mod tests {
             ("hooks", FeatureStatus::Installed),
         ]));
 
-        assert!(items.is_empty());
+        assert_eq!(items.len(), 0);
     }
 }

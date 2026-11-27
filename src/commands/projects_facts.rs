@@ -2103,7 +2103,7 @@ mod tests {
             refs.variables,
             BTreeSet::from(["SIMIT_REVISION".to_owned()])
         );
-        assert!(refs.floating.is_empty());
+        assert_eq!(refs.floating, BTreeSet::new());
     }
 
     #[test]
@@ -2155,6 +2155,6 @@ mod tests {
             "root": {"inputs": {"simit": "simit"}},
             "simit": {"locked": {"type": "github", "owner": "caniko", "repo": "simit", "host": "ghe.example", "rev": "a"}}
         }});
-        assert!(flake_inputs(&ghe).unwrap().is_empty());
+        assert_eq!(flake_inputs(&ghe).unwrap().len(), 0);
     }
 }

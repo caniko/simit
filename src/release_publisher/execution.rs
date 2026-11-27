@@ -2080,7 +2080,7 @@ mod tests {
                 .args(["status", "--porcelain"]),
         )
         .unwrap();
-        assert!(status.stdout.is_empty());
+        assert_eq!(status.stdout.as_slice(), b"");
     }
 
     #[test]

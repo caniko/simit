@@ -6776,7 +6776,7 @@ asset = "sorrel-{version}-x86_64-windows.exe"
             )
             .is_err()
         );
-        assert!(ArtifactsConfig::default().extract.is_empty());
+        assert_eq!(ArtifactsConfig::default().extract.len(), 0);
     }
 
     #[test]
@@ -6925,7 +6925,7 @@ binaries = ["demo"]
 archive = "demo-{version}.tar.gz"
 prefix = "demo-{version}"
 "#;
-        assert!(parse(job).unwrap().effective_nix_bundle_attrs().is_empty());
+        assert_eq!(parse(job).unwrap().effective_nix_bundle_attrs().len(), 0);
         for (old, new, field) in [
             ("linux-amd64", "linux.amd64", ": id"),
             ("ubuntu-24.04", "${{ evil }}", ": runner"),

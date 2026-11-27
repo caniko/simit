@@ -322,7 +322,7 @@ fn forged_loose_blob_tree_and_commit_objects_cannot_authorize_weaker_policy() {
                 .to_owned();
             let new_blob = oid(":.github/spec.json");
             let (target, substituted) = match kind {
-                "blob" => (old_blob.clone(), weak),
+                "blob" => (old_blob, weak),
                 "tree" => {
                     let original = hex::decode(&old_blob).unwrap();
                     let replacement = hex::decode(&new_blob).unwrap();

@@ -1231,7 +1231,7 @@ mod tests {
         let metadata = publish_false_binary();
         // `binstall::plan` skips this crate, so the platform check must not
         // read its evaluated metadata through that selection.
-        assert!(crate::binstall::candidates(&metadata).is_empty());
+        assert_eq!(crate::binstall::candidates(&metadata).len(), 0);
         assert_eq!(
             crate::binstall::archive_check_names(&metadata),
             [

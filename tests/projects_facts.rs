@@ -396,8 +396,9 @@ fn facts_report_current_generated_ci_and_evaluate_flakes_only_on_request() {
         node("usage:github.com/example/current#release.workflow")["attrs"]["state"],
         "current"
     );
-    assert!(
-        document["errors"].as_array().unwrap().is_empty(),
+    assert_eq!(
+        document["errors"].as_array().unwrap().len(),
+        0,
         "{document:#}"
     );
     let blockers = node("repo:github.com/example/flake-config")["blockers"].clone();

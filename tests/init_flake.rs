@@ -1430,8 +1430,9 @@ fn check_rejects_disabled_cached_or_redirected_treefmt_hooks() {
         }
         assert_eq!(read(&path), changed, "check mutated {name}");
     }
-    assert!(
-        accepted.is_empty(),
+    assert_eq!(
+        accepted.len(),
+        0,
         "invalid hook contracts accepted: {accepted:?}"
     );
 }

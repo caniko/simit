@@ -829,7 +829,7 @@ mod tests {
             vec![b'x'; usize::try_from(kvrocks::HOST_REQUEST_MAX_BYTES).unwrap() + 1],
         ] {
             let cancelled = Arc::new(AtomicBool::new(false));
-            assert!(startup_frame(std::io::Cursor::new(input), cancelled.clone()).is_err());
+            assert!(startup_frame(std::io::Cursor::new(input), cancelled).is_err());
         }
     }
 }

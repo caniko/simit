@@ -190,10 +190,10 @@ fn empty_temp_dir_returns_empty_report() {
 
     let report = discover(root.path(), &DiscoverOptions::default());
 
-    assert!(report.registered.is_empty());
-    assert!(report.refreshed.is_empty());
-    assert!(report.skipped_empty.is_empty());
-    assert!(report.errors.is_empty());
+    assert_eq!(report.registered.len(), 0);
+    assert_eq!(report.refreshed.len(), 0);
+    assert_eq!(report.skipped_empty.len(), 0);
+    assert_eq!(report.errors.len(), 0);
 }
 
 #[test]
@@ -241,9 +241,9 @@ fn unsimit_crate_is_skipped_as_empty() {
 
     let report = discover(root.path(), &DiscoverOptions::default());
 
-    assert!(report.registered.is_empty());
+    assert_eq!(report.registered.len(), 0);
     assert_eq!(report.skipped_empty, [canonical(root.path())]);
-    assert!(registry::load().unwrap().projects.is_empty());
+    assert_eq!(registry::load().unwrap().projects.len(), 0);
 }
 
 #[test]
@@ -254,9 +254,9 @@ fn package_name_does_not_require_cargo_metadata_for_skipped_crate() {
 
     let report = discover(root.path(), &DiscoverOptions::default());
 
-    assert!(report.registered.is_empty());
+    assert_eq!(report.registered.len(), 0);
     assert_eq!(report.skipped_empty, [canonical(root.path())]);
-    assert!(report.errors.is_empty());
+    assert_eq!(report.errors.len(), 0);
 }
 
 #[test]
@@ -276,7 +276,7 @@ fn package_name_does_not_require_cargo_metadata_for_include_empty_crate() {
     let registry = registry::load().unwrap();
 
     assert_eq!(report.registered.as_slice(), std::slice::from_ref(&key));
-    assert!(report.errors.is_empty());
+    assert_eq!(report.errors.len(), 0);
     assert_eq!(registry.projects[&key].name, "plain");
 }
 
@@ -289,9 +289,9 @@ fn generic_changelog_does_not_make_crate_simit_managed() {
 
     let report = discover(root.path(), &DiscoverOptions::default());
 
-    assert!(report.registered.is_empty());
+    assert_eq!(report.registered.len(), 0);
     assert_eq!(report.skipped_empty, [canonical(root.path())]);
-    assert!(registry::load().unwrap().projects.is_empty());
+    assert_eq!(registry::load().unwrap().projects.len(), 0);
 }
 
 #[test]
@@ -303,9 +303,9 @@ fn generic_flake_does_not_make_crate_simit_managed() {
 
     let report = discover(root.path(), &DiscoverOptions::default());
 
-    assert!(report.registered.is_empty());
+    assert_eq!(report.registered.len(), 0);
     assert_eq!(report.skipped_empty, [canonical(root.path())]);
-    assert!(registry::load().unwrap().projects.is_empty());
+    assert_eq!(registry::load().unwrap().projects.len(), 0);
 }
 
 #[test]
@@ -323,7 +323,7 @@ fn generic_ci_registers_as_hand_rolled() {
     let report = discover(root.path(), &DiscoverOptions::default());
 
     assert_eq!(report.registered, [canonical(root.path())]);
-    assert!(report.skipped_empty.is_empty());
+    assert_eq!(report.skipped_empty.len(), 0);
     let registry = registry::load().unwrap();
     let entry = registry.projects.get(&canonical(root.path())).unwrap();
     assert_eq!(entry.features["ci"], FeatureStatus::HandRolled);
@@ -444,7 +444,7 @@ fn include_empty_registers_unsimit_crate() {
     );
 
     assert_eq!(report.registered, [canonical(root.path())]);
-    assert!(report.skipped_empty.is_empty());
+    assert_eq!(report.skipped_empty.len(), 0);
 }
 
 #[test]
@@ -508,7 +508,7 @@ fn max_depth_zero_only_checks_root() {
         },
     );
 
-    assert!(report.registered.is_empty());
+    assert_eq!(report.registered.len(), 0);
 }
 
 #[test]
@@ -525,7 +525,7 @@ fn deny_listed_target_dir_is_skipped() {
         },
     );
 
-    assert!(report.registered.is_empty());
+    assert_eq!(report.registered.len(), 0);
 }
 
 #[test]
@@ -542,7 +542,7 @@ fn hidden_dir_is_skipped() {
         },
     );
 
-    assert!(report.registered.is_empty());
+    assert_eq!(report.registered.len(), 0);
 }
 
 #[cfg(unix)]
@@ -563,8 +563,8 @@ fn symlink_loop_with_follow_symlinks_terminates() {
         },
     );
 
-    assert!(report.registered.is_empty());
-    assert!(report.errors.is_empty());
+    assert_eq!(report.registered.len(), 0);
+    assert_eq!(report.errors.len(), 0);
 }
 
 #[test]

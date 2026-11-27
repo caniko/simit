@@ -9547,7 +9547,7 @@ fn qualified_by_audit_expects_pages_only() {
     );
     let audit = simit::registry::audit_ci(temp.path()).unwrap();
     assert_eq!(audit.status, simit::registry::FeatureStatus::Managed);
-    assert!(audit.extra_generated_files.is_empty());
+    assert_eq!(audit.extra_generated_files.len(), 0);
 
     fs::write(
         temp.path().join(".github/workflows/qualify-generator.yaml"),

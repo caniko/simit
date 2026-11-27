@@ -1253,7 +1253,7 @@ fn resolve_winget_files(files: &str) -> anyhow::Result<simit::config::ResolvedWi
 
 #[test]
 fn winget_files_accept_optional_aliases_and_default_to_empty() {
-    assert!(resolve_winget_files("").unwrap().files.is_empty());
+    assert_eq!(resolve_winget_files("").unwrap().files.len(), 0);
     let resolved = resolve_winget_files(
         "[[winget.files]]\npath = \"sorrel.exe\"\nalias = \"sorrel\"\n[[winget.files]]\npath = \"bin/sorrelw.exe\"\n",
     )
@@ -1320,7 +1320,8 @@ fn chocolatey_shortcuts_and_gui_exes_resolve() {
         .unwrap()
         .resolve_chocolatey(ChocolateyOverrides::default(), &package())
         .unwrap();
-    assert!(plain.shortcuts.is_empty() && plain.gui_exes.is_empty());
+    assert_eq!(plain.shortcuts.len(), 0);
+    assert_eq!(plain.gui_exes.len(), 0);
 }
 
 #[test]
@@ -1367,7 +1368,9 @@ fn native_tests_defaults_and_validation() {
     let test = &native_tests_config("").unwrap().ci.native_tests[0];
     assert_eq!(test.args, "--workspace --locked");
     assert_eq!(test.timeout_minutes, 60);
-    assert!(test.toolchain.is_none() && test.env.is_empty() && test.setup.is_none());
+    assert!(test.toolchain.is_none());
+    assert_eq!(test.env.len(), 0);
+    assert!(test.setup.is_none());
     native_tests_config("setup = \"echo hi\"\ntimeout_minutes = 330\n").unwrap();
     native_tests_config("toolchain = \"1.85.0\"\nargs = \"-p core\"\ntimeout_minutes = 90\nenv = { RUST_LOG = \"info\" }\n")
         .unwrap();

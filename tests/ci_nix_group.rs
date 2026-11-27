@@ -219,7 +219,7 @@ fn conflicting_or_invalid_environment_fresh_keys_reject_before_effects() {
             String::from_utf8_lossy(&output.stderr).contains("SIMIT_NIX_FRESH"),
             "{output:?}"
         );
-        assert!(f.calls().is_empty());
+        assert_eq!(f.calls(), "");
         assert_eq!(
             fs::read_dir(f.root.path().join("results")).unwrap().count(),
             0
@@ -462,7 +462,7 @@ fn wrong_or_dirty_source_denies_before_nix_effects() {
         }
         let output = command.output().unwrap();
         assert!(!output.status.success(), "{output:?}");
-        assert!(f.calls().is_empty());
+        assert_eq!(f.calls(), "");
         assert!(!f.root.path().join("results/receipt.json").exists());
     }
 }
@@ -554,7 +554,7 @@ fn invalid_spec_cannot_inject_nix_flags_or_accept_unknown_fields() {
         f.spec[key] = value;
         let output = f.run("success");
         assert!(!output.status.success(), "{key}: {output:?}");
-        assert!(f.calls().is_empty());
+        assert_eq!(f.calls(), "");
     }
 }
 
@@ -588,7 +588,7 @@ fn evidence_reuse_and_dangling_receipt_symlinks_fail_without_overwriting() {
         }
         let output = f.run("success");
         assert!(!output.status.success(), "{output:?}");
-        assert!(f.calls().is_empty());
+        assert_eq!(f.calls(), "");
         if dangling {
             assert_eq!(fs::read_link(receipt).unwrap(), Path::new("missing"));
         } else {
@@ -654,7 +654,7 @@ fn stale_numbered_member_evidence_denies_before_any_dispatch_or_write() {
             assert_eq!(runner.0, 0);
             let output = f.run("success");
             assert!(!output.status.success(), "{name}/{kind}: {output:?}");
-            assert!(f.calls().is_empty());
+            assert_eq!(f.calls(), "");
             assert_eq!(
                 fs::read_to_string(root.join("revision")).unwrap(),
                 "preparation evidence"

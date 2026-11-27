@@ -308,7 +308,7 @@ fn credential_contract_rejects_invalid_app_and_credential_names() {
             init(temp.path(), &[]),
         ] {
             assert!(!output.status.success(), "{credentials}: {output:?}");
-            assert!(output.stdout.is_empty(), "{output:?}");
+            assert_eq!(output.stdout.as_slice(), b"", "{output:?}");
             assert!(
                 String::from_utf8_lossy(&output.stderr).contains(error),
                 "{output:?}"

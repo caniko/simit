@@ -7194,6 +7194,6 @@ mod maintenance_branch_tests {
             filter(&["**", "!simit/**"]),
             ["**", "!simit/**", "simit/update/**"]
         );
-        assert!(filter(&[]).is_empty());
+        assert_eq!(filter(&[]).len(), 0);
     }
 }
