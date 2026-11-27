@@ -996,13 +996,28 @@ impl CiConfig {
         provider: CiProvider,
         platform: Platform,
     ) -> Result<()> {
-        if self
-            .required_gates
-            .iter()
-            .any(|gate| gate.artifacts.is_some())
-            && (provider != CiProvider::Actions || platform != Platform::Github)
-        {
-            bail!("required gate artifacts require the effective GitHub Actions backend");
+        if provider != CiProvider::Actions || platform != Platform::Github {
+            if self
+                .required_gates
+                .iter()
+                .any(|gate| gate.artifacts.is_some())
+            {
+                bail!("required gate artifacts require the effective GitHub Actions backend");
+            }
+            if self
+                .manual_gates
+                .iter()
+                .any(|gate| gate.artifacts.is_some())
+            {
+                bail!("manual gate artifacts require the effective GitHub Actions backend");
+            }
+        }
+        Ok(())
+    }
+
+    pub(crate) fn validate_format_runtime(&self, runtime: Runtime) -> Result<()> {
+        if self.format_all_rust_files && runtime == Runtime::Nix {
+            bail!("[ci].format_all_rust_files requires runtime = \"cargo\"");
         }
         Ok(())
     }
@@ -1010,6 +1025,7 @@ impl CiConfig {
     /// Shared by Nix-only generation and drift auditing. Call after CLI overrides
     /// so an explicit false can disable a configured unsupported option.
     pub(crate) fn validate_nix_only_language_options(&self) -> Result<()> {
+        self.validate_format_runtime(Runtime::Nix)?;
         if self.separate_events {
             bail!("[ci].separate_events requires Rust language CI");
         }
@@ -1574,6 +1590,7 @@ pub struct CrowSccache {
 impl CrowCiConfig {
     pub(crate) fn requires_cargo(&self) -> bool {
         self.combine_steps
+            || self.shallow_clone
             || self.strip_ci_debug
             || self.build_jobs.is_some()
             || self.sccache.is_some()
@@ -1582,8 +1599,15 @@ impl CrowCiConfig {
     pub(crate) fn validate_runtime(&self, runtime: Runtime) -> Result<()> {
         if self.requires_cargo() && runtime != Runtime::Cargo {
             bail!(
-                "[ci.crow] combine_steps, strip_ci_debug, build_jobs and sccache require runtime = \"cargo\""
+                "[ci.crow] combine_steps, shallow_clone, strip_ci_debug, build_jobs and sccache require runtime = \"cargo\""
             );
+        }
+        Ok(())
+    }
+
+    pub(crate) fn validate_step_runners(&self, has_step_runners: bool) -> Result<()> {
+        if self.combine_steps && has_step_runners {
+            bail!("[ci.crow].combine_steps cannot be combined with per-step runners");
         }
         Ok(())
     }
@@ -3869,6 +3893,7 @@ impl ProjectConfig {
         if let Some(runtime) = ci.runtime {
             crow.validate_runtime(runtime)?;
         }
+        crow.validate_step_runners(!ci.step_runners.is_empty())?;
         if crow.combine_steps && (crow.check_command.is_some() || ci.check_command.is_some()) {
             bail!("[ci.crow].combine_steps cannot be combined with check_command");
         }
@@ -3928,7 +3953,6 @@ impl ProjectConfig {
             if let Some(secret) = &cache.secret {
                 validate_secret_name("[ci.crow.sccache].secret", secret)?;
                 if ci.required_secrets.contains(secret)
-                    || cache.env.contains_key(secret)
                     || ci.extra_env.contains_key(secret)
                     || secret == "RUSTC_WRAPPER"
                 {
@@ -3939,6 +3963,14 @@ impl ProjectConfig {
             }
             for (key, value) in &cache.env {
                 validate_secret_name("[ci.crow.sccache].env key", key)?;
+                if key == "RUSTC_WRAPPER"
+                    || cache.secret.as_ref() == Some(key)
+                    || ci.required_secrets.contains(key)
+                {
+                    bail!(
+                        "[ci.crow.sccache].env key `{key}` must not duplicate RUSTC_WRAPPER or a secret"
+                    );
+                }
                 if value.contains(['\n', '\r', '\0']) {
                     bail!("[ci.crow.sccache].env value for `{key}` must be single-line");
                 }

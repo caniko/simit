@@ -1,8 +1,236 @@
-//! Crow CI for flake-only projects driven by `[ci].nix_builds`.
+//! Crow CI for native Cargo workspaces and flake-only projects.
 
 use std::fs;
 
-use super::simit;
+use super::{init_package, simit};
+
+#[test]
+fn native_manual_gate_does_not_affect_inference_and_cargo_runtime_survives_without_workflows() {
+    let temp = init_package(true);
+    let root = temp.path();
+    fs::write(
+        root.join("flake.nix"),
+        "{ outputs = _: { checks = {}; }; }\n",
+    )
+    .unwrap();
+    let run = |args: &[&str]| {
+        simit()
+            .current_dir(root)
+            .args(["init", "ci", "--ci-provider", "crow"])
+            .args(args)
+            .output()
+            .unwrap()
+    };
+    fs::write(
+        root.join("simit.toml"),
+        r#"[ci]
+all_features = false
+
+[[ci.manual_gates]]
+id = "security"
+runtime = "cargo"
+run = "cargo audit && cargo test --all-features && cargo deny check"
+
+[ci.crow]
+cargo_home = "/work/cargo"
+"#,
+    )
+    .unwrap();
+    let generated = run(&["--runtime", "cargo"]);
+    assert!(generated.status.success(), "{generated:?}");
+    let build = fs::read_to_string(root.join(".crow/build.yaml")).unwrap();
+    for command in ["cargo audit", "cargo deny check", "--all-features"] {
+        assert!(!build.contains(command), "{build}");
+    }
+    let config = fs::read_to_string(root.join("simit.toml")).unwrap();
+    let config: toml_edit::DocumentMut = config.parse().unwrap();
+    assert_eq!(config["ci"]["runtime"].as_str(), Some("cargo"));
+    assert_eq!(config["ci"]["all_features"].as_bool(), Some(false));
+    for key in ["with_audit", "with_deny"] {
+        assert_ne!(
+            config["ci"].get(key).and_then(|item| item.as_bool()),
+            Some(true)
+        );
+    }
+    let gate: serde_yaml::Value =
+        serde_yaml::from_str(&fs::read_to_string(root.join(".crow/manual-security.yaml")).unwrap())
+            .unwrap();
+    assert_eq!(gate["steps"][0]["environment"]["CARGO_HOME"], "/work/cargo");
+    assert!(
+        gate["steps"][0]["commands"][0]
+            .as_str()
+            .unwrap()
+            .contains("$${RUSTUP_TOOLCHAIN:-}")
+    );
+    let check = run(&["--check"]);
+    assert!(check.status.success(), "{check:?}");
+    fs::remove_file(root.join(".crow/build.yaml")).unwrap();
+    fs::remove_file(root.join(".crow/manual-security.yaml")).unwrap();
+    let regenerated = run(&[]);
+    assert!(regenerated.status.success(), "{regenerated:?}");
+    assert_eq!(
+        fs::read_to_string(root.join(".crow/build.yaml")).unwrap(),
+        build
+    );
+}
+
+#[test]
+fn invalid_crow_native_options_are_rejected() {
+    for (ci, crow, diagnostic) in [
+        (
+            "",
+            "[[ci.manual_gates]]\nid = 'gate'\nrun = 'true'\nartifacts = { name = 'result', paths = ['result/'] }",
+            "artifacts require",
+        ),
+        (
+            "step_runners = { cargo-fmt = 'agent' }",
+            "[ci.crow]\ncombine_steps = true",
+            "per-step runners",
+        ),
+        (
+            "runtime = 'nix'",
+            "[ci.crow]\nshallow_clone = true",
+            "shallow_clone",
+        ),
+        ("", "[ci.crow]\nshallow_clone = true", "shallow_clone"),
+        (
+            "",
+            "[ci.crow.sccache]\nenv = { RUSTC_WRAPPER = 'other' }",
+            "RUSTC_WRAPPER",
+        ),
+        (
+            "",
+            "[ci.crow.sccache]\nsecret = 'CACHE_TOKEN'\nenv = { CACHE_TOKEN = 'plaintext' }",
+            "CACHE_TOKEN",
+        ),
+        (
+            "required_secrets = ['REPO_TOKEN']",
+            "[ci.crow.sccache]\nenv = { REPO_TOKEN = 'plaintext' }",
+            "REPO_TOKEN",
+        ),
+        ("format_all_rust_files = true", "", "format_all_rust_files"),
+    ] {
+        let temp = init_package(true);
+        fs::write(
+            temp.path().join("flake.nix"),
+            "{ outputs = _: { checks = {}; }; }\n",
+        )
+        .unwrap();
+        fs::write(
+            temp.path().join("simit.toml"),
+            format!("[ci]\n{ci}\n{crow}\n"),
+        )
+        .unwrap();
+        let output = simit()
+            .current_dir(temp.path())
+            .args(["init", "ci", "--ci-provider", "crow"])
+            .output()
+            .unwrap();
+        assert!(!output.status.success(), "{ci}\n{crow}\n{output:?}");
+        assert!(
+            String::from_utf8_lossy(&output.stderr).contains(diagnostic),
+            "{output:?}"
+        );
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn crow_pins_native_steps_without_overriding_msrv_or_local_toolchains() {
+    use std::os::unix::fs::PermissionsExt;
+    use std::process::Command;
+
+    let temp = init_package(false);
+    let root = temp.path();
+    for (name, body) in [
+        (
+            "rustup",
+            "case \"$1\" in default) printf '%s\\n' '1.94.1-test (default)';; toolchain) test \"$3\" = '1.85';; *) exit 1;; esac",
+        ),
+        (
+            "cargo",
+            "test \"$1\" = '+1.85' && test \"$2\" = 'check' && test \"$3\" = '--locked'",
+        ),
+    ] {
+        let path = root.join(name);
+        fs::write(&path, format!("#!/bin/sh\n{body}\n")).unwrap();
+        fs::set_permissions(path, fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    for combine in [false, true] {
+        fs::write(root.join("simit.toml"), format!("[ci]\nprovider = 'crow'\nruntime = 'cargo'\nwith_msrv = true\nwith_docs = true\n[ci.crow]\ncombine_steps = {combine}\n")).unwrap();
+        let output = simit()
+            .current_dir(root)
+            .args(["init", "ci"])
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "{output:?}");
+        let workflow: serde_yaml::Value =
+            serde_yaml::from_str(&fs::read_to_string(root.join(".crow/build.yaml")).unwrap())
+                .unwrap();
+        for step in workflow["steps"].as_sequence().unwrap() {
+            let name = step["name"].as_str().unwrap();
+            let commands: Vec<_> = step["commands"]
+                .as_sequence()
+                .unwrap()
+                .iter()
+                .map(|command| command.as_str().unwrap())
+                .collect();
+            let pins: Vec<_> = commands
+                .iter()
+                .filter(|command| command.contains("$$(rustup default)"))
+                .collect();
+            assert_eq!(
+                pins.len(),
+                usize::from(name != "cargo-msrv"),
+                "{name}: {commands:?}"
+            );
+            if name != "cargo-msrv" {
+                assert_eq!(**pins.first().unwrap(), commands[0]);
+                let pin = commands[0].replace("$$", "$");
+                for (ci, explicit, expected) in [
+                    (None, None, "unset"),
+                    (None, Some("custom"), "custom"),
+                    (Some("true"), Some("custom"), "custom"),
+                    (Some("true"), None, "1.94.1-test"),
+                ] {
+                    let mut sh = Command::new("/bin/sh");
+                    sh.env("PATH", root)
+                        .env_remove("CI")
+                        .env_remove("RUSTUP_TOOLCHAIN");
+                    if let Some(ci) = ci {
+                        sh.env("CI", ci);
+                    }
+                    if let Some(toolchain) = explicit {
+                        sh.env("RUSTUP_TOOLCHAIN", toolchain);
+                    }
+                    let output = sh
+                        .args([
+                            "-ec",
+                            &format!("{pin}\nprintf '%s' \"${{RUSTUP_TOOLCHAIN-unset}}\""),
+                        ])
+                        .output()
+                        .unwrap();
+                    assert!(output.status.success(), "{output:?}");
+                    assert_eq!(output.stdout, expected.as_bytes());
+                }
+            }
+            if matches!(name, "cargo-msrv" | "cargo-ci") {
+                let msrv = commands
+                    .iter()
+                    .find(|command| command.contains("cargo +1.85 check"))
+                    .unwrap();
+                assert!(!msrv.contains("RUSTUP_TOOLCHAIN"), "{msrv}");
+                let output = Command::new("/bin/sh")
+                    .env("PATH", root)
+                    .env_remove("SIMIT_TEST_UNSET")
+                    .args(["-ec", &format!("{msrv}\nprintf '%s' \"$SIMIT_TEST_UNSET\"")])
+                    .output()
+                    .unwrap();
+                assert!(output.status.success(), "{output:?}");
+            }
+        }
+    }
+}
 
 #[test]
 fn combined_native_workspace_round_trips_crow_options_and_runs_valid_cargo_commands() {
@@ -127,23 +355,24 @@ secret = "SCCACHE_TOKEN"
         .iter()
         .map(|command| command.as_str().unwrap())
         .collect();
-    assert!(commands[0].starts_with("command -v sccache"));
-    assert!(commands[1].starts_with("printf"));
-    assert!(commands[2].contains("':!vendored/**' | xargs -0 -r rustfmt --edition 2024 --check"));
+    assert!(commands[0].contains("$${RUSTUP_TOOLCHAIN:-}"));
+    assert!(commands[1].starts_with("command -v sccache"));
+    assert!(commands[2].starts_with("printf"));
+    assert!(commands[3].contains("':!vendored/**' > \"$$tmp\""));
     assert_eq!(
-        commands[3].lines().last().unwrap(),
+        commands[4].lines().last().unwrap(),
         "cargo clippy --locked --lib --bins --features 'cli/opt,lib/opt' --workspace --exclude excluded -- --deny warnings"
     );
     assert_eq!(
-        commands[4],
+        commands[5],
         "cargo test --locked --features lib/opt -p lib --lib"
     );
     assert_eq!(
-        commands[5],
+        commands[6],
         "cargo test --locked --features cli/opt -p cli --bins"
     );
-    assert!(commands[6].starts_with("cargo doc --locked --workspace --exclude excluded"));
-    assert_eq!(commands[7], "sccache --show-stats || true");
+    assert!(commands[7].starts_with("cargo doc --locked --workspace --exclude excluded"));
+    assert_eq!(commands[8], "sccache --show-stats || true");
     let gate: serde_yaml::Value = serde_yaml::from_str(
         &fs::read_to_string(root.join(".crow/manual-push-cache.yaml")).unwrap(),
     )
@@ -162,6 +391,12 @@ secret = "SCCACHE_TOKEN"
     assert!(!script.contains("$${CI_REPO:-local}"), "{script}");
     assert!(!script.contains("nix run .#cache"), "{script}");
     assert!(!script.contains("sccache"), "{script}");
+    assert!(!script.contains("RUSTUP_TOOLCHAIN"), "{script}");
+    let format_command = commands[3].replace("$$", "$");
+    assert!(
+        script.contains(&format_command.replace('\'', r"'\''")),
+        "{script}"
+    );
     assert!(
         script.ends_with("step 'Extra local step' 'true'\n"),
         "{script}"
@@ -181,7 +416,7 @@ secret = "SCCACHE_TOKEN"
     );
     let output = std::process::Command::new("bash")
         .current_dir(root)
-        .args(["-ec", &commands[3..6].join("\n")])
+        .args(["-ec", &commands[4..7].join("\n")])
         .output()
         .unwrap();
     assert!(
@@ -207,12 +442,23 @@ secret = "SCCACHE_TOKEN"
         String::from_utf8_lossy(&output.stderr)
     );
     let format = || {
-        std::process::Command::new("bash")
+        std::process::Command::new("/bin/sh")
             .current_dir(root)
-            .args(["-e", "-o", "pipefail", "-c", commands[2]])
+            .args(["-ec", &format_command])
             .output()
             .unwrap()
     };
+    let tmp = root.join("tmp");
+    fs::create_dir(&tmp).unwrap();
+    let output = std::process::Command::new("/bin/sh")
+        .current_dir(root)
+        .env("TMPDIR", &tmp)
+        .env("GIT_DIR", root.join("missing.git"))
+        .args(["-ec", &format_command])
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(128), "{output:?}");
+    assert_eq!(fs::read_dir(tmp).unwrap().count(), 0);
     let output = format();
     assert!(!output.status.success());
     assert!(String::from_utf8_lossy(&output.stdout).contains("lib_parts/piece.rs"));

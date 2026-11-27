@@ -1415,7 +1415,11 @@ fn infer_expected_primary_ci_files(
 
     let generation_packages =
         if resolved.workspace_strategy == crate::cli::WorkspaceStrategy::Aggregate {
-            packages.first().into_iter().collect::<Vec<_>>()
+            packages
+                .iter()
+                .find(|package| !options.exclude_packages.contains(&package.name))
+                .into_iter()
+                .collect::<Vec<_>>()
         } else {
             packages.iter().collect::<Vec<_>>()
         };
@@ -1730,6 +1734,7 @@ fn infer_expected_crow_files(
     };
     let mut crow = config.ci.crow.clone();
     crow.format = format;
+    crow.validate_step_runners(!resolved.step_runners.is_empty())?;
     let runner = resolved_runner_override(resolved.runner.as_deref()).unwrap_or(ResolvedRunner {
         name: None,
         labels: vec!["crow-default".to_owned()],

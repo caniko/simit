@@ -194,19 +194,23 @@ pub struct CiInference {
 
 impl CiInference {
     pub fn from_workflows(marked: &[WorkflowSnapshot]) -> Result<Self> {
-        if marked.is_empty() {
-            return Ok(Self::default());
-        }
-
         let marked = marked
             .iter()
             .filter(|workflow| {
-                !workflow.relative_path.starts_with(".crow")
-                    || !workflow_name(&workflow.relative_path)
-                        .is_some_and(|name| name.starts_with("manual-"))
+                let path = &workflow.relative_path;
+                !path
+                    .file_stem()
+                    .and_then(|stem| stem.to_str())
+                    .is_some_and(|name| {
+                        name == "manual-gates"
+                            || (path.starts_with(".crow") && name.starts_with("manual-"))
+                    })
             })
             .cloned()
             .collect::<Vec<_>>();
+        if marked.is_empty() {
+            return Ok(Self::default());
+        }
         let all_content = marked
             .iter()
             .map(|workflow| workflow.content.as_str())
@@ -382,6 +386,7 @@ impl ResolvedCiInputs {
         } else {
             auto_runtime(workspace_root)?
         };
+        cfg.ci.validate_format_runtime(runtime)?;
         let cargo_lanes = runtime == Runtime::Cargo && cfg.ci.independent_lanes;
         let default_nix_flake_check = !cargo_lanes;
         let nix_flake_check = cli
@@ -602,6 +607,7 @@ impl ResolvedCiInputs {
             repository_checks: true,
             workspace_has_doctests: false,
             workspace_has_non_empty_default_feature: false,
+            workspace_has_any_feature: false,
             workspace_lib_members: Vec::new(),
             workspace_bin_members: Vec::new(),
             workspace_has_binary: false,
@@ -673,9 +679,11 @@ impl ResolvedCiInputs {
         ci.platform = Some(platform);
         // Independent Cargo lanes can coexist with a meaningful flake. Keep the
         // runtime choice even when there is no generated workflow to infer from.
-        ci.runtime =
-            (self.runtime != Runtime::Cargo || ci.independent_lanes || ci.crow.requires_cargo())
-                .then_some(self.runtime);
+        ci.runtime = (self.runtime != Runtime::Cargo
+            || ci.runtime.is_some()
+            || ci.independent_lanes
+            || ci.crow.requires_cargo())
+        .then_some(self.runtime);
         // Native system runners replace the single runner, and config
         // validation rejects both together.
         ci.runner = runner.filter(|_| ci.nix_system_runners.is_empty());
@@ -751,6 +759,7 @@ pub(crate) fn apply_cargo_metadata(
         any_selected = true;
         options.workspace_has_doctests |= package.has_doctests();
         options.workspace_has_non_empty_default_feature |= package.has_non_empty_default_feature();
+        options.workspace_has_any_feature |= package.has_any_feature();
         options.workspace_has_binary |= package.has_binary_target();
         if package.has_library_target() {
             options.workspace_lib_members.push(package.name.clone());
@@ -1283,5 +1292,26 @@ mod tests {
             ]),
             Some(false)
         );
+    }
+
+    #[test]
+    fn manual_gate_commands_do_not_infer_primary_ci_options() {
+        for path in [
+            ".crow/manual-security.yaml",
+            ".github/workflows/manual-gates.yaml",
+        ] {
+            let manual = WorkflowSnapshot {
+                relative_path: PathBuf::from(path),
+                content: "cargo audit && cargo test --all-features && cargo deny check".into(),
+            };
+            let build = WorkflowSnapshot {
+                relative_path: PathBuf::from(".crow/build.yaml"),
+                content: "cargo test --locked".into(),
+            };
+            let inference = CiInference::from_workflows(&[build, manual]).unwrap();
+            assert_eq!(inference.all_features, Some(false), "{path}");
+            assert_eq!(inference.with_audit, Some(false), "{path}");
+            assert_eq!(inference.with_deny, Some(false), "{path}");
+        }
     }
 }

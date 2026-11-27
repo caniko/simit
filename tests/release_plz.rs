@@ -195,6 +195,26 @@ fn new_publishing_defaults_to_release_plz_and_round_trips() {
 }
 
 #[test]
+fn release_plz_uses_the_configured_tracked_file_format_check() {
+    let temp = project("[ci]\nformat_all_rust_files = true\nformat_excludes = ['vendor/**']\n");
+    let output = init(temp.path(), &["--publish-crates"]);
+    assert!(output.status.success(), "{output:?}");
+    let workflow =
+        fs::read_to_string(temp.path().join(".github/workflows/release-plz.yaml")).unwrap();
+    let yaml: serde_yaml::Value = serde_yaml::from_str(&workflow).unwrap();
+    let format = yaml["jobs"]["release-plz-qualify"]["steps"]
+        .as_sequence()
+        .unwrap()
+        .iter()
+        .find(|step| step["name"] == "Format check")
+        .unwrap()["run"]
+        .as_str()
+        .unwrap();
+    assert!(format.contains("git ls-files -z -- '*.rs' ':!vendor/**'"));
+    assert!(format.contains("rustfmt --edition 2024 --check"));
+}
+
+#[test]
 fn existing_implicit_and_explicit_members_are_preserved() {
     for extra in ["", "publish_strategy = \"members\"\n"] {
         let temp = project(&format!("[ci]\npublish_crates = true\n{extra}"));

@@ -57,6 +57,12 @@ pub struct Target {
 }
 
 impl Package {
+    pub fn has_any_feature(&self) -> bool {
+        self.features
+            .iter()
+            .any(|(name, features)| name != "default" || !features.is_empty())
+    }
+
     pub fn has_non_empty_default_feature(&self) -> bool {
         self.features
             .get("default")

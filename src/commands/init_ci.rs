@@ -372,7 +372,11 @@ pub fn run(command: InitCiCommand) -> Result<()> {
         && resolved.workspace_strategy == crate::cli::WorkspaceStrategy::Members;
     let generation_packages =
         if resolved.workspace_strategy == crate::cli::WorkspaceStrategy::Aggregate {
-            packages.first().into_iter().collect::<Vec<_>>()
+            packages
+                .iter()
+                .find(|package| !options.exclude_packages.contains(&package.name))
+                .into_iter()
+                .collect::<Vec<_>>()
         } else {
             packages.iter().collect::<Vec<_>>()
         };
@@ -1686,9 +1690,7 @@ fn run_crow(
         crow.format = format;
     }
     crow.validate_runtime(resolved.runtime)?;
-    if crow.combine_steps && !resolved.step_runners.is_empty() {
-        bail!("[ci.crow].combine_steps cannot be combined with per-step runners");
-    }
+    crow.validate_step_runners(!resolved.step_runners.is_empty())?;
     let runners = crow_runners(&resolved, windows_packagers);
     let step_runners = resolved
         .step_runners
@@ -1836,6 +1838,10 @@ fn run_crow(
         resolved.windows_runner.clone(),
     );
     persisted_ci.provider = Some(CiProvider::Crow);
+    // Without generated workflows, runtime inference would fall back to the flake.
+    if resolved.runtime == Runtime::Cargo && workspace_root.join("flake.nix").is_file() {
+        persisted_ci.runtime = Some(Runtime::Cargo);
+    }
     persisted_ci.crow = crow;
     persisted_ci.publish_crates = publish_crates;
 

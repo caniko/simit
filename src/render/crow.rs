@@ -147,6 +147,9 @@ pub(crate) fn primary_files(request: &FilesRequest<'_>) -> Result<Vec<GeneratedF
 
 fn files_for_scope(request: &FilesRequest<'_>, primary_only: bool) -> Result<Vec<GeneratedFile>> {
     request.crow.validate_runtime(request.runtime)?;
+    request
+        .crow
+        .validate_step_runners(!request.step_runners.is_empty())?;
     if request.options.independent_lanes {
         bail!("independent_lanes requires GitHub Actions Rust/Nix CI");
     }
@@ -308,7 +311,7 @@ fn build_workflow(
             steps.push(step("nix-check", image, command.to_owned()));
         }
         let command = if runtime == Runtime::Cargo {
-            format!("rustup component add clippy rustfmt && {command}")
+            with_rust_component("clippy", &with_rust_component("rustfmt", command))
         } else {
             ci::project_check_command(runtime, command)
         };
@@ -438,7 +441,8 @@ fn build_workflow(
             steps.push(step(
                 "cargo-msrv",
                 image,
-                ci::msrv_check_command(runtime, package, options).replace('$', "$$"),
+                ci::msrv_check_command(runtime, package, options, runtime == Runtime::Cargo)
+                    .replace('$', "$$"),
             ));
         }
         if options.repository_checks && options.with_audit {
@@ -530,6 +534,12 @@ fn build_workflow(
     if runtime == Runtime::Cargo {
         for step in &mut steps {
             cargo_environment(step, config);
+            if !matches!(
+                step.name.as_str(),
+                "cargo-msrv" | "cargo-audit" | "cargo-deny"
+            ) {
+                pin_container_toolchain(step);
+            }
         }
     }
     apply_step_runner_labels(&mut steps, step_runners);
@@ -607,6 +617,14 @@ fn cargo_environment(step: &mut Step, config: &CrowCiConfig) {
     }
 }
 
+// Ignore repository rust-toolchain overrides in CI, without overriding the
+// operator's explicit toolchain. Crow expands dollars before running the shell.
+pub(super) const PIN_CONTAINER_TOOLCHAIN: &str = r#"if [ -n "$${CI:-}" ] && [ -z "$${RUSTUP_TOOLCHAIN:-}" ] && command -v rustup >/dev/null 2>&1; then RUSTUP_TOOLCHAIN=$$(rustup default) || exit $$?; export RUSTUP_TOOLCHAIN="$${RUSTUP_TOOLCHAIN%% *}"; fi"#;
+
+fn pin_container_toolchain(step: &mut Step) {
+    step.commands.insert(0, PIN_CONTAINER_TOOLCHAIN.to_owned());
+}
+
 fn with_rust_component(component: &str, command: &str) -> String {
     // The official Rust image uses rustup's minimal profile.
     let probe = if component == "clippy" {
@@ -648,6 +666,12 @@ pub(crate) fn manual_gate_files(
             let mut step = step(&name, &image, gate.run.replace('$', "$$"));
             if runtime == Runtime::Nix {
                 add_nix_environment(std::slice::from_mut(&mut step));
+            } else {
+                step.environment.insert(
+                    "CARGO_HOME".to_owned(),
+                    json!(config.cargo_home.as_deref().unwrap_or("/tmp/.cargo")),
+                );
+                pin_container_toolchain(&mut step);
             }
             step.environment.extend(
                 gate.env
@@ -1034,6 +1058,10 @@ pub fn python_ci_file(
     check_outputs: &[String],
     components: &[crate::config::CiComponent],
 ) -> Result<GeneratedFile> {
+    config.validate_runtime(Runtime::Nix)?;
+    if options.format_all_rust_files {
+        bail!("[ci].format_all_rust_files requires runtime = \"cargo\"");
+    }
     if options.independent_lanes {
         bail!("independent_lanes requires GitHub Actions Rust/Nix CI");
     }
@@ -1082,10 +1110,7 @@ pub fn python_ci_file(
         name: "ci".to_owned(),
         labels: labels(config, runner),
         platform: config.platform.clone(),
-        when: vec![
-            push_to_maintained_branches(),
-            condition("event", "pull_request"),
-        ],
+        when: build_triggers(config),
         skip_clone: config.skip_clone.then_some(true),
         variables: config.variables.clone(),
         workspace: config.workspace_base.as_ref().map(|base| Workspace {
@@ -1114,6 +1139,7 @@ pub fn nix_flake_ci_file(
     components: &[crate::config::CiComponent],
 ) -> Result<GeneratedFile> {
     use crate::config::CiComponent;
+    config.validate_runtime(Runtime::Nix)?;
     let image = nix_image(config);
     let selected = |component| components.contains(&component);
     let mut steps = Vec::new();

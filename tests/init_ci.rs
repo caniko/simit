@@ -38,42 +38,55 @@ license = "MIT"
 }
 
 #[test]
-fn optional_features_without_defaults_do_not_duplicate_native_checks() {
+fn native_no_default_checks_require_a_distinct_feature_set() {
     for (provider, platform, path) in [
         ("crow", "forgejo", ".crow/build.yaml"),
         ("actions", "github", ".github/workflows/ci.yaml"),
     ] {
-        let temp = init_package(false);
-        let root = temp.path();
-        let manifest = root.join("Cargo.toml");
-        let text = fs::read_to_string(&manifest).unwrap();
-        fs::write(
-            manifest,
-            format!("{}\n[features]\nopt = []\n", text.replace("1.85", "1.93")),
-        )
-        .unwrap();
-        fs::write(
+        for (features, all_features, expect_no_default) in [
+            ("", true, false),
+            ("[features]\nopt = []", false, false),
+            ("[features]\ndefault = []\nopt = []", false, false),
+            ("[features]\ndefault = []", true, false),
+            ("[features]\nopt = []", true, true),
+            ("[features]\ndefault = ['opt']\nopt = []", false, true),
+        ] {
+            let temp = init_package(false);
+            let root = temp.path();
+            let manifest = root.join("Cargo.toml");
+            let text = fs::read_to_string(&manifest).unwrap();
+            fs::write(
+                manifest,
+                format!("{}\n{features}\n", text.replace("1.85", "1.93")),
+            )
+            .unwrap();
+            fs::write(
             root.join("simit.toml"),
             format!(
-                "[ci]\nprovider = '{provider}'\nplatform = '{platform}'\nruntime = 'cargo'\nall_features = false\n"
+                "[ci]\nprovider = '{provider}'\nplatform = '{platform}'\nruntime = 'cargo'\nall_features = {all_features}\n"
             ),
         )
         .unwrap();
-        let output = simit()
-            .current_dir(root)
-            .args(["init", "ci"])
-            .output()
-            .unwrap();
-        assert!(
-            output.status.success(),
-            "{}",
-            String::from_utf8_lossy(&output.stderr)
-        );
-        let workflow = fs::read_to_string(root.join(path)).unwrap();
-        assert!(!workflow.contains("--no-default-features"), "{workflow}");
-        if provider == "crow" {
-            assert!(workflow.contains("rust:1.93-trixie"));
-            assert!(workflow.contains("cargo test --locked"));
+            let output = simit()
+                .current_dir(root)
+                .args(["init", "ci"])
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            let workflow = fs::read_to_string(root.join(path)).unwrap();
+            assert_eq!(
+                workflow.contains("--no-default-features"),
+                expect_no_default,
+                "{workflow}"
+            );
+            if provider == "crow" {
+                assert!(workflow.contains("rust:1.93-trixie"));
+                assert!(workflow.contains("cargo test --locked"));
+            }
         }
     }
 }
@@ -3096,7 +3109,7 @@ fn crow_python_ci_keeps_the_crow_prebuild() {
     fs::write(
         temp.path().join("simit.toml"),
         format!(
-            "{config}\n[prebuild]\nprovider = \"crow\"\npublish_attic = true\nattic_app = \".#push-flake-inputs\"\nnix_builds = [\".#default\"]\n\n[release.attic]\ncache = \"demo\"\nurl = \"https://attic.example\"\ntoken_name = \"demo\"\ntoken_secret = \"ATTIC_TOKEN\"\n"
+            "{config}\n[ci.crow]\npaths_include = ['**/*.py']\npaths_exclude = ['docs/**']\n\n[prebuild]\nprovider = \"crow\"\npublish_attic = true\nattic_app = \".#push-flake-inputs\"\nnix_builds = [\".#default\"]\n\n[release.attic]\ncache = \"demo\"\nurl = \"https://attic.example\"\ntoken_name = \"demo\"\ntoken_secret = \"ATTIC_TOKEN\"\n"
         ),
     )
     .unwrap();
@@ -3122,6 +3135,12 @@ fn crow_python_ci_keeps_the_crow_prebuild() {
         String::from_utf8_lossy(&output.stderr)
     );
     assert_crow_push_only_maintained_branches(&temp.path().join(".crow/ci.yaml"));
+    let ci: serde_yaml::Value =
+        serde_yaml::from_str(&read(&temp.path().join(".crow/ci.yaml"))).unwrap();
+    for trigger in ci["when"].as_sequence().unwrap() {
+        assert_eq!(trigger["path"]["include"][0], "**/*.py");
+        assert_eq!(trigger["path"]["exclude"][0], "docs/**");
+    }
     assert!(temp.path().join(".crow/prebuild.yaml").is_file());
 }
 
@@ -3445,8 +3464,12 @@ fn crow_prebuilt_cargo_tools_run_in_their_own_gate_containers() {
         let command = |name: &str| {
             let step = steps.iter().find(|step| step["name"] == name).unwrap();
             let commands = step["commands"].as_sequence().unwrap();
-            assert_eq!(commands.len(), 1, "{name}");
-            commands[0].as_str().unwrap()
+            let pinned = runtime == "cargo" && name == "cargo-nextest";
+            assert_eq!(commands.len(), 1 + usize::from(pinned), "{name}");
+            if pinned {
+                assert!(commands[0].as_str().unwrap().contains("$$(rustup default)"));
+            }
+            commands.last().unwrap().as_str().unwrap()
         };
         let nextest_check = steps.iter().any(|step| step["name"] == "nextest-tool");
         if runtime == "nix" {
@@ -6264,7 +6287,14 @@ check_command = "cargo xtask ci"
     assert!(status.success());
 
     let ci = read(&temp.path().join(".crow/build.yaml"));
-    assert!(ci.contains("rustup component add clippy rustfmt && cargo xtask ci"));
+    let (_, command) = ci.split_once("$$(rustup default)").unwrap();
+    let (_, command) = command
+        .split_once("cargo clippy --version >/dev/null 2>&1 || rustup component add clippy")
+        .unwrap();
+    let (_, command) = command
+        .split_once("rustfmt --version >/dev/null 2>&1 || rustup component add rustfmt")
+        .unwrap();
+    assert!(command.contains("cargo xtask ci"));
 }
 
 #[test]
@@ -6355,7 +6385,7 @@ fn workspace_flag_generates_per_package_workflows() {
             .contains("run: cargo clippy -p alpha --all-targets --all-features -- --deny warnings")
     );
     assert!(alpha_ci.contains("run: cargo package -p alpha --allow-dirty --list"));
-    assert!(alpha_ci.contains("run: cargo test -p alpha --no-default-features"));
+    assert!(!alpha_ci.contains("--no-default-features"));
 
     let beta_ci = read(&temp.path().join(".forgejo/workflows/ci-beta.yaml"));
     assert_yaml_parses(&beta_ci);
@@ -6453,6 +6483,36 @@ fn aggregate_workspace_strategy_generates_one_workspace_workflow() {
         "run: nix develop -c cargo clippy --workspace --all-targets --all-features -- --deny warnings"
     ));
     assert!(!ci.contains("cargo package"));
+}
+
+#[test]
+fn actions_aggregate_ignores_excluded_packages_for_image_and_feature_passes() {
+    let temp = init_workspace_fixture();
+    let root = temp.path();
+    let beta = root.join("crates/beta/Cargo.toml");
+    fs::write(&beta, read(&beta).replace("1.85", "1.93")).unwrap();
+    for (excluded, image, no_default) in [
+        ("alpha", "rust:1.93-trixie", true),
+        ("beta", "rust:1.85-bookworm", false),
+    ] {
+        fs::write(root.join("simit.toml"), format!("[ci]\nplatform = 'forgejo'\nruntime = 'cargo'\nworkspace = true\nworkspace_strategy = 'aggregate'\nexclude_packages = ['{excluded}']\n")).unwrap();
+        let run = |args: &[&str]| {
+            simit_with_user_config(root)
+                .current_dir(root)
+                .args(args)
+                .output()
+                .unwrap()
+        };
+        let output = run(&["init", "ci"]);
+        assert!(output.status.success(), "{output:?}");
+        let ci = read(&root.join(".forgejo/workflows/ci.yaml"));
+        assert!(ci.contains(image), "{ci}");
+        assert_eq!(ci.contains("--no-default-features"), no_default, "{ci}");
+        let audit = run(&["projects", "audit", "--json", "."]);
+        assert!(audit.status.success(), "{audit:?}");
+        let audit: serde_json::Value = serde_json::from_slice(&audit.stdout).unwrap();
+        assert_eq!(audit["projects"][0]["ciStatus"], "managed", "{audit}");
+    }
 }
 
 #[test]

@@ -146,7 +146,9 @@ fn crow_workflow_steps(
             .filter(|command| {
                 !matches!(
                     *command,
-                    crate::render::crow::SCCACHE_PROBE | crate::render::crow::SCCACHE_STATS
+                    crate::render::crow::SCCACHE_PROBE
+                        | crate::render::crow::SCCACHE_STATS
+                        | crate::render::crow::PIN_CONTAINER_TOOLCHAIN
                 )
             })
             .map(|command| command.trim_end().replace("$$", "$"))

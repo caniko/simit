@@ -220,6 +220,7 @@ pub struct CiOptions {
     /// An aggregate selector can include libraries beyond its representative package.
     pub workspace_has_doctests: bool,
     pub workspace_has_non_empty_default_feature: bool,
+    pub workspace_has_any_feature: bool,
     pub workspace_lib_members: Vec<String>,
     pub workspace_bin_members: Vec<String>,
     pub workspace_has_binary: bool,
@@ -292,6 +293,7 @@ impl Default for CiOptions {
             repository_checks: true,
             workspace_has_doctests: false,
             workspace_has_non_empty_default_feature: false,
+            workspace_has_any_feature: false,
             workspace_lib_members: Vec::new(),
             workspace_bin_members: Vec::new(),
             workspace_has_binary: false,
@@ -6237,8 +6239,10 @@ pub(super) fn cargo_format_command(package: &Package, options: &CiOptions) -> St
         .iter()
         .map(|glob| format!(" {}", shell_quote(&format!(":!{glob}"))))
         .collect();
+    // Crow's POSIX shell has no pipefail. Scope cleanup to this command even
+    // when Crow runs all the build commands in a single shell.
     format!(
-        "git ls-files -z -- '*.rs'{excludes} | xargs -0 -r rustfmt --edition {} --check --",
+        "(tmp=$(mktemp) && trap 'rm -f \"$tmp\"' 0 && git ls-files -z -- '*.rs'{excludes} > \"$tmp\" && xargs -0 -r rustfmt --edition {} --check -- < \"$tmp\")",
         shell_word(edition)
     )
 }
@@ -6393,7 +6397,7 @@ fn push_msrv_step(workflow: &mut String, runtime: Runtime, package: &Package, op
         return;
     }
     workflow.push_str("      - name: Check MSRV\n        run: |\n");
-    for line in msrv_check_command(runtime, package, options).lines() {
+    for line in msrv_check_command(runtime, package, options, false).lines() {
         workflow.push_str("          ");
         workflow.push_str(line);
         workflow.push('\n');
@@ -6405,9 +6409,10 @@ pub(super) fn msrv_check_command(
     runtime: Runtime,
     package: &Package,
     options: &CiOptions,
+    locked: bool,
 ) -> String {
     let version = package.rust_version.as_deref().expect("validated MSRV");
-    let mut command = String::from("set -eu\n");
+    let mut command = String::from("(\nset -eu\n");
     if runtime == Runtime::Nix {
         // A shell named `msrv` is not sufficient evidence of the actual compiler.
         // Fail closed if a custom flake accidentally aliases its default shell.
@@ -6425,10 +6430,14 @@ pub(super) fn msrv_check_command(
         .expect("write");
     }
     push_package_selector(&mut command, package, options);
+    if locked {
+        command.push_str(" --locked");
+    }
     command.push_str(" --all-targets");
     if options.all_features {
         command.push_str(" --all-features");
     }
+    command.push_str("\n)");
     command
 }
 
@@ -6574,9 +6583,8 @@ pub(crate) fn release_plz_checks(
             workflow,
             "      - name: Format check\n        run: |\n          # Expand formatter variables inside the Nix shell.\n          # shellcheck disable=SC2016\n          nix develop -c {NIX_FORMAT_COMMAND}\n\n"
         ).expect("write");
-    } else {
-        workflow
-            .push_str("      - name: Format check\n        run: cargo fmt --all -- --check\n\n");
+    } else if let Some(package) = packages.first() {
+        workflow.push_str(&cargo_format_step(package, options));
     }
     if needs_nix {
         if options.independent_lanes {
@@ -6661,12 +6669,13 @@ fn trim_trailing_blank_lines(workflow: &mut String) {
 }
 
 pub(super) fn needs_no_default_pass(package: &Package, options: &CiOptions) -> bool {
-    options.all_features
-        || if options.workspace_strategy == WorkspaceStrategy::Aggregate {
-            options.workspace_has_non_empty_default_feature
-        } else {
-            package.has_non_empty_default_feature()
-        }
+    let aggregate = options.workspace_strategy == WorkspaceStrategy::Aggregate;
+    match (aggregate, options.all_features) {
+        (true, true) => options.workspace_has_any_feature,
+        (true, false) => options.workspace_has_non_empty_default_feature,
+        (false, true) => package.has_any_feature(),
+        (false, false) => package.has_non_empty_default_feature(),
+    }
 }
 
 pub(super) fn has_doctests(package: &Package, options: &CiOptions) -> bool {
