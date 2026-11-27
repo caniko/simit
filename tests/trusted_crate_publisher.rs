@@ -1203,6 +1203,7 @@ fn direct_publisher_rendering_validates_all_candidate_environment_names() {
                 "required_env" => options.required_env.push(name.into()),
                 "extra_env" => options.extra_env.push((name.into(), "safe".into())),
                 _ => options.required_gates.push(RequiredGate {
+                    secret: None,
                     id: "build".into(),
                     run: "cargo test".into(),
                     runtime: None,

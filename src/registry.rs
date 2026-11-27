@@ -1397,7 +1397,9 @@ fn infer_expected_primary_ci_files(
             .unwrap_or(inferred_release_runner),
         windows: resolved_runner_override(resolved.windows_runner.as_deref()).or(windows_runner),
     };
-    let options = resolved.ci_options(&config, resolved.with_artifacts, resolved.omnix_ref.clone());
+    let mut options =
+        resolved.ci_options(&config, resolved.with_artifacts, resolved.omnix_ref.clone());
+    crate::ci_resolution::apply_cargo_metadata(&mut options, &metadata)?;
     let self_check_runner_override = single_runner_label(&runners.ci);
     let self_check_windows_runner_override = runners.windows.as_ref().and_then(single_runner_label);
     let self_check = ci::SelfCheckOptions {
@@ -1421,18 +1423,6 @@ fn infer_expected_primary_ci_files(
     for (index, package) in generation_packages.into_iter().enumerate() {
         let package_options = ci::CiOptions {
             repository_checks: index == 0,
-            workspace_has_doctests: resolved.workspace_strategy
-                == crate::cli::WorkspaceStrategy::Aggregate
-                && packages.iter().any(Package::has_doctests),
-            workspace_has_features: resolved.workspace_strategy
-                == crate::cli::WorkspaceStrategy::Aggregate
-                && packages.iter().any(|package| !package.features.is_empty()),
-            workspace_has_library: resolved.workspace_strategy
-                == crate::cli::WorkspaceStrategy::Aggregate
-                && packages.iter().any(Package::has_library_target),
-            workspace_has_binary: resolved.workspace_strategy
-                == crate::cli::WorkspaceStrategy::Aggregate
-                && packages.iter().any(Package::has_binary_target),
             package_scoped,
             publish_crates: options.publish_crates
                 && resolved.publish_strategy == crate::config::PublishStrategy::Members,
@@ -1738,7 +1728,8 @@ fn infer_expected_crow_files(
     } else {
         CrowWorkflowFormat::Yaml
     };
-    let crow = config.ci.crow.clone();
+    let mut crow = config.ci.crow.clone();
+    crow.format = format;
     let runner = resolved_runner_override(resolved.runner.as_deref()).unwrap_or(ResolvedRunner {
         name: None,
         labels: vec!["crow-default".to_owned()],
@@ -1750,6 +1741,7 @@ fn infer_expected_crow_files(
     };
     let mut options =
         resolved.ci_options(&config, resolved.with_artifacts, resolved.omnix_ref.clone());
+    crate::ci_resolution::apply_cargo_metadata(&mut options, &metadata)?;
     options.publish_crates = resolved.publish_crates || resolved.with_artifacts;
     let step_runners = resolved
         .step_runners
@@ -1764,13 +1756,19 @@ fn infer_expected_crow_files(
             )
         })
         .collect::<BTreeMap<_, _>>();
-    let package_scoped = metadata.workspace_members.len() > 1;
+    let aggregate_package = crate::ci_resolution::crow_aggregate_package(&options, &packages);
+    let package_scoped = metadata.workspace_members.len() > 1 && aggregate_package.is_none();
     let self_check = metadata
         .packages
         .iter()
         .any(|package| package.name == "simit");
     let mut files = Vec::new();
-    for (index, package) in packages.iter().enumerate() {
+    let generation_packages = if let Some(package) = aggregate_package {
+        vec![package]
+    } else {
+        packages.iter().collect::<Vec<_>>()
+    };
+    for (index, package) in generation_packages.into_iter().enumerate() {
         files.extend(crate::render::crow::files(
             crate::render::crow::FilesRequest {
                 format,
@@ -1794,6 +1792,15 @@ fn infer_expected_crow_files(
                 },
                 step_runners: &step_runners,
             },
+        )?);
+    }
+    if let Some(package) = aggregate_package.or_else(|| packages.first()) {
+        files.extend(crate::render::crow::manual_gate_files(
+            &crow,
+            resolved.runtime,
+            package,
+            &runners.ci,
+            &config.ci.manual_gates,
         )?);
     }
     if marked

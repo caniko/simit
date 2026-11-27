@@ -465,6 +465,7 @@ fn default_package_binding() -> String {
 pub struct RequiredGate {
     pub id: String,
     pub run: String,
+    pub secret: Option<String>,
     /// Omit to retain the enclosing CI or release job's setup.
     pub runtime: Option<GateRuntime>,
     #[serde(default = "default_gate_timeout_minutes")]
@@ -806,6 +807,15 @@ pub struct CiConfig {
     pub push_branches: Vec<String>,
     #[serde(default)]
     pub workspace_strategy: WorkspaceStrategy,
+    #[serde(default)]
+    pub exclude_packages: Vec<String>,
+    #[serde(default)]
+    pub package_features: BTreeMap<String, Vec<String>>,
+    pub clippy_all_targets: Option<bool>,
+    #[serde(default)]
+    pub format_all_rust_files: bool,
+    #[serde(default)]
+    pub format_excludes: Vec<String>,
     /// Crate publisher ownership; release-plz is selected during supported new
     /// GitHub Actions initialization. Existing configurations retain Members.
     #[serde(default)]
@@ -934,9 +944,15 @@ impl CiConfig {
             );
         }
         if !self.manual_gates.is_empty()
+            && provider != CiProvider::Crow
             && (provider != CiProvider::Actions || platform != Platform::Github)
         {
-            bail!("[[ci.manual_gates]] requires the effective GitHub Actions backend");
+            bail!("[[ci.manual_gates]] requires Crow or GitHub Actions");
+        }
+        if provider != CiProvider::Crow
+            && self.manual_gates.iter().any(|gate| gate.secret.is_some())
+        {
+            bail!("[[ci.manual_gates]].secret requires Crow");
         }
         if !self.target_smokes.is_empty()
             && (provider != CiProvider::Actions || platform != Platform::Github)
@@ -1536,7 +1552,41 @@ pub struct CrowCiConfig {
     pub labels: BTreeMap<String, String>,
     pub workspace_base: Option<String>,
     pub skip_clone: bool,
+    pub combine_steps: bool,
+    pub cargo_home: Option<String>,
+    pub shallow_clone: bool,
+    pub paths_include: Vec<String>,
+    pub paths_exclude: Vec<String>,
+    pub strip_ci_debug: bool,
+    pub build_jobs: Option<u32>,
+    pub sccache: Option<CrowSccache>,
     pub variables: BTreeMap<String, CrowVariable>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize, PartialEq, Eq)]
+#[serde(default, deny_unknown_fields)]
+pub struct CrowSccache {
+    pub enabled: bool,
+    pub env: BTreeMap<String, String>,
+    pub secret: Option<String>,
+}
+
+impl CrowCiConfig {
+    pub(crate) fn requires_cargo(&self) -> bool {
+        self.combine_steps
+            || self.strip_ci_debug
+            || self.build_jobs.is_some()
+            || self.sccache.is_some()
+    }
+
+    pub(crate) fn validate_runtime(&self, runtime: Runtime) -> Result<()> {
+        if self.requires_cargo() && runtime != Runtime::Cargo {
+            bail!(
+                "[ci.crow] combine_steps, strip_ci_debug, build_jobs and sccache require runtime = \"cargo\""
+            );
+        }
+        Ok(())
+    }
 }
 
 #[derive(Debug, Clone, Default, Deserialize, PartialEq, Eq, Serialize)]
@@ -1561,6 +1611,14 @@ impl Default for CrowCiConfig {
             labels: BTreeMap::new(),
             workspace_base: None,
             skip_clone: false,
+            combine_steps: false,
+            cargo_home: None,
+            shallow_clone: false,
+            paths_include: Vec::new(),
+            paths_exclude: Vec::new(),
+            strip_ci_debug: false,
+            build_jobs: None,
+            sccache: None,
             variables: BTreeMap::new(),
         }
     }
@@ -3806,6 +3864,86 @@ impl ProjectConfig {
         validate_target_smokes(&self.ci)?;
         validate_native_tests(&self.ci)?;
         validate_local_gate_steps(&self.ci)?;
+        let ci = &self.ci;
+        let crow = &ci.crow;
+        if let Some(runtime) = ci.runtime {
+            crow.validate_runtime(runtime)?;
+        }
+        if crow.combine_steps && (crow.check_command.is_some() || ci.check_command.is_some()) {
+            bail!("[ci.crow].combine_steps cannot be combined with check_command");
+        }
+        if crow.shallow_clone && crow.skip_clone {
+            bail!("[ci.crow].shallow_clone and skip_clone are mutually exclusive");
+        }
+        if crow.build_jobs == Some(0) {
+            bail!("[ci.crow].build_jobs must be at least 1");
+        }
+        if !ci.format_excludes.is_empty() && !ci.format_all_rust_files {
+            bail!("[ci].format_excludes requires format_all_rust_files = true");
+        }
+        for (label, values) in [
+            (
+                "[ci].exclude_packages",
+                ci.exclude_packages
+                    .iter()
+                    .map(String::as_str)
+                    .collect::<Vec<_>>(),
+            ),
+            (
+                "[ci].package_features keys",
+                ci.package_features.keys().map(String::as_str).collect(),
+            ),
+            (
+                "[ci].package_features values",
+                ci.package_features
+                    .values()
+                    .flatten()
+                    .map(String::as_str)
+                    .collect(),
+            ),
+            (
+                "[ci].format_excludes",
+                ci.format_excludes.iter().map(String::as_str).collect(),
+            ),
+            (
+                "[ci.crow].paths_include",
+                crow.paths_include.iter().map(String::as_str).collect(),
+            ),
+            (
+                "[ci.crow].paths_exclude",
+                crow.paths_exclude.iter().map(String::as_str).collect(),
+            ),
+            (
+                "[ci.crow].cargo_home",
+                crow.cargo_home.as_deref().into_iter().collect(),
+            ),
+        ] {
+            for entry in values {
+                if entry.trim().is_empty() || entry.contains(['\n', '\r', '\0']) {
+                    bail!("{label} must contain only non-empty single-line strings");
+                }
+            }
+        }
+        if let Some(cache) = &crow.sccache {
+            if let Some(secret) = &cache.secret {
+                validate_secret_name("[ci.crow.sccache].secret", secret)?;
+                if ci.required_secrets.contains(secret)
+                    || cache.env.contains_key(secret)
+                    || ci.extra_env.contains_key(secret)
+                    || secret == "RUSTC_WRAPPER"
+                {
+                    bail!(
+                        "[ci.crow.sccache].secret must not duplicate a required_secret, env key or RUSTC_WRAPPER"
+                    );
+                }
+            }
+            for (key, value) in &cache.env {
+                validate_secret_name("[ci.crow.sccache].env key", key)?;
+                if value.contains(['\n', '\r', '\0']) {
+                    bail!("[ci.crow.sccache].env value for `{key}` must be single-line");
+                }
+            }
+        }
         if self
             .ci
             .crow
@@ -5457,6 +5595,17 @@ fn validate_required_gates(ci: &CiConfig) -> Result<()> {
                 "simit project config: [[ci.required_gates.{id}]] timeout_minutes must be 1..=360"
             );
         }
+        if let Some(secret) = &gate.secret {
+            if !manual {
+                bail!("[[ci.required_gates]].secret is only supported on Crow manual gates");
+            }
+            validate_secret_name("[[ci.manual_gates]].secret", secret)?;
+            if ci.required_secrets.contains(secret) || gate.env.contains_key(secret) {
+                bail!(
+                    "[[ci.manual_gates]].secret must not duplicate a required_secret or gate env key"
+                );
+            }
+        }
         if let Some(artifacts) = &gate.artifacts {
             if gate.timeout_minutes > 345 {
                 bail!(
@@ -5785,6 +5934,9 @@ fn set_required_gates_table(table: &mut Table, key: &str, gates: &[RequiredGate]
         let mut item = InlineTable::default();
         item.insert("id", Value::from(gate.id.as_str()));
         item.insert("run", Value::from(gate.run.as_str()));
+        if let Some(secret) = &gate.secret {
+            item.insert("secret", Value::from(secret.as_str()));
+        }
         if let Some(runtime) = gate.runtime {
             item.insert("runtime", Value::from(runtime.as_str()));
         }
@@ -6119,6 +6271,23 @@ fn set_ci_table(table: &mut Table, ci: &CiConfig) -> Result<()> {
         ),
     );
     set_string_array(table, "packages", &ci.packages);
+    set_string_array(table, "exclude_packages", &ci.exclude_packages);
+    table.remove("package_features");
+    if !ci.package_features.is_empty() {
+        let mut features = Table::new();
+        for (package, names) in &ci.package_features {
+            let array: Array = names.iter().map(String::as_str).collect();
+            features[package] = value(array);
+        }
+        table["package_features"] = Item::Table(features);
+    }
+    if let Some(all_targets) = ci.clippy_all_targets {
+        table["clippy_all_targets"] = value(all_targets);
+    } else {
+        table.remove("clippy_all_targets");
+    }
+    set_bool(table, "format_all_rust_files", ci.format_all_rust_files);
+    set_string_array(table, "format_excludes", &ci.format_excludes);
     set_string_array(table, "nix_builds", &ci.nix_builds);
     set_nix_build_table(table, &ci.nix_build)?;
     match ci.all_features {
@@ -6212,6 +6381,23 @@ fn set_crow_table(table: &mut Table, crow: &CrowCiConfig) {
         crow_table["workspace_base"] = value(workspace_base.as_str());
     }
     set_bool(&mut crow_table, "skip_clone", crow.skip_clone);
+    set_bool(&mut crow_table, "combine_steps", crow.combine_steps);
+    set_optional_string(&mut crow_table, "cargo_home", crow.cargo_home.as_deref());
+    set_bool(&mut crow_table, "shallow_clone", crow.shallow_clone);
+    set_string_array(&mut crow_table, "paths_include", &crow.paths_include);
+    set_string_array(&mut crow_table, "paths_exclude", &crow.paths_exclude);
+    set_bool(&mut crow_table, "strip_ci_debug", crow.strip_ci_debug);
+    if let Some(jobs) = crow.build_jobs {
+        crow_table["build_jobs"] = value(i64::from(jobs));
+    }
+    if let Some(cache) = &crow.sccache {
+        let mut item = Table::new();
+        item.set_implicit(false);
+        set_bool(&mut item, "enabled", cache.enabled);
+        set_string_map(&mut item, "env", &cache.env);
+        set_optional_string(&mut item, "secret", cache.secret.as_deref());
+        crow_table["sccache"] = Item::Table(item);
+    }
     if !crow.variables.is_empty() {
         let mut variables = Table::new();
         variables.set_implicit(false);

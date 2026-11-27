@@ -38,6 +38,47 @@ license = "MIT"
 }
 
 #[test]
+fn optional_features_without_defaults_do_not_duplicate_native_checks() {
+    for (provider, platform, path) in [
+        ("crow", "forgejo", ".crow/build.yaml"),
+        ("actions", "github", ".github/workflows/ci.yaml"),
+    ] {
+        let temp = init_package(false);
+        let root = temp.path();
+        let manifest = root.join("Cargo.toml");
+        let text = fs::read_to_string(&manifest).unwrap();
+        fs::write(
+            manifest,
+            format!("{}\n[features]\nopt = []\n", text.replace("1.85", "1.93")),
+        )
+        .unwrap();
+        fs::write(
+            root.join("simit.toml"),
+            format!(
+                "[ci]\nprovider = '{provider}'\nplatform = '{platform}'\nruntime = 'cargo'\nall_features = false\n"
+            ),
+        )
+        .unwrap();
+        let output = simit()
+            .current_dir(root)
+            .args(["init", "ci"])
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let workflow = fs::read_to_string(root.join(path)).unwrap();
+        assert!(!workflow.contains("--no-default-features"), "{workflow}");
+        if provider == "crow" {
+            assert!(workflow.contains("rust:1.93-trixie"));
+            assert!(workflow.contains("cargo test --locked"));
+        }
+    }
+}
+
+#[test]
 fn primary_plan_is_versioned_read_only_and_preserves_other_owners() {
     let temp = init_package(false);
     fs::write(
@@ -6314,7 +6355,7 @@ fn workspace_flag_generates_per_package_workflows() {
             .contains("run: cargo clippy -p alpha --all-targets --all-features -- --deny warnings")
     );
     assert!(alpha_ci.contains("run: cargo package -p alpha --allow-dirty --list"));
-    assert!(!alpha_ci.contains("--no-default-features"));
+    assert!(alpha_ci.contains("run: cargo test -p alpha --no-default-features"));
 
     let beta_ci = read(&temp.path().join(".forgejo/workflows/ci-beta.yaml"));
     assert_yaml_parses(&beta_ci);

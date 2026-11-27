@@ -198,6 +198,15 @@ impl CiInference {
             return Ok(Self::default());
         }
 
+        let marked = marked
+            .iter()
+            .filter(|workflow| {
+                !workflow.relative_path.starts_with(".crow")
+                    || !workflow_name(&workflow.relative_path)
+                        .is_some_and(|name| name.starts_with("manual-"))
+            })
+            .cloned()
+            .collect::<Vec<_>>();
         let all_content = marked
             .iter()
             .map(|workflow| workflow.content.as_str())
@@ -238,18 +247,30 @@ impl CiInference {
             .then_some(WorkspaceStrategy::Aggregate)
             .or_else(|| workspace.map(|_| WorkspaceStrategy::Members));
 
-        let runtime = infer_ci_runtime(marked);
+        let runtime = infer_ci_runtime(&marked);
         let nextest_run = |line: &str| {
             line.contains("cargo nextest run") || line.contains("cargo-nextest nextest run")
         };
         Ok(Self {
             runtime: Some(runtime),
-            runner: infer_primary_runner_label(marked, "ci"),
-            windows_runner: infer_windows_runner_label(marked),
+            runner: infer_primary_runner_label(&marked, "ci"),
+            windows_runner: infer_windows_runner_label(&marked),
             workspace,
             workspace_strategy,
             packages,
-            all_features: Some(all_content.contains("--all-features")),
+            all_features: Some(
+                all_content
+                    .lines()
+                    .filter(|line| {
+                        line.contains("cargo test")
+                            || nextest_run(line)
+                            || line.contains("cargo clippy")
+                    })
+                    .map(|line| line.contains("--all-features"))
+                    .reduce(|left, right| left || right)
+                    // Custom and Omnix replacement lanes may only have an MSRV check.
+                    .unwrap_or_else(|| all_content.contains("--all-features")),
+            ),
             unit_tests_only: Some(all_content.lines().any(|line| {
                 (line.contains("cargo test") || nextest_run(line))
                     && (line.contains(" --lib") || line.contains(" --bins"))
@@ -263,7 +284,14 @@ impl CiInference {
             nix_flake_check: (runtime == Runtime::Nix
                 && all_content.contains("name: Project checks"))
             .then(|| all_content.contains("nix flake check")),
-            with_msrv: Some(all_content.contains("      - name: Check MSRV\n")),
+            with_msrv: Some(
+                all_content.contains("      - name: Check MSRV\n")
+                    || all_content.contains("name: cargo-msrv")
+                    || all_content.lines().any(|line| {
+                        line.contains("rustup toolchain install")
+                            && line.contains("--profile minimal")
+                    }),
+            ),
             with_audit: Some(
                 all_content.contains("cargo audit")
                     || all_content.contains("cargo-audit audit")
@@ -273,7 +301,11 @@ impl CiInference {
                 all_content.contains("cargo deny check")
                     || all_content.contains("cargo-deny deny check"),
             ),
-            with_docs: Some(all_content.contains("cargo doc --no-deps --all-features")),
+            with_docs: Some(all_content.lines().any(|line| {
+                line.contains("cargo doc")
+                    && line.contains("--no-deps")
+                    && line.contains("--all-features")
+            })),
             with_artifacts: Some(marked.iter().any(|workflow| {
                 workflow_name(&workflow.relative_path) == Some("release-artifacts")
             })),
@@ -288,7 +320,7 @@ impl CiInference {
                     Some("publish-crate" | "publish-workspace" | "release-plz")
                 )
             })),
-            publish_strategy: Some(infer_publish_strategy(marked)),
+            publish_strategy: Some(infer_publish_strategy(&marked)),
             required_gates: Some(required_gates),
             om_ci: Some(infer_om_ci_mode(&all_content)),
             omnix_ref: infer_omnix_ref(&all_content),
@@ -569,9 +601,16 @@ impl ResolvedCiInputs {
             components: cfg.ci.components.clone(),
             repository_checks: true,
             workspace_has_doctests: false,
-            workspace_has_features: false,
-            workspace_has_library: false,
+            workspace_has_non_empty_default_feature: false,
+            workspace_lib_members: Vec::new(),
+            workspace_bin_members: Vec::new(),
             workspace_has_binary: false,
+            exclude_packages: cfg.ci.exclude_packages.clone(),
+            package_features: cfg.ci.package_features.clone(),
+            clippy_all_targets: cfg.ci.clippy_all_targets.unwrap_or(true),
+            format_all_rust_files: cfg.ci.format_all_rust_files,
+            format_excludes: cfg.ci.format_excludes.clone(),
+            format_edition: None,
             all_features: self.all_features,
             unit_tests_only: self.unit_tests_only,
             nix_substituters: cfg.release.artifacts.substituters.clone(),
@@ -635,7 +674,8 @@ impl ResolvedCiInputs {
         // Independent Cargo lanes can coexist with a meaningful flake. Keep the
         // runtime choice even when there is no generated workflow to infer from.
         ci.runtime =
-            (self.runtime != Runtime::Cargo || ci.independent_lanes).then_some(self.runtime);
+            (self.runtime != Runtime::Cargo || ci.independent_lanes || ci.crow.requires_cargo())
+                .then_some(self.runtime);
         // Native system runners replace the single runner, and config
         // validation rejects both together.
         ci.runner = runner.filter(|_| ci.nix_system_runners.is_empty());
@@ -664,6 +704,87 @@ impl ResolvedCiInputs {
             .then(|| omnix_ref.to_owned());
         ci
     }
+}
+
+/// Resolve the metadata shared by CI generation and registry drift checks.
+pub(crate) fn apply_cargo_metadata(
+    options: &mut CiOptions,
+    metadata: &crate::cargo::Metadata,
+) -> Result<()> {
+    if options.format_all_rust_files {
+        options.format_edition = crate::cargo::rustfmt_edition(metadata).ok();
+    }
+    if options.workspace_strategy != WorkspaceStrategy::Aggregate {
+        if !options.exclude_packages.is_empty() || !options.package_features.is_empty() {
+            bail!(
+                "[ci].exclude_packages and package_features require workspace_strategy = \"aggregate\""
+            );
+        }
+        return Ok(());
+    }
+    let members: BTreeMap<_, _> = metadata
+        .packages
+        .iter()
+        .filter(|package| metadata.workspace_members.contains(&package.id))
+        .map(|package| (package.name.as_str(), package))
+        .collect();
+    for name in &options.exclude_packages {
+        if !members.contains_key(name.as_str()) {
+            bail!("[ci].exclude_packages: `{name}` is not a workspace member");
+        }
+    }
+    for (name, features) in &options.package_features {
+        let Some(package) = members.get(name.as_str()) else {
+            bail!("[ci].package_features: `{name}` is not a workspace member");
+        };
+        for feature in features {
+            if !package.features.contains_key(feature) {
+                bail!("[ci].package_features: `{name}` has no feature `{feature}`");
+            }
+        }
+    }
+    let mut any_selected = false;
+    for package in members
+        .values()
+        .filter(|package| !options.exclude_packages.contains(&package.name))
+    {
+        any_selected = true;
+        options.workspace_has_doctests |= package.has_doctests();
+        options.workspace_has_non_empty_default_feature |= package.has_non_empty_default_feature();
+        options.workspace_has_binary |= package.has_binary_target();
+        if package.has_library_target() {
+            options.workspace_lib_members.push(package.name.clone());
+        } else if package.has_binary_target() {
+            options.workspace_bin_members.push(package.name.clone());
+        } else if options.unit_tests_only || !options.clippy_all_targets {
+            bail!(
+                "workspace member `{}` has neither a lib nor a bin target; exclude it or enable other targets",
+                package.name
+            );
+        }
+    }
+    if !any_selected {
+        bail!("[ci].exclude_packages excludes every workspace member");
+    }
+    Ok(())
+}
+
+pub(crate) fn crow_aggregate_package<'a>(
+    options: &CiOptions,
+    packages: &'a [crate::cargo::Package],
+) -> Option<&'a crate::cargo::Package> {
+    if options.workspace_strategy != WorkspaceStrategy::Aggregate {
+        return None;
+    }
+    packages
+        .iter()
+        .filter(|package| !options.exclude_packages.contains(&package.name))
+        .max_by_key(|package| {
+            package
+                .rust_version
+                .as_deref()
+                .map(crate::cargo::rust_version_key)
+        })
 }
 
 #[derive(Debug, Clone, Default)]
@@ -1060,6 +1181,7 @@ fn infer_required_gates(content: &str) -> Vec<crate::config::RequiredGate> {
             continue;
         }
         gates.push(crate::config::RequiredGate {
+            secret: None,
             id: id.to_owned(),
             run,
             runtime: None,
