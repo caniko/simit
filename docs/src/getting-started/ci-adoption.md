@@ -1554,7 +1554,8 @@ Simit runs `run` as written; it does not wrap a Nix gate in `nix develop`, so
 remote installables do not need a local flake. Explicit-runtime gates run in
 separate jobs in GitHub hosted releases and the trusted crate publisher.
 Release-plz qualifies gates in its shared job, so overrides there must match
-the project runtime. Crow CI and non-GitHub hosted releases do not support
+the project runtime. Crow CI rejects `[[ci.required_gates]]` and supports
+`[[ci.manual_gates]]` only. Non-GitHub hosted releases do not support
 runtime overrides for required gates. Forgejo Actions uses preinstalled Nix,
 so a required Nix gate there requires Nix CI on a Nix runner. Forgejo crate
 publication does not run required gates, so Simit rejects combining them with

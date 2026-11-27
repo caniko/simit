@@ -61,6 +61,8 @@ fn tracked_rust_format_excludes_modules_in_actions_and_crow() {
         fs::write(&lib, formatted).unwrap();
         fs::write(root.join("src/excluded.rs"), "fn  excluded( ) { }\n").unwrap();
         fs::write(root.join("src/odd '$\nname.rs"), "fn odd() {}\n").unwrap();
+        fs::write(root.join("src/crlf.rs"), b"pub fn crlf() {}\r\n").unwrap();
+        fs::write(root.join("src/bom.rs"), b"\xef\xbb\xbfpub fn bom() {}\n").unwrap();
         fs::write(root.join("rustfmt.toml"), "tab_spaces = 2\n").unwrap();
         git(&["add", "--", "src"]);
         fs::write(

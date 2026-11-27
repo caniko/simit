@@ -211,7 +211,7 @@ fn release_plz_uses_the_configured_tracked_file_format_check() {
         .as_str()
         .unwrap();
     assert!(format.contains("git ls-files -z -- '*.rs' ':!vendor/**'"));
-    assert!(format.contains("rustfmt --edition 2024 < \"$f\" > \"$out\""));
+    assert!(format.contains("rustfmt --edition 2024 --check < \"$f\" > \"$out\""));
 }
 
 #[test]

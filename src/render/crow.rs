@@ -660,9 +660,10 @@ pub(crate) fn manual_gate_files(
                     .clone()
                     .unwrap_or_else(|| DEFAULT_CROW_NIX_IMAGE.to_owned()),
             };
+            // Use short flags and integer seconds so both GNU and BusyBox timeout accept it.
+            let timeout_seconds = gate.timeout_minutes.saturating_mul(60);
             let command = format!(
-                "timeout --signal=TERM --kill-after=30s {}m sh -ec {}",
-                gate.timeout_minutes,
+                "timeout -s TERM -k 30 {timeout_seconds} sh -ec {}",
                 shell_quote(&gate.run)
             );
             let mut step = step(&name, &image, command.replace('$', "$$"));

@@ -6263,13 +6263,20 @@ pub(super) fn cargo_format_command(package: &Package, options: &CiOptions) -> St
     let check = if excludes.is_empty() {
         format!("rustfmt --edition {edition} --check --")
     } else {
-        // File mode follows `mod` declarations; stdin isolates the file and
-        // discovers rustfmt.toml from the repository working directory.
+        // File mode follows `mod` declarations; stdin `--check` isolates the
+        // file, matches CRLF/UTF-8 BOM handling, and discovers rustfmt.toml
+        // from the repository working directory. Because rustfmt currently
+        // exits 0 on stdin diffs, treat non-empty diff output as a failure too.
         let script = format!(
             "out=$(mktemp) || exit 1; trap 'rm -f \"$out\"' 0; failed=0; \
                for f do \
-                   rustfmt --edition {edition} < \"$f\" > \"$out\" || exit 1; \
-                   diff -u -- \"$f\" \"$out\" || {{ [ \"$?\" -eq 1 ] || exit 1; failed=1; }}; \
+                   if ! rustfmt --edition {edition} --check < \"$f\" > \"$out\"; then \
+                       if [ -s \"$out\" ]; then printf 'Diff in %s:\\n' \"$f\"; cat \"$out\"; fi; \
+                       exit 1; \
+                   fi; \
+                   if [ -s \"$out\" ]; then \
+                       printf 'Diff in %s:\\n' \"$f\"; cat \"$out\"; failed=1; \
+                   fi; \
                done; exit \"$failed\""
         );
         format!("sh -c {} _", shell_quote(&script))

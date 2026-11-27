@@ -58,7 +58,7 @@ cargo_home = "/work/cargo"
     assert_eq!(gate["steps"][0]["environment"]["CARGO_HOME"], "/work/cargo");
     assert_eq!(
         gate["steps"][0]["commands"][1],
-        "timeout --signal=TERM --kill-after=30s 30m sh -ec 'cargo audit && cargo test --all-features && cargo deny check'"
+        "timeout -s TERM -k 30 1800 sh -ec 'cargo audit && cargo test --all-features && cargo deny check'"
     );
     assert!(
         gate["steps"][0]["commands"][0]
@@ -419,7 +419,7 @@ secret = "SCCACHE_TOKEN"
     assert_eq!(gate["steps"][0]["environment"]["CACHE_NAME"], "test");
     assert!(gate["steps"][0]["environment"]["NIX_CONFIG"].is_string());
     let command = gate["steps"][0]["commands"][0].as_str().unwrap();
-    assert!(command.starts_with("timeout --signal=TERM --kill-after=30s 45m sh -ec '"));
+    assert!(command.starts_with("timeout -s TERM -k 30 2700 sh -ec '"));
     assert!(command.contains("\"$$CACHE_NAME\"") && command.contains("$$literal"));
     #[cfg(target_os = "linux")]
     assert!(
