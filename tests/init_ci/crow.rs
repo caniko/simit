@@ -56,6 +56,10 @@ cargo_home = "/work/cargo"
         serde_yaml::from_str(&fs::read_to_string(root.join(".crow/manual-gates.yaml")).unwrap())
             .unwrap();
     assert_eq!(gate["steps"][0]["environment"]["CARGO_HOME"], "/work/cargo");
+    assert_eq!(
+        gate["steps"][0]["commands"][1],
+        "timeout --signal=TERM --kill-after=30s 30m sh -ec 'cargo audit && cargo test --all-features && cargo deny check'"
+    );
     assert!(
         gate["steps"][0]["commands"][0]
             .as_str()
@@ -309,7 +313,8 @@ local_gate_steps = [{ name = "Extra local step", run = "true" }]
 [[ci.manual_gates]]
 id = "push_cache"
 runtime = "nix"
-run = "nix run .#cache"
+timeout_minutes = 45
+run = """printf '%s\\n' \"$CACHE_NAME\" | grep -qx test && test \"$(printf '%s' '$literal')\" = '$literal'"""
 env = { CACHE_NAME = "test" }
 secret = "ATTIC_TOKEN"
 
@@ -413,10 +418,22 @@ secret = "SCCACHE_TOKEN"
     );
     assert_eq!(gate["steps"][0]["environment"]["CACHE_NAME"], "test");
     assert!(gate["steps"][0]["environment"]["NIX_CONFIG"].is_string());
+    let command = gate["steps"][0]["commands"][0].as_str().unwrap();
+    assert!(command.starts_with("timeout --signal=TERM --kill-after=30s 45m sh -ec '"));
+    assert!(command.contains("\"$$CACHE_NAME\"") && command.contains("$$literal"));
+    #[cfg(target_os = "linux")]
+    assert!(
+        std::process::Command::new("sh")
+            .args(["-ec", &command.replace("$$", "$")])
+            .env("CACHE_NAME", "test")
+            .status()
+            .unwrap()
+            .success()
+    );
     let script = fs::read_to_string(root.join("scripts/ci-local.sh")).unwrap();
     assert!(script.contains("${CI_REPO:-local}"), "{script}");
     assert!(!script.contains("$${CI_REPO:-local}"), "{script}");
-    assert!(!script.contains("nix run .#cache"), "{script}");
+    assert!(!script.contains("grep -qx test"), "{script}");
     assert!(!script.contains("sccache"), "{script}");
     assert!(!script.contains("RUSTUP_TOOLCHAIN"), "{script}");
     let format_command = commands[3].replace("$$", "$");

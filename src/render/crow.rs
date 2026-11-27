@@ -660,7 +660,12 @@ pub(crate) fn manual_gate_files(
                     .clone()
                     .unwrap_or_else(|| DEFAULT_CROW_NIX_IMAGE.to_owned()),
             };
-            let mut step = step(&name, &image, gate.run.replace('$', "$$"));
+            let command = format!(
+                "timeout --signal=TERM --kill-after=30s {}m sh -ec {}",
+                gate.timeout_minutes,
+                shell_quote(&gate.run)
+            );
+            let mut step = step(&name, &image, command.replace('$', "$$"));
             if runtime == Runtime::Nix {
                 add_nix_environment(std::slice::from_mut(&mut step));
             } else {

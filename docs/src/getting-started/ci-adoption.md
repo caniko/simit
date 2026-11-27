@@ -1555,14 +1555,17 @@ remote installables do not need a local flake. Explicit-runtime gates run in
 separate jobs in GitHub hosted releases and the trusted crate publisher.
 Release-plz qualifies gates in its shared job, so overrides there must match
 the project runtime. Crow CI and non-GitHub hosted releases do not support
-runtime overrides. Forgejo Actions uses preinstalled Nix, so a required Nix
-gate there requires Nix CI on a Nix runner. Forgejo crate publication does not
-run required gates, so Simit rejects combining them with `publish_crates = true`.
+runtime overrides for required gates. Forgejo Actions uses preinstalled Nix,
+so a required Nix gate there requires Nix CI on a Nix runner. Forgejo crate
+publication does not run required gates, so Simit rejects combining them with
+`publish_crates = true`.
 
-`[[ci.manual_gates]]` takes the same fields but renders the gates into
-`manual-gates.yaml`, triggered only by `workflow_dispatch` (GitHub Actions
-only). They stay generated and drift-checked, never run on push or pull
-requests, and never gate publication. Ids are unique across both lists.
+GitHub Actions renders `[[ci.manual_gates]]` into `manual-gates.yaml` with
+`workflow_dispatch`. Crow renders one `.crow/manual-<id>.yaml` per gate with
+a `manual` trigger. Crow manual gates can override the workflow runtime with
+`runtime = "cargo"` or `"nix"`. Both backends enforce `timeout_minutes`.
+Manual gates are generated and drift-checked, but never run on push or pull
+requests or gate publication. IDs are unique across both lists.
 
 On GitHub Actions, a gate can retain diagnostic files after success or failure:
 

@@ -37,6 +37,95 @@ license = "MIT"
     temp
 }
 
+#[cfg(unix)]
+#[test]
+fn tracked_rust_format_excludes_modules_in_actions_and_crow() {
+    for (provider, platform, path) in [
+        ("actions", "github", ".github/workflows/ci.yaml"),
+        ("crow", "forgejo", ".crow/build.yaml"),
+    ] {
+        let temp = init_package(false);
+        let root = temp.path();
+        let git = |args: &[&str]| {
+            let output = Command::new("git")
+                .current_dir(root)
+                .args(args)
+                .output()
+                .unwrap();
+            assert!(output.status.success(), "{output:?}");
+        };
+        git(&["init", "-q"]);
+        let lib = root.join("src/lib.rs");
+        // Two-space indentation requires rustfmt to discover the root config.
+        let formatted = "mod excluded;\n\npub fn answer() -> u32 {\n  42\n}\n";
+        fs::write(&lib, formatted).unwrap();
+        fs::write(root.join("src/excluded.rs"), "fn  excluded( ) { }\n").unwrap();
+        fs::write(root.join("src/odd '$\nname.rs"), "fn odd() {}\n").unwrap();
+        fs::write(root.join("rustfmt.toml"), "tab_spaces = 2\n").unwrap();
+        git(&["add", "--", "src"]);
+        fs::write(
+            root.join("simit.toml"),
+            format!(
+                "[ci]\nprovider = '{provider}'\nplatform = '{platform}'\nruntime = 'cargo'\nformat_all_rust_files = true\nformat_excludes = ['src/excluded.rs']\n"
+            ),
+        )
+        .unwrap();
+        let output = simit()
+            .current_dir(root)
+            .args(["init", "ci"])
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "{output:?}");
+        let yaml: serde_yaml::Value =
+            serde_yaml::from_str(&fs::read_to_string(root.join(path)).unwrap()).unwrap();
+        let command = if provider == "crow" {
+            let command = yaml["steps"]
+                .as_sequence()
+                .unwrap()
+                .iter()
+                .flat_map(|step| step["commands"].as_sequence().into_iter().flatten())
+                .filter_map(serde_yaml::Value::as_str)
+                .find(|command| command.contains("git ls-files"))
+                .unwrap();
+            let unescaped = command.replace("$$", "$");
+            assert_eq!(command, unescaped.replace('$', "$$"));
+            unescaped
+        } else {
+            yaml["jobs"]
+                .as_mapping()
+                .unwrap()
+                .values()
+                .flat_map(|job| job["steps"].as_sequence().into_iter().flatten())
+                .find(|step| step["name"] == "Format check")
+                .unwrap()["run"]
+                .as_str()
+                .unwrap()
+                .to_owned()
+        };
+        let run = || {
+            Command::new("sh")
+                .current_dir(root)
+                .args(["-ec", &command])
+                .output()
+                .unwrap()
+        };
+        let output = run();
+        assert!(output.status.success(), "{provider}: {output:?}");
+        fs::write(&lib, "mod excluded;\npub fn answer()->u32{42}\n").unwrap();
+        let output = run();
+        assert!(
+            !output.status.success() && !output.stdout.is_empty(),
+            "{output:?}"
+        );
+        fs::write(&lib, "mod excluded;\nfn invalid( {\n").unwrap();
+        let output = run();
+        assert!(
+            !output.status.success() && !output.stderr.is_empty(),
+            "{output:?}"
+        );
+    }
+}
+
 #[test]
 fn native_no_default_checks_require_a_distinct_feature_set() {
     for (provider, platform, path) in [

@@ -6248,21 +6248,36 @@ pub(super) fn cargo_format_command(package: &Package, options: &CiOptions) -> St
     if !options.format_all_rust_files {
         return "cargo fmt --all -- --check".to_owned();
     }
-    let edition = options
-        .format_edition
-        .as_deref()
-        .or(package.edition.as_deref())
-        .unwrap_or("2021");
+    let edition = shell_word(
+        options
+            .format_edition
+            .as_deref()
+            .or(package.edition.as_deref())
+            .unwrap_or("2021"),
+    );
     let excludes: String = options
         .format_excludes
         .iter()
         .map(|glob| format!(" {}", shell_quote(&format!(":!{glob}"))))
         .collect();
+    let check = if excludes.is_empty() {
+        format!("rustfmt --edition {edition} --check --")
+    } else {
+        // File mode follows `mod` declarations; stdin isolates the file and
+        // discovers rustfmt.toml from the repository working directory.
+        let script = format!(
+            "out=$(mktemp) || exit 1; trap 'rm -f \"$out\"' 0; failed=0; \
+               for f do \
+                   rustfmt --edition {edition} < \"$f\" > \"$out\" || exit 1; \
+                   diff -u -- \"$f\" \"$out\" || {{ [ \"$?\" -eq 1 ] || exit 1; failed=1; }}; \
+               done; exit \"$failed\""
+        );
+        format!("sh -c {} _", shell_quote(&script))
+    };
     // Crow's POSIX shell has no pipefail. Scope cleanup to this command even
     // when Crow runs all the build commands in a single shell.
     format!(
-        "(tmp=$(mktemp) && trap 'rm -f \"$tmp\"' 0 && git ls-files -z -- '*.rs'{excludes} > \"$tmp\" && xargs -0 -r rustfmt --edition {} --check -- < \"$tmp\")",
-        shell_word(edition)
+        "(tmp=$(mktemp) && trap 'rm -f \"$tmp\"' 0 && git ls-files -z -- '*.rs'{excludes} > \"$tmp\" && xargs -0 -r {check} < \"$tmp\")"
     )
 }
 
