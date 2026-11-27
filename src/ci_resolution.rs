@@ -340,6 +340,7 @@ impl CiInference {
 )]
 pub struct ResolvedCiInputs {
     pub runtime: Runtime,
+    cargo_over_meaningful_flake: bool,
     pub runner: Option<String>,
     pub windows_runner: Option<String>,
     pub step_runners: BTreeMap<String, String>,
@@ -504,6 +505,8 @@ impl ResolvedCiInputs {
 
         Ok(Self {
             runtime,
+            cargo_over_meaningful_flake: runtime == Runtime::Cargo
+                && meaningful_flake_outputs(workspace_root)?,
             runner: cli.runner.clone().or(config.runner).or(inference.runner),
             granular: cli.granular,
             windows_runner: cli
@@ -610,6 +613,10 @@ impl ResolvedCiInputs {
             workspace_has_any_feature: false,
             workspace_lib_members: Vec::new(),
             workspace_bin_members: Vec::new(),
+            lib_has_any_feature: false,
+            lib_has_non_empty_default_feature: false,
+            bin_has_any_feature: false,
+            bin_has_non_empty_default_feature: false,
             workspace_has_binary: false,
             exclude_packages: cfg.ci.exclude_packages.clone(),
             package_features: cfg.ci.package_features.clone(),
@@ -677,9 +684,9 @@ impl ResolvedCiInputs {
     ) -> CiConfig {
         let mut ci = cfg.ci.clone();
         ci.platform = Some(platform);
-        // Independent Cargo lanes can coexist with a meaningful flake. Keep the
-        // runtime choice even when there is no generated workflow to infer from.
+        // A meaningful flake would otherwise infer Nix without generated workflows.
         ci.runtime = (self.runtime != Runtime::Cargo
+            || self.cargo_over_meaningful_flake
             || ci.runtime.is_some()
             || ci.independent_lanes
             || ci.crow.requires_cargo())
@@ -758,13 +765,19 @@ pub(crate) fn apply_cargo_metadata(
     {
         any_selected = true;
         options.workspace_has_doctests |= package.has_doctests();
-        options.workspace_has_non_empty_default_feature |= package.has_non_empty_default_feature();
-        options.workspace_has_any_feature |= package.has_any_feature();
+        let has_any_feature = package.has_any_feature();
+        let has_non_empty_default_feature = package.has_non_empty_default_feature();
+        options.workspace_has_non_empty_default_feature |= has_non_empty_default_feature;
+        options.workspace_has_any_feature |= has_any_feature;
         options.workspace_has_binary |= package.has_binary_target();
         if package.has_library_target() {
             options.workspace_lib_members.push(package.name.clone());
+            options.lib_has_any_feature |= has_any_feature;
+            options.lib_has_non_empty_default_feature |= has_non_empty_default_feature;
         } else if package.has_binary_target() {
             options.workspace_bin_members.push(package.name.clone());
+            options.bin_has_any_feature |= has_any_feature;
+            options.bin_has_non_empty_default_feature |= has_non_empty_default_feature;
         } else if options.unit_tests_only || !options.clippy_all_targets {
             bail!(
                 "workspace member `{}` has neither a lib nor a bin target; exclude it or enable other targets",

@@ -89,6 +89,29 @@ fn registry_file(data_home: &Path) -> PathBuf {
 }
 
 #[test]
+fn gitlab_flake_audit_rejects_cargo_only_formatting() {
+    let project = TempDir::new().unwrap();
+    let root = project.path();
+    fs::write(
+        root.join("flake.nix"),
+        "{ outputs = _: { checks = {}; }; }\n",
+    )
+    .unwrap();
+    fs::write(
+        root.join(".gitlab-ci.yml"),
+        simit::render::ci::gitlab_nix_flake_workflow(),
+    )
+    .unwrap();
+    fs::write(
+        root.join("simit.toml"),
+        "[ci]\nplatform = 'gitlab'\nformat_all_rust_files = true\n",
+    )
+    .unwrap();
+    let err = registry::audit_ci(root).unwrap_err();
+    assert!(err.to_string().contains("format_all_rust_files"), "{err:#}");
+}
+
+#[test]
 fn round_trips_load_save_with_fixture_project() {
     let env = EnvGuard::new();
     let project = TempDir::new().unwrap();

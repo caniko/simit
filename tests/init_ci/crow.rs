@@ -27,7 +27,7 @@ fn native_manual_gate_does_not_affect_inference_and_cargo_runtime_survives_witho
 all_features = false
 
 [[ci.manual_gates]]
-id = "security"
+id = "gates"
 runtime = "cargo"
 run = "cargo audit && cargo test --all-features && cargo deny check"
 
@@ -53,7 +53,7 @@ cargo_home = "/work/cargo"
         );
     }
     let gate: serde_yaml::Value =
-        serde_yaml::from_str(&fs::read_to_string(root.join(".crow/manual-security.yaml")).unwrap())
+        serde_yaml::from_str(&fs::read_to_string(root.join(".crow/manual-gates.yaml")).unwrap())
             .unwrap();
     assert_eq!(gate["steps"][0]["environment"]["CARGO_HOME"], "/work/cargo");
     assert!(
@@ -64,8 +64,14 @@ cargo_home = "/work/cargo"
     );
     let check = run(&["--check"]);
     assert!(check.status.success(), "{check:?}");
+    let audit = simit::registry::audit_ci(root).unwrap();
+    assert_eq!(
+        audit.status,
+        simit::registry::FeatureStatus::Managed,
+        "{audit:?}"
+    );
     fs::remove_file(root.join(".crow/build.yaml")).unwrap();
-    fs::remove_file(root.join(".crow/manual-security.yaml")).unwrap();
+    fs::remove_file(root.join(".crow/manual-gates.yaml")).unwrap();
     let regenerated = run(&[]);
     assert!(regenerated.status.success(), "{regenerated:?}");
     assert_eq!(
@@ -107,6 +113,16 @@ fn invalid_crow_native_options_are_rejected() {
             "required_secrets = ['REPO_TOKEN']",
             "[ci.crow.sccache]\nenv = { REPO_TOKEN = 'plaintext' }",
             "REPO_TOKEN",
+        ),
+        (
+            "runtime = 'cargo'",
+            "[ci.crow]\ncheck_command = 'cargo check'\ncheck_secret = 'CHECK_TOKEN'\n[ci.crow.sccache]\nenv = { CHECK_TOKEN = 'plaintext' }",
+            "CHECK_TOKEN",
+        ),
+        (
+            "runtime = 'cargo'",
+            "[ci.crow]\ncheck_command = 'cargo check'\ncheck_push_secret = 'PUSH_TOKEN'\n[ci.crow.sccache]\nenv = { PUSH_TOKEN = 'plaintext' }",
+            "PUSH_TOKEN",
         ),
         ("format_all_rust_files = true", "", "format_all_rust_files"),
     ] {
@@ -157,17 +173,28 @@ fn crow_pins_native_steps_without_overriding_msrv_or_local_toolchains() {
         fs::set_permissions(path, fs::Permissions::from_mode(0o755)).unwrap();
     }
     for combine in [false, true] {
-        fs::write(root.join("simit.toml"), format!("[ci]\nprovider = 'crow'\nruntime = 'cargo'\nwith_msrv = true\nwith_docs = true\n[ci.crow]\ncombine_steps = {combine}\n")).unwrap();
+        fs::write(root.join("simit.toml"), format!("[ci]\nprovider = 'crow'\nruntime = 'cargo'\nwith_msrv = true\nwith_docs = true\nwith_deny = true\nwith_artifacts = true\npublish_crates = true\n[ci.crow]\ncombine_steps = {combine}\n")).unwrap();
         let output = simit()
             .current_dir(root)
             .args(["init", "ci"])
             .output()
             .unwrap();
         assert!(output.status.success(), "{output:?}");
-        let workflow: serde_yaml::Value =
-            serde_yaml::from_str(&fs::read_to_string(root.join(".crow/build.yaml")).unwrap())
-                .unwrap();
-        for step in workflow["steps"].as_sequence().unwrap() {
+        let workflows: [serde_yaml::Value; 3] = ["build", "publish-crate", "release-artifacts"]
+            .map(|name| {
+                serde_yaml::from_str(
+                    &fs::read_to_string(root.join(format!(".crow/{name}.yaml"))).unwrap(),
+                )
+                .unwrap()
+            });
+        if !combine {
+            let steps = workflows[0]["steps"].as_sequence().unwrap();
+            assert!(steps.iter().any(|step| step["name"] == "cargo-deny"));
+        }
+        for step in workflows
+            .iter()
+            .flat_map(|workflow| workflow["steps"].as_sequence().unwrap())
+        {
             let name = step["name"].as_str().unwrap();
             let commands: Vec<_> = step["commands"]
                 .as_sequence()

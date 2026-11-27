@@ -932,6 +932,14 @@ impl CiConfig {
         platform: Platform,
     ) -> Result<()> {
         self.validate_required_gate_artifacts_backend(provider, platform)?;
+        if (provider != CiProvider::Actions || platform != Platform::Github)
+            && self
+                .manual_gates
+                .iter()
+                .any(|gate| gate.artifacts.is_some())
+        {
+            bail!("manual gate artifacts require the effective GitHub Actions backend");
+        }
         if provider == CiProvider::Crow
             && let Some(gate) = self
                 .required_gates
@@ -996,21 +1004,13 @@ impl CiConfig {
         provider: CiProvider,
         platform: Platform,
     ) -> Result<()> {
-        if provider != CiProvider::Actions || platform != Platform::Github {
-            if self
+        if (provider != CiProvider::Actions || platform != Platform::Github)
+            && self
                 .required_gates
                 .iter()
                 .any(|gate| gate.artifacts.is_some())
-            {
-                bail!("required gate artifacts require the effective GitHub Actions backend");
-            }
-            if self
-                .manual_gates
-                .iter()
-                .any(|gate| gate.artifacts.is_some())
-            {
-                bail!("manual gate artifacts require the effective GitHub Actions backend");
-            }
+        {
+            bail!("required gate artifacts require the effective GitHub Actions backend");
         }
         Ok(())
     }
@@ -3966,6 +3966,8 @@ impl ProjectConfig {
                 if key == "RUSTC_WRAPPER"
                     || cache.secret.as_ref() == Some(key)
                     || ci.required_secrets.contains(key)
+                    || crow.check_secret.as_ref() == Some(key)
+                    || crow.check_push_secret.as_ref() == Some(key)
                 {
                     bail!(
                         "[ci.crow.sccache].env key `{key}` must not duplicate RUSTC_WRAPPER or a secret"

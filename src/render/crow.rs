@@ -371,7 +371,7 @@ fn build_workflow(
                 } else {
                     name.to_owned()
                 };
-                for (selection, targets, members) in ci::test_selections(package, options) {
+                for (selection, targets, members) in ci::test_selections(package, options, pass) {
                     let features = ci::feature_args(options, members, pass);
                     let test = format!("{prefix}{harness}{locked}{features}{selection}{targets}");
                     let name = if members.is_some() {
@@ -534,10 +534,7 @@ fn build_workflow(
     if runtime == Runtime::Cargo {
         for step in &mut steps {
             cargo_environment(step, config);
-            if !matches!(
-                step.name.as_str(),
-                "cargo-msrv" | "cargo-audit" | "cargo-deny"
-            ) {
+            if !matches!(step.name.as_str(), "cargo-msrv" | "cargo-audit") {
                 pin_container_toolchain(step);
             }
         }
@@ -745,6 +742,9 @@ fn publish_workflow(
     for secret in &options.required_secrets {
         publish = publish.secret(secret);
     }
+    if runtime == Runtime::Cargo {
+        pin_container_toolchain(&mut publish);
+    }
     Workflow {
         name: "publish-crate".to_owned(),
         labels: labels(
@@ -782,6 +782,9 @@ fn artifacts_workflow(
         .command(build);
     for secret in &options.required_secrets {
         step = step.secret(secret);
+    }
+    if runtime == Runtime::Cargo {
+        pin_container_toolchain(&mut step);
     }
     Workflow {
         name: "release-artifacts".to_owned(),

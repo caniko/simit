@@ -3464,7 +3464,7 @@ fn crow_prebuilt_cargo_tools_run_in_their_own_gate_containers() {
         let command = |name: &str| {
             let step = steps.iter().find(|step| step["name"] == name).unwrap();
             let commands = step["commands"].as_sequence().unwrap();
-            let pinned = runtime == "cargo" && name == "cargo-nextest";
+            let pinned = runtime == "cargo" && matches!(name, "cargo-deny" | "cargo-nextest");
             assert_eq!(commands.len(), 1 + usize::from(pinned), "{name}");
             if pinned {
                 assert!(commands[0].as_str().unwrap().contains("$$(rustup default)"));
@@ -6839,6 +6839,83 @@ fn aggregate_workspace_strategy_can_limit_tests_to_library_targets() {
         ci.contains("run: nix develop -c cargo test --workspace --lib"),
         "generated CI:\n{ci}"
     );
+}
+
+#[test]
+fn aggregate_unit_tests_only_repeat_target_groups_with_distinct_features() {
+    for (provider, platform, path) in [
+        ("crow", "forgejo", ".crow/build.yaml"),
+        ("actions", "github", ".github/workflows/ci.yaml"),
+    ] {
+        let temp = init_workspace_fixture();
+        let root = temp.path();
+        let alpha = root.join("crates/alpha/Cargo.toml");
+        let alpha_manifest = read(&alpha);
+        let beta = root.join("crates/beta/Cargo.toml");
+        let manifest = read(&beta);
+        let beta_manifest = manifest.split("[features]").next().unwrap();
+        fs::remove_file(root.join("crates/beta/src/lib.rs")).unwrap();
+        fs::write(root.join("crates/beta/src/main.rs"), "fn main() {}\n").unwrap();
+        let optional = "\n[features]\nopt = []\n";
+        let default = "\n[features]\ndefault = ['opt']\nopt = []\n";
+        for (all_features, lib_features, bin_features, lib_repeats, bin_repeats) in [
+            (true, optional, "", true, false),
+            (false, default, optional, true, false),
+            (false, optional, default, false, true),
+        ] {
+            fs::write(&alpha, format!("{alpha_manifest}{lib_features}")).unwrap();
+            fs::write(&beta, format!("{beta_manifest}{bin_features}")).unwrap();
+            fs::write(
+                root.join("simit.toml"),
+                format!("[ci]\nprovider = '{provider}'\nplatform = '{platform}'\nruntime = 'cargo'\nworkspace = true\nworkspace_strategy = 'aggregate'\nunit_tests_only = true\nall_features = {all_features}\n"),
+            ).unwrap();
+            let output = simit()
+                .current_dir(root)
+                .args(["init", "ci"])
+                .output()
+                .unwrap();
+            assert!(output.status.success(), "{output:?}");
+            let workflow = read(&root.join(path));
+            for (target, repeats) in [(" --lib", lib_repeats), (" --bins", bin_repeats)] {
+                let passes: Vec<_> = workflow
+                    .lines()
+                    .filter(|line| line.contains("cargo test ") && line.contains(target))
+                    .map(|line| line.contains("--no-default-features"))
+                    .collect();
+                let expected: &[bool] = if repeats { &[false, true] } else { &[false] };
+                assert_eq!(passes, expected, "{provider}, {all_features}, {target}");
+            }
+        }
+    }
+}
+
+#[test]
+fn actions_cargo_runtime_survives_removing_workflows_on_a_flake_repo() {
+    let temp = init_package(true);
+    let root = temp.path();
+    fs::write(
+        root.join("flake.nix"),
+        "{ outputs = _: { checks = {}; }; }\n",
+    )
+    .unwrap();
+    let run = |args: &[&str]| {
+        let output = simit()
+            .current_dir(root)
+            .args(["init", "ci", "--platform", "github"])
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "{output:?}");
+    };
+    run(&["--runtime", "cargo"]);
+    let config: toml_edit::DocumentMut = read(&root.join("simit.toml")).parse().unwrap();
+    assert_eq!(
+        config["ci"].get("runtime").and_then(|item| item.as_str()),
+        Some("cargo")
+    );
+    fs::remove_dir_all(root.join(".github/workflows")).unwrap();
+    run(&[]);
+    assert!(read(&root.join(".github/workflows/ci.yaml")).contains("run: cargo test"));
 }
 
 #[test]

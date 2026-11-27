@@ -1838,10 +1838,6 @@ fn run_crow(
         resolved.windows_runner.clone(),
     );
     persisted_ci.provider = Some(CiProvider::Crow);
-    // Without generated workflows, runtime inference would fall back to the flake.
-    if resolved.runtime == Runtime::Cargo && workspace_root.join("flake.nix").is_file() {
-        persisted_ci.runtime = Some(Runtime::Cargo);
-    }
     persisted_ci.crow = crow;
     persisted_ci.publish_crates = publish_crates;
 

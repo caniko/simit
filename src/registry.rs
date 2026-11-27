@@ -891,6 +891,7 @@ fn is_manual_gates_workflow(file: &WorkflowFile) -> bool {
     // Target smokes and native tests are config-owned like manual gates: `init ci --check`
     // drift-checks them, and the workflow-inferred expectation cannot.
     file.marked
+        && !file.relative_path.starts_with(".crow")
         && matches!(
             file.relative_path
                 .file_name()
@@ -1173,6 +1174,7 @@ fn infer_expected_primary_ci_files(
     let platform = backend.platform();
     if platform == Platform::Gitlab && workspace_root.join("flake.nix").is_file() {
         // GitLab flake projects always render the Nix-only flake workflow.
+        config.ci.validate_nix_only_language_options()?;
         crate::commands::init_ci::validate_nix_only_publication(&config, platform, None)?;
         return gitlab_flake_files(&config);
     }

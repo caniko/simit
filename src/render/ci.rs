@@ -223,6 +223,10 @@ pub struct CiOptions {
     pub workspace_has_any_feature: bool,
     pub workspace_lib_members: Vec<String>,
     pub workspace_bin_members: Vec<String>,
+    pub lib_has_any_feature: bool,
+    pub lib_has_non_empty_default_feature: bool,
+    pub bin_has_any_feature: bool,
+    pub bin_has_non_empty_default_feature: bool,
     pub workspace_has_binary: bool,
     pub exclude_packages: Vec<String>,
     pub package_features: BTreeMap<String, Vec<String>>,
@@ -296,6 +300,10 @@ impl Default for CiOptions {
             workspace_has_any_feature: false,
             workspace_lib_members: Vec::new(),
             workspace_bin_members: Vec::new(),
+            lib_has_any_feature: false,
+            lib_has_non_empty_default_feature: false,
+            bin_has_any_feature: false,
+            bin_has_non_empty_default_feature: false,
             workspace_has_binary: false,
             exclude_packages: Vec::new(),
             package_features: BTreeMap::new(),
@@ -6138,6 +6146,7 @@ pub(super) fn unit_test_target_args(package: &Package, options: &CiOptions) -> &
 pub(super) fn test_selections<'a>(
     package: &Package,
     options: &'a CiOptions,
+    no_default: bool,
 ) -> Vec<(String, &'static str, Option<&'a [String]>)> {
     if options.workspace_strategy != WorkspaceStrategy::Aggregate || !options.unit_tests_only {
         return vec![(
@@ -6153,12 +6162,22 @@ pub(super) fn test_selections<'a>(
         return vec![(package_selector(package, options), " --bins", None)];
     }
     [
-        (&options.workspace_lib_members, " --lib"),
-        (&options.workspace_bin_members, " --bins"),
+        (
+            &options.workspace_lib_members,
+            " --lib",
+            options.lib_has_any_feature,
+            options.lib_has_non_empty_default_feature,
+        ),
+        (
+            &options.workspace_bin_members,
+            " --bins",
+            options.bin_has_any_feature,
+            options.bin_has_non_empty_default_feature,
+        ),
     ]
     .into_iter()
-    .filter(|(members, _)| !members.is_empty())
-    .map(|(members, target)| (member_selector(members), target, Some(members.as_slice())))
+    .filter(|&(_, _, any, default)| !no_default || if options.all_features { any } else { default })
+    .map(|(members, target, _, _)| (member_selector(members), target, Some(members.as_slice())))
     .collect()
 }
 
@@ -6292,7 +6311,7 @@ fn push_test_steps(
         } else {
             "Test"
         };
-        for (selector, targets, members) in test_selections(package, options) {
+        for (selector, targets, members) in test_selections(package, options, pass) {
             let features = feature_args(options, members, pass);
             let suffix = if members.is_some() { targets } else { "" };
             workflow.push_str(&format!("      - name: {name}{suffix}\n        run: {prefix}{harness}{selector}{targets}{features}\n\n"));
