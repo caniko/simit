@@ -506,7 +506,9 @@ impl ResolvedCiInputs {
         Ok(Self {
             runtime,
             cargo_over_meaningful_flake: runtime == Runtime::Cargo
-                && meaningful_flake_outputs(workspace_root)?,
+                && (meaningful_flake_outputs(workspace_root)?
+                    || (cli.runtime == Some(RuntimeChoice::Cargo)
+                        && workspace_root.join("flake.nix").exists())),
             runner: cli.runner.clone().or(config.runner).or(inference.runner),
             granular: cli.granular,
             windows_runner: cli

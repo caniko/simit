@@ -680,3 +680,43 @@ fn crow_flake_only_ci_builds_checks_when_selected_and_replaces_jsonnet() {
     let audit: serde_json::Value = serde_json::from_slice(&audit.stdout).unwrap();
     assert_eq!(audit["projects"][0]["ciStatus"], "managed", "{audit}");
 }
+
+#[test]
+fn explicit_cargo_runtime_persists_with_imported_flake_outputs() {
+    let temp = tempfile::TempDir::new().unwrap();
+    let root = temp.path();
+    fs::write(
+        root.join("Cargo.toml"),
+        "[package]\nname = \"demo\"\nversion = \"0.1.0\"\nedition = \"2024\"\n",
+    )
+    .unwrap();
+    fs::create_dir_all(root.join("src")).unwrap();
+    fs::write(root.join("src/lib.rs"), "pub fn ok() {}\n").unwrap();
+    fs::write(
+        root.join("flake.nix"),
+        "{ outputs = import ./outputs.nix; }\n",
+    )
+    .unwrap();
+    let output = simit()
+        .current_dir(root)
+        .args([
+            "init",
+            "ci",
+            "--platform",
+            "github",
+            "--runtime",
+            "cargo",
+            "--runner",
+            "ubuntu-24.04",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr),
+    );
+    let config = fs::read_to_string(root.join("simit.toml")).unwrap();
+    assert!(config.contains("runtime = \"cargo\""), "{config}");
+}
