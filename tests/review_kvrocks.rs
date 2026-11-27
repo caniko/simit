@@ -26,7 +26,7 @@ fn kvrocks_is_an_explicit_immutable_linux_request_without_legacy_identity_drift(
     let legacy_request: Request = serde_json::from_value(legacy.clone()).unwrap();
     assert_eq!(serde_json::to_value(&legacy_request).unwrap(), legacy);
 
-    let mut enabled = legacy.clone();
+    let mut enabled = legacy;
     enabled["compiler_cache"] = json!("kvrocks-v1");
     let opted_in: Request = serde_json::from_value(enabled.clone())
         .expect("the typed Kvrocks profile must be accepted without free-form worker commands");
@@ -332,7 +332,7 @@ fn kvrocks_transient_service_plan_binds_native_tool_run_identity_and_bounded_res
     let bootstrap = kvrocks::BootstrapReceipt {
         source: kvrocks::freeze_source(&manifest, "x86_64-linux", &package).unwrap(),
         nar_hash: format!("sha256:{}", "a".repeat(64)),
-        nar_size: 123456,
+        nar_size: 123_456,
         binary_sha256: "b".repeat(64),
     };
     let identity = kvrocks::parse_worker_identity(

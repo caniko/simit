@@ -3,6 +3,10 @@ use anyhow::Result;
 use crate::cli::{ConfigAction, ConfigCommand};
 use crate::user_config::UserConfig;
 
+#[expect(
+    clippy::needless_pass_by_value,
+    reason = "Keep the public command entry point's owned argument API"
+)]
 pub fn run(command: ConfigCommand) -> Result<()> {
     match command.action {
         ConfigAction::Path => {

@@ -3,6 +3,7 @@
 //! `[ci].local_gate_steps` follow the derived steps.
 
 use std::collections::BTreeMap;
+use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Result, bail};
@@ -109,37 +110,45 @@ step() {{\n\
         } else {
             format!("{label}: {name}")
         };
-        script.push_str(&format!(
-            "step {} {}\n",
+        writeln!(
+            script,
+            "step {} {}",
             single_quoted(&title),
             single_quoted(command)
-        ));
+        )
+        .expect("write");
     }
     let build = &ci.nix_build;
     for installable in &ci.nix_builds {
         let mut command = String::from("nix build --no-link --no-update-lock-file");
         if let Some(jobs) = build.max_jobs {
-            command.push_str(&format!(" --max-jobs {jobs}"));
+            write!(command, " --max-jobs {jobs}").expect("write");
         }
         if let Some(cores) = build.cores {
-            command.push_str(&format!(" --cores {cores}"));
+            write!(command, " --cores {cores}").expect("write");
         }
-        command.push_str(&format!(
+        write!(
+            command,
             " --print-build-logs {}",
             single_quoted(installable)
-        ));
-        script.push_str(&format!(
-            "step {} {}\n",
+        )
+        .expect("write");
+        writeln!(
+            script,
+            "step {} {}",
             single_quoted(&format!("Nix build {installable}")),
             single_quoted(&command)
-        ));
+        )
+        .expect("write");
     }
     for extra in &ci.local_gate_steps {
-        script.push_str(&format!(
-            "step {} {}\n",
+        writeln!(
+            script,
+            "step {} {}",
             single_quoted(&extra.name),
             single_quoted(&extra.run)
-        ));
+        )
+        .expect("write");
     }
     Ok(GeneratedFile {
         // ponytail: written without the executable bit (run via `bash`), and

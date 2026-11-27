@@ -8,6 +8,10 @@ use crate::commands::upgrade;
 use crate::config::ProjectConfig;
 use crate::registry::{self, FeatureStatus};
 
+#[expect(
+    clippy::needless_pass_by_value,
+    reason = "Keep the public command entry point's owned argument API"
+)]
 pub fn run(command: InitCoprCommand) -> Result<()> {
     let mode = CheckPrintMode::parse("init copr", command.check, command.print, command.diff)?;
 

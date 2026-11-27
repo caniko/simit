@@ -107,7 +107,7 @@ pub fn release_backend(
         .release
         .windows_signing
         .as_ref()
-        .is_some_and(|windows| windows.is_signpath())
+        .is_some_and(super::config::WindowsSigningConfig::is_signpath)
         && (provider != CiProvider::Actions || platform != Platform::Github)
     {
         bail!(
@@ -214,8 +214,7 @@ impl CiInference {
             .map(|workflow| lines_outside_gates(&workflow.content).collect::<String>());
         let self_check_workspace = self_check
             .as_deref()
-            .map(|content| content.contains(" --workspace"))
-            .unwrap_or(false);
+            .is_some_and(|content| content.contains(" --workspace"));
         let self_check_packages = self_check
             .as_deref()
             .map_or_else(Vec::new, infer_self_check_packages);
@@ -239,7 +238,7 @@ impl CiInference {
             .then_some(WorkspaceStrategy::Aggregate)
             .or_else(|| workspace.map(|_| WorkspaceStrategy::Members));
 
-        let runtime = infer_ci_runtime(marked)?;
+        let runtime = infer_ci_runtime(marked);
         let nextest_run = |line: &str| {
             line.contains("cargo nextest run") || line.contains("cargo-nextest nextest run")
         };
@@ -299,6 +298,10 @@ impl CiInference {
 }
 
 #[derive(Debug, Clone)]
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "Each resolved switch independently selects a CI capability"
+)]
 pub struct ResolvedCiInputs {
     pub runtime: Runtime,
     pub runner: Option<String>,
@@ -640,8 +643,8 @@ impl ResolvedCiInputs {
         ci.workspace = self.workspace;
         ci.workspace_strategy = self.workspace_strategy;
         ci.publish_strategy = self.publish_strategy;
-        ci.required_gates = self.required_gates.clone();
-        ci.packages = self.packages.clone();
+        ci.required_gates.clone_from(&self.required_gates);
+        ci.packages.clone_from(&self.packages);
         ci.all_features = (!self.all_features).then_some(false);
         ci.unit_tests_only = self.unit_tests_only;
         ci.with_nextest = self.with_nextest;
@@ -707,38 +710,38 @@ impl CiConfigLayer {
     }
 
     fn from_table(ci_table: Option<&dyn toml_edit::TableLike>, cfg: &ProjectConfig) -> Self {
-        let step_runners = present(ci_table, "step_runners").and_then(|_| {
+        let step_runners = present(ci_table, "step_runners").and_then(|()| {
             let m = &cfg.ci.step_runners;
             if m.is_empty() { None } else { Some(m.clone()) }
         });
 
         Self {
             runtime: present(ci_table, "runtime").and(cfg.ci.runtime),
-            runner: present(ci_table, "runner").and_then(|_| cfg.ci.runner.clone()),
+            runner: present(ci_table, "runner").and_then(|()| cfg.ci.runner.clone()),
             windows_runner: present(ci_table, "windows_runner")
-                .and_then(|_| cfg.ci.windows_runner.clone()),
-            workspace: present(ci_table, "workspace").map(|_| cfg.ci.workspace),
+                .and_then(|()| cfg.ci.windows_runner.clone()),
+            workspace: present(ci_table, "workspace").map(|()| cfg.ci.workspace),
             step_runners,
-            packages: present(ci_table, "packages").map(|_| cfg.ci.packages.clone()),
+            packages: present(ci_table, "packages").map(|()| cfg.ci.packages.clone()),
             all_features: present(ci_table, "all_features").and(cfg.ci.all_features),
-            unit_tests_only: present(ci_table, "unit_tests_only").map(|_| cfg.ci.unit_tests_only),
-            with_nextest: present(ci_table, "with_nextest").map(|_| cfg.ci.with_nextest),
+            unit_tests_only: present(ci_table, "unit_tests_only").map(|()| cfg.ci.unit_tests_only),
+            with_nextest: present(ci_table, "with_nextest").map(|()| cfg.ci.with_nextest),
             with_nix_cargo_cache: present(ci_table, "with_nix_cargo_cache")
-                .map(|_| cfg.ci.with_nix_cargo_cache),
+                .map(|()| cfg.ci.with_nix_cargo_cache),
             nix_flake_check: present(ci_table, "nix_flake_check").and(cfg.ci.nix_flake_check),
-            with_msrv: present(ci_table, "with_msrv").map(|_| cfg.ci.with_msrv),
-            with_audit: present(ci_table, "with_audit").map(|_| cfg.ci.with_audit),
-            with_deny: present(ci_table, "with_deny").map(|_| cfg.ci.with_deny),
-            with_docs: present(ci_table, "with_docs").map(|_| cfg.ci.with_docs),
-            with_artifacts: present(ci_table, "with_artifacts").map(|_| cfg.ci.with_artifacts),
+            with_msrv: present(ci_table, "with_msrv").map(|()| cfg.ci.with_msrv),
+            with_audit: present(ci_table, "with_audit").map(|()| cfg.ci.with_audit),
+            with_deny: present(ci_table, "with_deny").map(|()| cfg.ci.with_deny),
+            with_docs: present(ci_table, "with_docs").map(|()| cfg.ci.with_docs),
+            with_artifacts: present(ci_table, "with_artifacts").map(|()| cfg.ci.with_artifacts),
             with_pypi_publish: present(ci_table, "with_pypi_publish")
-                .map(|_| cfg.ci.with_pypi_publish),
-            publish_crates: present(ci_table, "publish_crates").map(|_| cfg.ci.publish_crates),
+                .map(|()| cfg.ci.with_pypi_publish),
+            publish_crates: present(ci_table, "publish_crates").map(|()| cfg.ci.publish_crates),
             publish_strategy: present(ci_table, "publish_strategy")
-                .map(|_| cfg.ci.publish_strategy),
-            om_ci: present(ci_table, "om_ci").map(|_| cfg.ci.om_ci),
-            om_ci_augment: present(ci_table, "om_ci_augment").map(|_| cfg.ci.om_ci_augment),
-            omnix_ref: present(ci_table, "omnix_ref").and_then(|_| cfg.ci.omnix_ref.clone()),
+                .map(|()| cfg.ci.publish_strategy),
+            om_ci: present(ci_table, "om_ci").map(|()| cfg.ci.om_ci),
+            om_ci_augment: present(ci_table, "om_ci_augment").map(|()| cfg.ci.om_ci_augment),
+            omnix_ref: present(ci_table, "omnix_ref").and_then(|()| cfg.ci.omnix_ref.clone()),
         }
     }
 
@@ -848,7 +851,7 @@ fn lines_outside_gates(content: &str) -> impl Iterator<Item = &str> {
     })
 }
 
-fn infer_ci_runtime(marked: &[WorkflowSnapshot]) -> Result<Runtime> {
+fn infer_ci_runtime(marked: &[WorkflowSnapshot]) -> Runtime {
     let Some(ci_workflow) = marked
         .iter()
         .find(|workflow| workflow_name(&workflow.relative_path) == Some("ci"))
@@ -863,7 +866,7 @@ fn infer_ci_runtime(marked: &[WorkflowSnapshot]) -> Result<Runtime> {
                 .find(|workflow| workflow_name(&workflow.relative_path) == Some("publish-pypi"))
         })
     else {
-        return Ok(Runtime::Cargo);
+        return Runtime::Cargo;
     };
 
     // Independent flake lanes and dedicated gate jobs do not select the Rust runtime.
@@ -876,9 +879,9 @@ fn infer_ci_runtime(marked: &[WorkflowSnapshot]) -> Result<Runtime> {
         ) || line.contains("run: nix flake check")
             || line.contains("run: nix develop -c cargo")
     }) {
-        Ok(Runtime::Nix)
+        Runtime::Nix
     } else {
-        Ok(Runtime::Cargo)
+        Runtime::Cargo
     }
 }
 
@@ -1025,7 +1028,7 @@ fn infer_required_gates(content: &str) -> Vec<crate::config::RequiredGate> {
         for probe in lines.by_ref() {
             let probe_trim = probe.trim_start();
             if let Some(value) = probe_trim.strip_prefix("run: ") {
-                run = value.trim().to_owned();
+                value.trim().clone_into(&mut run);
                 // `run: |` block: capture the single indented command line.
                 if run == "|" {
                     run = String::new();
@@ -1042,7 +1045,7 @@ fn infer_required_gates(content: &str) -> Vec<crate::config::RequiredGate> {
             {
                 // Continuation of a `run: |` block (single-line gates only).
                 if run.is_empty() {
-                    run = probe_trim.to_owned();
+                    probe_trim.clone_into(&mut run);
                     break;
                 }
             }

@@ -1,9 +1,17 @@
 //! Data-only admission for release-plz's same-run, credential-free archives.
 
-use super::*;
+use std::collections::BTreeMap;
+
+use super::{
+    Client, Context, Digest, Duration, MAX_CRATE_BYTES, PublisherStage, Read, ReleaseCommand,
+    Result, Sha256, TempDir, Value, checkout_signed_source, crate_members, data_command, ensure,
+    env, env_value, exact_registry_record, fs, output, publish_archive, reconstruction_command,
+    registry_record, upload_metadata, validate_manifest_paths_with_links,
+    verify_reconstructed_crate, wait_for_registry,
+};
 
 pub(super) fn run(command: ReleaseCommand) -> Result<()> {
-    let stage = command
+    let publisher_stage = command
         .publisher_stage
         .context("--publisher-stage is required")?;
     let expected = env_value("SIMIT_EXPECTED_RELEASE_SHA")?;
@@ -89,7 +97,7 @@ pub(super) fn run(command: ReleaseCommand) -> Result<()> {
         .collect();
     ensure!(!names.is_empty(), "release-plz has no publishable packages");
     ensure!(
-        stage == PublisherStage::Prepare
+        publisher_stage == PublisherStage::Prepare
             || (command.packages.len() == 1 && names.contains(&command.packages[0])),
         "publication requires one qualified workspace package"
     );
@@ -132,7 +140,7 @@ pub(super) fn run(command: ReleaseCommand) -> Result<()> {
             &root,
             &source,
             &links,
-            &Default::default(),
+            &BTreeMap::default(),
         )?;
         let vcs: Value = serde_json::from_slice(
             &members
@@ -154,7 +162,7 @@ pub(super) fn run(command: ReleaseCommand) -> Result<()> {
         let upload = upload_metadata(&manifest, &members, &root, &package.name, &package.version)?;
         // Check *every* plan entry before selecting an upload. release-plz skips
         // existing versions without invoking our Cargo publisher for them.
-        if (stage == PublisherStage::Publish || command.release_plz_check_registry)
+        if (publisher_stage == PublisherStage::Publish || command.release_plz_check_registry)
             && let Some(record) = registry_record(&client, &package.name, &package.version)?
         {
             reconcile_existing_archive(
@@ -194,7 +202,7 @@ pub(super) fn run(command: ReleaseCommand) -> Result<()> {
             selected = Some((upload, candidate));
         }
     }
-    if stage == PublisherStage::Publish {
+    if publisher_stage == PublisherStage::Publish {
         let (metadata, archive) = selected.context("selected archive is missing")?;
         let checksum = hex::encode(Sha256::digest(&archive));
         publish_archive(
@@ -280,6 +288,7 @@ fn reconcile_existing_archive(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
 
     fn archive(sha: &str, code: &str, dirty: bool) -> Vec<u8> {
         use std::io::Write;

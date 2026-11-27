@@ -1,4 +1,5 @@
 use std::collections::BTreeMap;
+use std::fmt::Write as _;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -20,12 +21,12 @@ use crate::sha256;
 pub fn run(command: ChocolateyCommand) -> Result<()> {
     match command.action {
         ChocolateyAction::Render(args) => render(args),
-        ChocolateyAction::Bump(args) => bump(args),
+        ChocolateyAction::Bump(args) => bump(&args),
     }
 }
 
 fn render(args: ChocolateyRenderArgs) -> Result<()> {
-    let (resolved, package_version) = resolve(args.chocolatey.as_overrides())?;
+    let (resolved, package_version) = resolve(&args.chocolatey.as_overrides())?;
     let version = args.version.as_deref().unwrap_or(&package_version);
     validate_version(version)?;
     validate_resolved(&resolved)?;
@@ -40,13 +41,13 @@ fn render(args: ChocolateyRenderArgs) -> Result<()> {
     Ok(())
 }
 
-pub(crate) fn bump(args: ChocolateyBumpArgs) -> Result<()> {
+pub(crate) fn bump(args: &ChocolateyBumpArgs) -> Result<()> {
     validate_version(&args.version)?;
     let mut overrides = args.chocolatey.as_overrides();
     if let Some(source) = args.push_source.as_deref() {
         overrides.push_source = Some(source);
     }
-    let (resolved, _) = resolve(overrides)?;
+    let (resolved, _) = resolve(&overrides)?;
     validate_resolved(&resolved)?;
     validate_download_repo("chocolatey.download_repo", &resolved.download_repo)?;
 
@@ -118,13 +119,13 @@ pub(crate) fn bump(args: ChocolateyBumpArgs) -> Result<()> {
 }
 
 pub(crate) fn resolve(
-    overrides: crate::config::ChocolateyOverrides<'_>,
+    overrides: &crate::config::ChocolateyOverrides<'_>,
 ) -> Result<(ResolvedChocolatey, String)> {
     let metadata = cargo::metadata_for_current_dir()?;
     let workspace_root = metadata.workspace_root.as_std_path();
     let cfg = ProjectConfig::load(workspace_root)?;
     let package = cargo::representative_package(&metadata, cfg.primary_package.as_deref())?;
-    let resolved = cfg.resolve_chocolatey(overrides, &package)?;
+    let resolved = cfg.resolve_chocolatey(*overrides, &package)?;
     Ok((resolved, package.version))
 }
 
@@ -432,7 +433,10 @@ fn package_lookup_url(source: &str, id: &str, version: &str, api_key_env: &str) 
     let index = tempfile::NamedTempFile::new().context("creating NuGet discovery output")?;
     let status = registry_lookup(source, index.path(), api_key_env)?;
     let body = fs::read(index.path())?;
-    let explicit_index = registry_url(source)?.path().ends_with(".json");
+    let explicit_index = registry_url(source)?
+        .path()
+        .rsplit_once('.')
+        .is_some_and(|(_, ext)| ext == "json");
     let json =
         if body.iter().find(|byte| !byte.is_ascii_whitespace()) == Some(&b'{') || explicit_index {
             Some(
@@ -538,7 +542,7 @@ fn percent_encode(value: &str) -> String {
         if byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.' | b'~') {
             encoded.push(byte as char);
         } else {
-            encoded.push_str(&format!("%{byte:02X}"));
+            write!(encoded, "%{byte:02X}").expect("write");
         }
     }
     encoded
@@ -547,7 +551,7 @@ fn percent_encode(value: &str) -> String {
 fn package_nuspec(package_dir: &Path) -> Result<PathBuf> {
     let mut nuspecs = fs::read_dir(package_dir)
         .with_context(|| format!("reading {}", package_dir.display()))?
-        .filter_map(|entry| entry.ok())
+        .filter_map(std::result::Result::ok)
         .filter_map(|entry| {
             let path = entry.path();
             (path.extension().and_then(|ext| ext.to_str()) == Some("nuspec")).then_some(path)

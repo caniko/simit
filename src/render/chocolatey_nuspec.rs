@@ -216,9 +216,11 @@ fn post_unzip_steps(resolved: &ResolvedChocolatey) -> String {
     let mut out = String::new();
     for exe in &resolved.gui_exes {
         let marker = ps_single_quoted(&format!("{}.gui", windows_path(exe)));
-        out.push_str(&format!(
+        write!(
+            out,
             "\nNew-Item -ItemType File -Force -Path (Join-Path $toolsDir '{marker}') | Out-Null\n"
-        ));
+        )
+        .expect("write");
     }
     if !resolved.shortcuts.is_empty() {
         out.push_str("\n$programs = [Environment]::GetFolderPath('CommonPrograms')\n");
@@ -226,20 +228,20 @@ fn post_unzip_steps(resolved: &ResolvedChocolatey) -> String {
     for shortcut in &resolved.shortcuts {
         let lnk = ps_single_quoted(&format!("{}.lnk", shortcut.name));
         let target = ps_single_quoted(&windows_path(&shortcut.target));
-        out.push_str(&format!(
+        write!(
+            out,
             "Install-ChocolateyShortcut `\n  -ShortcutFilePath (Join-Path $programs '{lnk}') `\n  -TargetPath (Join-Path $toolsDir '{target}')"
-        ));
+        ).expect("write");
         if let Some(arguments) = &shortcut.arguments {
-            out.push_str(&format!(
-                " `\n  -Arguments '{}'",
-                ps_single_quoted(arguments)
-            ));
+            write!(out, " `\n  -Arguments '{}'", ps_single_quoted(arguments)).expect("write");
         }
         if let Some(icon) = &shortcut.icon {
-            out.push_str(&format!(
+            write!(
+                out,
                 " `\n  -IconLocation (Join-Path $toolsDir '{}')",
                 ps_single_quoted(&windows_path(icon))
-            ));
+            )
+            .expect("write");
         }
         out.push('\n');
     }
@@ -260,10 +262,11 @@ pub fn render_uninstall_script(opts: &ChocolateyRenderOptions<'_>) -> String {
         "$ErrorActionPreference = 'Stop'\n\n$programs = [Environment]::GetFolderPath('CommonPrograms')\n",
     );
     for shortcut in shortcuts {
-        out.push_str(&format!(
-            "Remove-Item -LiteralPath (Join-Path $programs '{}') -Force -ErrorAction SilentlyContinue\n",
+        writeln!(
+            out,
+            "Remove-Item -LiteralPath (Join-Path $programs '{}') -Force -ErrorAction SilentlyContinue",
             ps_single_quoted(&format!("{}.lnk", shortcut.name))
-        ));
+        ).expect("write");
     }
     out
 }

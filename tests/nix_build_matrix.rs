@@ -33,7 +33,7 @@ fn generate(temp: &TempDir, extra: &[&str]) -> Output {
 }
 
 /// Native KVM setup has no `if:`: the script leaves other systems alone and
-/// still demands a hosted KVM device on x86_64 Linux.
+/// still demands a hosted KVM device on `x86_64` Linux.
 fn assert_kvm_decides_in_its_script(step: &Value) {
     assert!(step["if"].is_null());
     assert_eq!(step["env"]["SIMIT_NIX_SYSTEM"], "${{ matrix.system }}");

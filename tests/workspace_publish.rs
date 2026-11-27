@@ -1,3 +1,4 @@
+use std::fmt::Write as _;
 use std::fs;
 use std::path::Path;
 use std::process::Command;
@@ -431,12 +432,12 @@ fn coordinated_gate_artifacts_are_unique_across_hyphenated_packages() {
     let gates = artifacts
         .iter()
         .enumerate()
-        .map(|(index, name)| {
-            format!(
+        .fold(String::new(), |mut output, (index, name)| {
+write!(output,
                 "[[ci.required_gates]]\nid = 'gate-{index}'\nrun = 'cargo test'\n[ci.required_gates.artifacts]\nname = '{name}'\npaths = ['target/evidence/']\n"
-            )
-        })
-        .collect::<String>();
+            ).expect("write");
+output
+});
     write_workspace_simit_toml(temp.path(), &gates);
     let output = simit()
         .current_dir(temp.path())
@@ -454,7 +455,7 @@ fn coordinated_gate_artifacts_are_unique_across_hyphenated_packages() {
     let source = read(&temp.path().join(".github/workflows/publish-workspace.yaml"));
     let mut names = std::collections::BTreeSet::new();
     let mut uploads = 0;
-    let mut gated = Vec::new();
+    let mut protected_jobs = Vec::new();
     for (id, job) in workflow["jobs"].as_mapping().unwrap() {
         let steps = job["steps"].as_sequence().unwrap();
         if steps.iter().any(|step| {
@@ -462,7 +463,7 @@ fn coordinated_gate_artifacts_are_unique_across_hyphenated_packages() {
                 .as_str()
                 .is_some_and(|name| name.starts_with("Required gate "))
         }) {
-            gated.push(id.as_str().unwrap().to_owned());
+            protected_jobs.push(id.as_str().unwrap().to_owned());
         }
         for step in steps {
             if step["name"] == "Retain required gate evidence" {
@@ -474,12 +475,12 @@ fn coordinated_gate_artifacts_are_unique_across_hyphenated_packages() {
     }
     // Every verify job checks out the same candidate; only the first, which
     // every later verify job depends on transitively, runs the gates.
-    assert_eq!(gated.len(), 1, "{gated:?}");
-    let package = gated[0].strip_prefix("verify-").unwrap();
+    assert_eq!(protected_jobs.len(), 1, "{protected_jobs:?}");
+    let package = protected_jobs[0].strip_prefix("verify-").unwrap();
     assert!(
-        workflow["jobs"][gated[0].as_str()]["needs"].is_null(),
+        workflow["jobs"][protected_jobs[0].as_str()]["needs"].is_null(),
         "{} must be the first verify job",
-        gated[0]
+        protected_jobs[0]
     );
     assert_eq!(uploads, artifacts.len());
     // These crates are independent, so only the plan's sequencing edge makes
@@ -1138,6 +1139,7 @@ fn coordinated_publish_preserves_signing_trust_when_config_missing() {
 
 #[test]
 fn coordinated_publish_bounds_propagation_and_distinguishes_failures() {
+    use simit::release_publisher::execution::wait_for_registry_with;
     let temp = init_coordinated_workspace("");
     let status = simit()
         .current_dir(temp.path())
@@ -1157,7 +1159,6 @@ fn coordinated_publish_bounds_propagation_and_distinguishes_failures() {
         .status()
         .unwrap();
     assert!(status.success());
-    use simit::release_publisher::execution::wait_for_registry_with;
     let mut attempts = 0;
     let mut waits = 0;
     let result = wait_for_registry_with(

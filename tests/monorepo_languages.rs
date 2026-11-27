@@ -798,7 +798,7 @@ fn ancestor_locks_are_skipped_unless_they_own_or_declare_the_workspace_package()
                 "{output:?}"
             );
             assert_eq!(fs::read(root.join("node/package.json")).unwrap(), original);
-            assert!(git(root, &["tag", "--list"]).is_empty());
+            assert_eq!(git(root, &["tag", "--list"]), "");
         }
     }
 }
@@ -1682,7 +1682,7 @@ fn npm_registry_verification_requires_the_admitted_dist_tag() {
         write(
             root,
             "bin/curl",
-            &format!("#!/bin/sh\nprintf '%s\\n200' '{}'\n", body),
+            &format!("#!/bin/sh\nprintf '%s\\n200' '{body}'\n"),
         );
         fs::set_permissions(root.join("bin/curl"), fs::Permissions::from_mode(0o755)).unwrap();
         let path = std::env::join_paths(

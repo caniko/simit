@@ -24,6 +24,10 @@ pub enum Protocol {
 }
 
 impl Protocol {
+    #[expect(
+        clippy::trivially_copy_pass_by_ref,
+        reason = "Serde skip predicates receive a reference"
+    )]
     fn is_legacy(&self) -> bool {
         *self == Self::StrictV1
     }
@@ -87,7 +91,9 @@ impl Config {
                 || name.chars().any(char::is_control)
                 || basename.is_none_or(|path| {
                     path.contains('/')
-                        || !(path.ends_with(".yaml") || path.ends_with(".yml"))
+                        || !path
+                            .rsplit_once('.')
+                            .is_some_and(|(_, ext)| matches!(ext, "yaml" | "yml"))
                         || !path
                             .bytes()
                             .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.'))

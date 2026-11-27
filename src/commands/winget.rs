@@ -11,15 +11,15 @@ use crate::registry::{self, FeatureStatus};
 
 pub fn run(command: WingetCommand) -> Result<()> {
     match command.action {
-        WingetAction::Submit(args) => submit(args),
+        WingetAction::Submit(args) => submit(&args),
     }
 }
 
 /// Submit the release zip to winget-pkgs by running the same GitHub REST
 /// script as the release workflow step (needs `bash`, `curl` and `jq`).
-pub(crate) fn submit(args: WingetSubmitArgs) -> Result<()> {
+pub(crate) fn submit(args: &WingetSubmitArgs) -> Result<()> {
     validate_version(&args.version)?;
-    let (resolved, platform, tag_prefix) = resolve(&args)?;
+    let (resolved, platform, tag_prefix) = resolve(args)?;
     validate_download_repo("winget.download_repo", &resolved.download_repo)?;
     let url = args
         .url
@@ -56,11 +56,10 @@ pub(crate) fn submit(args: WingetSubmitArgs) -> Result<()> {
         bail!("Winget token environment variable ${token_env} is empty");
     }
 
-    let work_dir = args
-        .work_dir
-        .as_ref()
-        .map(|path| path.as_std_path().to_path_buf())
-        .unwrap_or_else(|| "target/simit-winget".into());
+    let work_dir = args.work_dir.as_ref().map_or_else(
+        || "target/simit-winget".into(),
+        |path| path.as_std_path().to_path_buf(),
+    );
     let release_dir = work_dir.join("release");
     fs::create_dir_all(&release_dir)
         .with_context(|| format!("creating {}", release_dir.display()))?;

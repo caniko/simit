@@ -391,7 +391,7 @@ fn hooks_install_check_and_diff_report_drift() {
         "{}",
         String::from_utf8_lossy(&clean_diff.stderr)
     );
-    assert!(clean_diff.stdout.is_empty());
+    assert_eq!(clean_diff.stdout.as_slice(), b"");
 
     fs::remove_file(root.join(".git/hooks/pre-commit")).unwrap();
     let mut drift_check = simit();

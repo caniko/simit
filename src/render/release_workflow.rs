@@ -7,7 +7,7 @@
 //! gated on its config being present and (for downstream package repos) on the
 //! release being stable.
 //!
-//! The project-specific platform build (cross-compiled binaries, AppImages,
+//! The project-specific platform build (cross-compiled binaries, `AppImages`,
 //! Flatpak manifest, ...) is supplied verbatim via
 //! `[release.artifacts].build_commands`; simit owns the standardized scaffolding
 //! and the channel publish steps.
@@ -510,8 +510,7 @@ fn channel_soft_skip(
 ) -> bool {
     match channel_policy(inputs, channel) {
         Some(ReleasePublisherPolicy::Required) => false,
-        Some(ReleasePublisherPolicy::Staged) => true,
-        Some(ReleasePublisherPolicy::Disabled) => true,
+        Some(ReleasePublisherPolicy::Staged | ReleasePublisherPolicy::Disabled) => true,
         None => activated_remote,
     }
 }
@@ -782,7 +781,10 @@ fn render_with_nix_setup(
                 "read\n"
             });
             // The SignPath action reads this run's artifacts with GITHUB_TOKEN.
-            if inputs.windows_signing.is_some_and(|w| w.is_signpath()) {
+            if inputs
+                .windows_signing
+                .is_some_and(WindowsSigningConfig::is_signpath)
+            {
                 w.push_str("      actions: read\n");
             }
             w.push_str("      id-token: write\n");
@@ -1998,13 +2000,13 @@ fn push_build_artifacts(
     for (index, attr) in bundle_attrs.iter().enumerate() {
         let link = format!("target/simit-release-bundle-{index}");
         if platform == Platform::Github {
-            writeln!(w, "          echo 'disk before bundle {}'", attr).expect("write");
+            writeln!(w, "          echo 'disk before bundle {attr}'").expect("write");
             w.push_str("          df -h /\n");
         }
         writeln!(
             w,
             "          nix build {} --out-link {}",
-            shell_single_quote(&format!(".#{}", attr)),
+            shell_single_quote(&format!(".#{attr}")),
             shell_single_quote(&link)
         )
         .expect("write");
@@ -2017,7 +2019,7 @@ fn push_build_artifacts(
         w.push_str(&shell_single_quote(&link));
         w.push_str(" -mindepth 1 -maxdepth 1 -type f -print | LC_ALL=C sort)\n");
         if platform == Platform::Github {
-            writeln!(w, "          echo 'disk after bundle {}'", attr).expect("write");
+            writeln!(w, "          echo 'disk after bundle {attr}'").expect("write");
             w.push_str("          df -h /\n");
         }
     }
@@ -2169,27 +2171,26 @@ fn push_sign(
 
     // Cosign keyless (Sigstore OIDC) signing + SLSA provenance attestation, with
     // a COSIGN_PRIVATE_KEY fallback — mirrors the hand-rolled release pipeline.
-    let repo_url = release
-        .map(|c| {
+    let repo_url = release.map_or_else(
+        || format!("{}/unknown/unknown", platform.web_base_url()),
+        |c| {
             let host = match c.provider {
                 ReleaseProvider::Forgejo => forgejo_web_base(&c.api_base),
                 ReleaseProvider::Github => github_web_base(&c.api_base),
             };
             format!("{host}/{}", c.repo)
-        })
-        .unwrap_or_else(|| format!("{}/unknown/unknown", platform.web_base_url()));
+        },
+    );
     writeln!(w, "          repo_url=\"{repo_url}\"").expect("write");
     w.push_str("          git_sha=\"$(git rev-parse HEAD)\"\n");
     w.push_str("          workflow_sha=\"$(sha256sum ");
     w.push_str(platform.workflow_dir());
     w.push_str("/release.yml | awk '{print $1}')\"\n");
     w.push_str("          flake_lock_sha=\"missing\"; if [ -f flake.lock ]; then flake_lock_sha=\"$(sha256sum flake.lock | awk '{print $1}')\"; fi\n");
-    let revision_path = release
-        .map(|target| match target.provider {
-            ReleaseProvider::Forgejo => "/src/tag/",
-            ReleaseProvider::Github => "/blob/",
-        })
-        .unwrap_or("/blob/");
+    let revision_path = release.map_or("/blob/", |target| match target.provider {
+        ReleaseProvider::Forgejo => "/src/tag/",
+        ReleaseProvider::Github => "/blob/",
+    });
     w.push_str("          builder_id=\"");
     w.push('$');
     w.push_str("{repo_url}");
@@ -2993,9 +2994,9 @@ fn push_publish_scoop(w: &mut String, platform: Platform, scoop: &ResolvedScoop,
 }
 
 /// Uploads the wheels the release build left in `release/`; nothing is built
-/// here. `--check-url` skips files PyPI already has, so a rerun resumes.
+/// here. `--check-url` skips files `PyPI` already has, so a rerun resumes.
 /// With `soft_skip`, a missing token or wheel defers to the channel state
-/// (staged policy, or a PyPI project that does not exist yet).
+/// (staged policy, or a `PyPI` project that does not exist yet).
 fn push_publish_pypi(w: &mut String, pypi: &PypiReleaseConfig, soft_skip: bool) {
     w.push_str("      - name: Publish wheels to PyPI\n");
     if !pypi.trusted_publishing {
@@ -3057,7 +3058,7 @@ fn push_sbom(w: &mut String, commands: &[String]) {
     }
 }
 
-/// SignPath Foundation signing of finished release archives (GitHub Actions
+/// `SignPath` Foundation signing of finished release archives (GitHub Actions
 /// only; `release_backend` rejects other backends). Runs before the promote and
 /// checksum steps, so extracted exes, checksums, signatures and package hashes
 /// all cover the signed bytes. Every step after the gate is skipped, with a
@@ -3241,8 +3242,7 @@ fn push_windows_signing(w: &mut String, windows: &WindowsSigningConfig) {
         .as_deref()
         .unwrap_or_default()
         .split_once("{version}")
-        .map(|(_, rest)| rest.trim_end_matches(".zip"))
-        .unwrap_or("");
+        .map_or("", |(_, rest)| rest.trim_end_matches(".zip"));
     for binary in &windows.binaries {
         writeln!(
             w,
@@ -3258,9 +3258,10 @@ fn push_announce(
     release: Option<&ResolvedReleaseTarget>,
     platform: Platform,
 ) {
-    let fallback = release
-        .map(|c| platform.release_tag_url(&c.repo, "${TAG}"))
-        .unwrap_or_else(|| "${VERSION}".to_owned());
+    let fallback = release.map_or_else(
+        || "${VERSION}".to_owned(),
+        |c| platform.release_tag_url(&c.repo, "${TAG}"),
+    );
     w.push_str("      - name: Announce stable release\n        env:\n");
     writeln!(
         w,
@@ -3474,10 +3475,10 @@ pub(crate) fn winget_submit_script(winget: &ResolvedWinget, platform: Platform) 
     w
 }
 
-/// The ManifestVersion the generated winget manifests (and their schema URLs) use.
+/// The `ManifestVersion` the generated winget manifests (and their schema URLs) use.
 const WINGET_MANIFEST_VERSION: &str = "1.12.0";
 
-/// Writes the three ManifestVersion 1.12.0 files into `$dir`, each starting
+/// Writes the three `ManifestVersion` 1.12.0 files into `$dir`, each starting
 /// with the `yaml-language-server` schema header winget-pkgs tooling emits.
 fn push_winget_manifests(
     w: &mut String,
@@ -3533,8 +3534,10 @@ fn push_winget_manifests(
         let ids: String = winget
             .dependencies
             .iter()
-            .map(|d| format!("\"  - PackageIdentifier: $(yaml {})\" ", q(d)))
-            .collect();
+            .fold(String::new(), |mut output, d| {
+                write!(output, "\"  - PackageIdentifier: $(yaml {})\" ", q(d)).expect("write");
+                output
+            });
         format!("echo 'Dependencies:'; echo '  PackageDependencies:'; printf '%s\\n' {ids}; ")
     };
     // One entry per file; no files means the single binary/command entry. The
@@ -3560,8 +3563,10 @@ fn push_winget_manifests(
         .join(" ");
     let entries: String = installers
         .iter()
-        .map(|(arch, prefix, sha)| format!("echo '- Architecture: {arch}'; echo '  NestedInstallerFiles:'; printf '%s\\n' {nested}; printf '%s\\n' \"  InstallerUrl: $(yaml \"${prefix}_URL\")\" \"  InstallerSha256: ${sha}\"; "))
-        .collect();
+        .fold(String::new(), |mut output, (arch, prefix, sha)| {
+write!(output, "echo '- Architecture: {arch}'; echo '  NestedInstallerFiles:'; printf '%s\\n' {nested}; printf '%s\\n' \"  InstallerUrl: $(yaml \"${prefix}_URL\")\" \"  InstallerSha256: ${sha}\"; ").expect("write");
+output
+});
     writeln!(w, "{{ hdr installer; f PackageIdentifier {id}; f PackageVersion \"$VERSION\"; echo 'InstallerType: zip'; echo 'NestedInstallerType: portable'; {deps}echo 'Installers:'; {entries}echo 'ManifestType: installer'; echo 'ManifestVersion: {mv}'; }} > {}", file("installer.")).expect("write");
     // default-locale manifest
     let mut locale = format!(
@@ -3819,8 +3824,7 @@ fn winget_manifest_dir(package_id: &str) -> String {
     let first = parts[0]
         .chars()
         .next()
-        .map(|ch| ch.to_ascii_lowercase())
-        .unwrap_or('x');
+        .map_or('x', |ch| ch.to_ascii_lowercase());
     let mut segments = vec!["manifests".to_owned(), first.to_string()];
     segments.extend(parts.drain(..).map(str::to_owned));
     segments.join("/")
@@ -3846,6 +3850,7 @@ mod tests {
         AurFlavors, ChocolateyPushConfig, HomebrewPlatformsConfig, ReleaseProvider,
         ReleasePublishConfig, ReleasePublisherEnforcement, ReleasePublisherPolicy, ScoopArchSet,
     };
+    use std::collections::BTreeMap;
 
     #[test]
     fn forgejo_action_references_are_immutable_and_versioned() {
@@ -3946,7 +3951,7 @@ mod tests {
             prebuild_binaries: false,
             binstall: false,
             platforms: vec![],
-            system_runners: Default::default(),
+            system_runners: BTreeMap::default(),
             runner: Some("atlas".to_owned()),
             substituters: vec!["https://cache.example/c".to_owned()],
             trusted_public_keys: vec!["c:abc=".to_owned()],
@@ -4840,7 +4845,7 @@ printf '%s' "$TEST_FLAKE_VERSION""#,
     fn render_workflow_with_gates(
         platform: Platform,
         artifacts: &ArtifactsConfig,
-        required_gates: &[crate::config::RequiredGate],
+        required_gates: &[RequiredGate],
     ) -> String {
         render(&ReleaseWorkflowInputs {
             platform,
@@ -4984,8 +4989,8 @@ printf '%s' "$TEST_FLAKE_VERSION""#,
             release_archives: true,
             ..PrebuildConfig::default()
         };
-        let prebuilt = extract_workflow(Platform::Github, ReleaseProvider::Github, Some(&prebuild));
-        let prebuilt_collect = step(&prebuilt);
+        let workflow = extract_workflow(Platform::Github, ReleaseProvider::Github, Some(&prebuild));
+        let prebuilt_collect = step(&workflow);
         assert!(prebuilt_collect.contains("find .simit-prebuilt -mindepth 1 -type f"));
         assert!(!prebuilt_collect.contains("-mindepth 2"));
         assert!(prebuilt_collect.contains("no native release archives were downloaded"));
@@ -5196,10 +5201,15 @@ printf '%s' "$TEST_FLAKE_VERSION""#,
         push_signpath_signing(&mut step, &signpath_signing());
         let body = step.split_once("<<'SCRIPT'\n").expect("heredoc").1;
         let body = body.split_once("          SCRIPT\n").expect("end").0;
-        let script: String = body
-            .lines()
-            .map(|line| format!("{}\n", line.strip_prefix("          ").unwrap_or(line)))
-            .collect();
+        let script: String = body.lines().fold(String::new(), |mut output, line| {
+            writeln!(
+                output,
+                "{}",
+                line.strip_prefix("          ").unwrap_or(line)
+            )
+            .expect("write");
+            output
+        });
         let zip = |path: &std::path::Path, members: &[&str], payload: &[u8]| {
             let mut writer = zip::ZipWriter::new(std::fs::File::create(path).unwrap());
             for member in members {
@@ -5305,10 +5315,15 @@ printf '%s' "$TEST_FLAKE_VERSION""#,
         push_promote_assets(&mut step, &artifacts);
         let body = step.split_once("<<'SCRIPT'\n").expect("heredoc").1;
         let body = body.split_once("          SCRIPT\n").expect("end").0;
-        let script: String = body
-            .lines()
-            .map(|line| format!("{}\n", line.strip_prefix("          ").unwrap_or(line)))
-            .collect();
+        let script: String = body.lines().fold(String::new(), |mut output, line| {
+            writeln!(
+                output,
+                "{}",
+                line.strip_prefix("          ").unwrap_or(line)
+            )
+            .expect("write");
+            output
+        });
 
         let dir = tempfile::tempdir().unwrap();
         let work = dir.path();
@@ -5584,9 +5599,15 @@ printf '%s' "$TEST_FLAKE_VERSION""#,
         let step = winget_step(winget, ReleasePublisherEnforcement::default());
         let body = step.split_once("<<'SCRIPT'\n").expect("heredoc").1;
         let body = body.split_once("          SCRIPT\n").expect("end").0;
-        body.lines()
-            .map(|line| format!("{}\n", line.strip_prefix("          ").unwrap_or(line)))
-            .collect()
+        body.lines().fold(String::new(), |mut output, line| {
+            writeln!(
+                output,
+                "{}",
+                line.strip_prefix("          ").unwrap_or(line)
+            )
+            .expect("write");
+            output
+        })
     }
 
     #[cfg(unix)]
@@ -6231,7 +6252,7 @@ cat "$FAKE/code"
             netrc_secret: Some("PRIVATE_CACHE_NETRC".to_owned()),
             ..artifacts()
         };
-        let gates: [crate::config::RequiredGate; 2] = [
+        let gates: [RequiredGate; 2] = [
             toml_edit::de::from_str("id = 'private-cache'\nruntime = 'nix'\nrun = 'nix build'")
                 .unwrap(),
             toml_edit::de::from_str("id = 'shell'\nruntime = 'shell'\nrun = 'true'").unwrap(),
@@ -6319,7 +6340,7 @@ cat "$FAKE/code"
                 "extract" => artifacts.extract.push(sorrel_extract()),
                 "supply-chain" => {
                     artifacts.supply_chain_command =
-                        Some("env CI=1 nix develop -c cargo deny check".into())
+                        Some("env CI=1 nix develop -c cargo deny check".into());
                 }
                 "custom-build" => artifacts
                     .build_commands

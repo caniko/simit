@@ -1,4 +1,7 @@
-#[allow(dead_code)]
+#[allow(
+    dead_code,
+    reason = "This integration target uses only part of the shared fixture module"
+)]
 mod common;
 
 use std::thread;

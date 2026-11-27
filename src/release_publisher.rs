@@ -14,6 +14,8 @@ use anyhow::{Context, Result, ensure};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
+use crate::release_identity::TagPrefix;
+
 pub mod archive;
 pub mod execution;
 mod native;
@@ -166,7 +168,7 @@ pub struct ProviderBoundArtifact {
 
 /// Verify the original run/repository and native SHA-256 digest before parsing
 /// any downloaded archive. Expected name and byte limit come from trusted policy.
-/// GitHub artifact metadata does not expose run_attempt: recovery may reuse an
+/// GitHub artifact metadata does not expose `run_attempt`: recovery may reuse an
 /// immutable artifact from the original run with the same source SHA. This is not
 /// proof that a particular attempt produced it. Tag-trigger provenance, signed-tag
 /// verification and safe member admission remain required before publication.
@@ -220,7 +222,7 @@ pub fn verify_release_artifact_archive(
 
     let mut reader = archive.take(max_archive_bytes + 1);
     let mut hasher = Sha256::new();
-    let mut buffer = [0_u8; 64 * 1024];
+    let mut buffer = vec![0_u8; 64 * 1024];
     let mut bytes = 0_u64;
     loop {
         let read = reader
@@ -267,7 +269,9 @@ fn is_workflow_path(value: &str) -> bool {
         && name
             .bytes()
             .all(|byte| byte.is_ascii_alphanumeric() || b"-_.".contains(&byte))
-        && (name.ends_with(".yaml") || name.ends_with(".yml"))
+        && name
+            .rsplit_once('.')
+            .is_some_and(|(_, ext)| matches!(ext, "yaml" | "yml"))
 }
 
 // GitHub REST may qualify the path with its source ref while a completion
@@ -301,7 +305,7 @@ pub fn bind_release_push(
         event,
         provider_run,
         None,
-        Default::default(),
+        TagPrefix::default(),
         false,
     )
 }
@@ -311,7 +315,7 @@ pub fn bind_prefixed_release_push(
     context: &PublisherContext,
     event: &CompletedRunEvent,
     provider_run: &ReleaseRun,
-    prefix: crate::release_identity::TagPrefix,
+    prefix: TagPrefix,
 ) -> Result<BoundReleasePush> {
     bind_release_push_with_namespace(policy, context, event, provider_run, None, prefix, false)
 }
@@ -329,7 +333,7 @@ pub fn bind_native_release_push(
         event,
         provider_run,
         Some(namespace),
-        Default::default(),
+        TagPrefix::default(),
         true,
     )
 }
@@ -348,7 +352,7 @@ pub fn bind_independent_release_push(
         event,
         provider_run,
         Some(package),
-        Default::default(),
+        TagPrefix::default(),
         false,
     )
 }
@@ -359,7 +363,7 @@ fn bind_release_push_with_namespace(
     event: &CompletedRunEvent,
     provider_run: &ReleaseRun,
     namespace: Option<&str>,
-    prefix: crate::release_identity::TagPrefix,
+    prefix: TagPrefix,
     native: bool,
 ) -> Result<BoundReleasePush> {
     let components: Vec<_> = policy.repository.split('/').collect();
@@ -616,7 +620,7 @@ mod tests {
             &context,
             &event,
             &event.workflow_run,
-            crate::release_identity::TagPrefix::V,
+            TagPrefix::V,
         )
         .unwrap();
         assert_eq!(bound.source_head_label(), "v1.2.3");

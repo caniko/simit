@@ -1,3 +1,4 @@
+use std::fmt::Write as _;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -5,7 +6,10 @@ use std::process::Command;
 use serde_json::Value;
 use tempfile::TempDir;
 
-#[allow(dead_code)]
+#[allow(
+    dead_code,
+    reason = "This integration target uses only part of the shared fixture module"
+)]
 mod common;
 
 type FeatureFixture<'a> = (&'a str, &'a str);
@@ -101,14 +105,14 @@ fn write_registry(data_home: &Path, projects: &[ProjectFixture<'_>]) {
     let mut text = String::from("schema_version = 1\n");
     for (project_path, name, features) in projects {
         text.push_str("\n[[project]]\n");
-        text.push_str(&format!("path = \"{}\"\n", project_path.display()));
-        text.push_str(&format!("name = \"{name}\"\n"));
+        writeln!(text, "path = \"{}\"", project_path.display()).expect("write");
+        writeln!(text, "name = \"{name}\"").expect("write");
         text.push_str("first_seen = \"2026-05-20T00:00:00Z\"\n");
         text.push_str("last_seen = \"2026-05-21T00:00:00Z\"\n");
         if !features.is_empty() {
             text.push_str("[project.features]\n");
             for (feature, status) in *features {
-                text.push_str(&format!("{feature} = \"{status}\"\n"));
+                writeln!(text, "{feature} = \"{status}\"").expect("write");
             }
         }
     }
@@ -355,7 +359,7 @@ fn clear_state_removes_all_registry_entries() {
     assert!(stdout.contains("cleared project registry state"));
 
     let value = registry_json(data_home.path());
-    assert!(value.as_array().unwrap().is_empty());
+    assert_eq!(value.as_array().unwrap().len(), 0);
 }
 
 #[test]

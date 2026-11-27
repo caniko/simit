@@ -162,12 +162,12 @@ fn oversized_environment_is_denied_before_restore_mutates_the_store() {
 #[cfg(unix)]
 #[test]
 fn long_path_closures_restore_with_portable_argv_batches_for_paths_and_roots() {
-    use simit::ci_runtime::dependencies::StoreTools;
-    use std::os::unix::fs::symlink;
-    let root = tempfile::tempdir().unwrap();
     // A large but viable inherited environment reduces the available path
     // envelope. Isolate it in a subprocess rather than mutating global env.
     const CHILD: &str = "SIMIT_RESTORE_VALID_ENV_BUDGET_ROOT";
+    use simit::ci_runtime::dependencies::StoreTools;
+    use std::os::unix::fs::symlink;
+    let root = tempfile::tempdir().unwrap();
     if std::env::var_os(CHILD).is_none() {
         let output = std::process::Command::new(std::env::current_exe().unwrap())
             .env_clear()
@@ -289,7 +289,7 @@ fn every_truncated_prefix_and_bad_framing_is_denied() {
     let mut bad_magic = raw.clone();
     let position = raw
         .windows(8)
-        .position(|part| part == number(0x4558494e))
+        .position(|part| part == number(0x4558_494e))
         .unwrap();
     bad_magic[position..position + 8].copy_from_slice(&number(0x1234));
     assert!(parse(&bad_magic, &admission).is_err());
@@ -386,7 +386,7 @@ fn malformed_paths_inventories_references_and_nar_fields_are_denied() {
     ] {
         assert!(parse(&export(vec![record(&out, node, &[], "")]), &admission).is_err());
     }
-    let mut invalid = admission.clone();
+    let mut invalid = admission;
     invalid.closure.push(out.clone());
     assert!(
         parse(

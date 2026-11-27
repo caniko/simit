@@ -123,7 +123,7 @@ fn plan_accounts_for_every_enrolled_coordinate_without_executing_adapters_or_gen
     policy["profiles"]["fleet"]["rollout"] = json!({"canaries": [coordinate("demo")]});
     fs::write(&config, serde_json::to_vec(&policy).unwrap()).unwrap();
     let empty = plan(&[]);
-    assert!(empty["selected"].as_array().unwrap().is_empty());
+    assert_eq!(empty["selected"].as_array().unwrap().len(), 0);
     assert_eq!(empty["enrollment"].as_array().unwrap().len(), 7);
     let preview = Command::new(env!("CARGO_BIN_EXE_simit"))
         .args(["projects", "update", "--config"])
@@ -146,7 +146,7 @@ fn plan_accounts_for_every_enrolled_coordinate_without_executing_adapters_or_gen
     stale["observedAt"] = json!(chrono::Utc::now() - chrono::Duration::days(1));
     let mut wrong_root = original.clone();
     wrong_root["root"] = json!(root.join("other-workspace"));
-    let mut duplicate = original.clone();
+    let mut duplicate = original;
     duplicate["projects"]
         .as_array_mut()
         .unwrap()

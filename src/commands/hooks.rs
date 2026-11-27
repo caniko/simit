@@ -13,13 +13,17 @@ use crate::render::diff::unified_diff;
 const HOOK_TYPES: &[&str] = &["pre-commit", "pre-push", "commit-msg"];
 const CANIX_DISPATCHER_SENTINEL: &str = "dispatched-by-canix";
 
+#[expect(
+    clippy::needless_pass_by_value,
+    reason = "Keep the public command entry point's owned argument API"
+)]
 pub fn install(command: HooksInstallCommand) -> Result<()> {
     let metadata = cargo::metadata_for_current_dir()?;
     let workspace_root = metadata.workspace_root.as_std_path();
-    install_in_workspace(workspace_root, command)
+    install_in_workspace(workspace_root, &command)
 }
 
-fn install_in_workspace(workspace_root: &Path, command: HooksInstallCommand) -> Result<()> {
+fn install_in_workspace(workspace_root: &Path, command: &HooksInstallCommand) -> Result<()> {
     ensure_pre_commit_config(workspace_root)?;
     let git_common_dir = git_common_dir(workspace_root)?;
     let hooks_dir = git_common_dir.join("hooks");
@@ -224,7 +228,9 @@ fn check_hooks(workspace_root: &Path, hooks_dir: &Path, show_diff: bool) -> Resu
         match fs::read_to_string(&path) {
             Ok(actual) if actual == expected && is_executable(&path) => {}
             Ok(actual) => {
-                if actual != expected {
+                if actual == expected {
+                    mismatches.push(format!("{} is not executable", path.display()));
+                } else {
                     mismatches.push(format!("{} differs", path.display()));
                     if show_diff {
                         diffs.push(unified_diff(
@@ -233,8 +239,6 @@ fn check_hooks(workspace_root: &Path, hooks_dir: &Path, show_diff: bool) -> Resu
                             &expected,
                         ));
                     }
-                } else {
-                    mismatches.push(format!("{} is not executable", path.display()));
                 }
             }
             Err(err) if err.kind() == ErrorKind::NotFound => {
@@ -321,13 +325,11 @@ fn defend_against_rogue_local_hooks_path(
 fn warn_rogue_local_without_dispatcher(local: &str, fix: bool) {
     if fix {
         eprintln!(
-            "warning: repo-local core.hooksPath = {} points at this repository's .git/hooks, but no friendly system dispatcher is configured; skipping --fix because there is no dispatcher to fall back to",
-            local
+            "warning: repo-local core.hooksPath = {local} points at this repository's .git/hooks, but no friendly system dispatcher is configured; skipping --fix because there is no dispatcher to fall back to"
         );
     } else {
         eprintln!(
-            "warning: repo-local core.hooksPath = {} points at this repository's .git/hooks and no friendly system dispatcher is configured; project hooks will fire without a dispatcher system step",
-            local
+            "warning: repo-local core.hooksPath = {local} points at this repository's .git/hooks and no friendly system dispatcher is configured; project hooks will fire without a dispatcher system step"
         );
     }
 }
@@ -458,9 +460,7 @@ fn expand_home(path: &str) -> String {
 fn is_executable(path: &Path) -> bool {
     use std::os::unix::fs::PermissionsExt;
 
-    fs::metadata(path)
-        .map(|metadata| metadata.permissions().mode() & 0o111 != 0)
-        .unwrap_or(false)
+    fs::metadata(path).is_ok_and(|metadata| metadata.permissions().mode() & 0o111 != 0)
 }
 
 #[cfg(not(unix))]

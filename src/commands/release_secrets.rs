@@ -17,6 +17,10 @@ const MINISIGN_SECRET_KEY: &str = "MINISIGN_SECRET_KEY";
 const MINISIGN_PASSWORD: &str = "MINISIGN_PASSWORD";
 const DEFAULT_TOKEN_PATH: &str = ".local/share/berg-cli/codeberg.org/TOKEN";
 
+#[expect(
+    clippy::needless_pass_by_value,
+    reason = "Keep the public command entry point's owned argument API"
+)]
 pub fn init(command: ReleaseCommand) -> Result<()> {
     let platform = command.platform.unwrap_or(Platform::Forgejo);
     let metadata = cargo::metadata_for_current_dir()?;
@@ -54,6 +58,10 @@ pub fn init(command: ReleaseCommand) -> Result<()> {
     Ok(())
 }
 
+#[expect(
+    clippy::needless_pass_by_value,
+    reason = "Keep the public command entry point's owned argument API"
+)]
 pub fn check(command: ReleaseCommand) -> Result<()> {
     let platform = command.platform.unwrap_or(Platform::Forgejo);
     let repo = required_repo(&command)?;
@@ -77,6 +85,10 @@ pub fn check(command: ReleaseCommand) -> Result<()> {
     Ok(())
 }
 
+#[expect(
+    clippy::needless_pass_by_value,
+    reason = "Keep the public command entry point's owned argument API"
+)]
 pub fn contract(command: ReleaseCommand) -> Result<()> {
     let metadata = cargo::metadata_for_current_dir()?;
     let workspace_root = metadata.workspace_root.as_std_path();
@@ -98,7 +110,7 @@ pub fn contract(command: ReleaseCommand) -> Result<()> {
 
 pub(crate) fn project_credentials(
     cfg: &ProjectConfig,
-    package: &crate::cargo::Package,
+    package: &cargo::Package,
     platform: Platform,
 ) -> Result<Vec<release_workflow::ReleaseCredential>> {
     let release = cfg.resolve_release_target(platform)?;
@@ -137,6 +149,10 @@ pub(crate) fn project_credentials(
     Ok(credentials)
 }
 
+#[expect(
+    clippy::needless_pass_by_value,
+    reason = "Keep the public command entry point's owned argument API"
+)]
 pub fn inspect_minisign_input(command: ReleaseCommand) -> Result<()> {
     let metadata = cargo::metadata_for_current_dir()?;
     let workspace_root = metadata.workspace_root.as_std_path();
@@ -249,7 +265,7 @@ fn read_token(command: &ReleaseCommand, platform: Platform) -> Result<String> {
     };
     for name in token_names {
         if let Ok(token) = std::env::var(name) {
-            return clean_token(token);
+            return clean_token(&token);
         }
     }
     if platform == Platform::Github && command.secrets_token_file.is_none() {
@@ -259,7 +275,7 @@ fn read_token(command: &ReleaseCommand, platform: Platform) -> Result<String> {
             .context("reading GitHub token from gh auth")?;
         if output.status.success() {
             return clean_token(
-                String::from_utf8(output.stdout).context("GitHub token was not UTF-8")?,
+                &String::from_utf8(output.stdout).context("GitHub token was not UTF-8")?,
             );
         }
         bail!(
@@ -272,10 +288,10 @@ fn read_token(command: &ReleaseCommand, platform: Platform) -> Result<String> {
     };
     let token = fs::read_to_string(&path)
         .with_context(|| format!("reading Forgejo/Codeberg token from {}", path.display()))?;
-    clean_token(token)
+    clean_token(&token)
 }
 
-fn clean_token(token: String) -> Result<String> {
+fn clean_token(token: &str) -> Result<String> {
     let token = token.trim().to_owned();
     if token.is_empty() {
         bail!("Forgejo/Codeberg token is empty");

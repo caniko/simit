@@ -8,7 +8,7 @@ use serde_json::Value;
 use super::releases::Package;
 
 /// Core Metadata distribution names are ASCII and alphanumeric at both ends.
-/// https://packaging.python.org/en/latest/specifications/name-normalization/
+/// <https://packaging.python.org/en/latest/specifications/name-normalization>/
 pub(crate) fn valid_python_package_name(name: &str) -> bool {
     name.as_bytes()
         .first()
@@ -23,7 +23,7 @@ pub(crate) fn valid_python_package_name(name: &str) -> bool {
 }
 
 /// Preserve npm 11.4.2's legacy publication names, including leading hyphens.
-/// https://github.com/npm/validate-npm-package-name/blob/v6.0.0/lib/index.js
+/// <https://github.com/npm/validate-npm-package-name/blob/v6.0.0/lib/index.js>
 pub(crate) fn valid_npm_package_name(name: &str) -> bool {
     let url_friendly = |part: &str| {
         !part.is_empty()
@@ -53,7 +53,7 @@ pub(crate) fn valid_npm_package_name(name: &str) -> bool {
     }
 }
 
-/// npm tags share a namespace with versions and cannot be SemVer ranges.
+/// npm tags share a namespace with versions and cannot be `SemVer` ranges.
 /// Within our ASCII tag grammar, only v-prefixed versions/x-ranges and bare
 /// x-ranges can be ranges; operators, whitespace and build metadata are excluded.
 pub(crate) fn valid_npm_dist_tag(tag: &str) -> bool {
@@ -193,7 +193,7 @@ impl Registry {
         })?;
         let mut parts = url
             .path_segments_mut()
-            .map_err(|_| anyhow::anyhow!("registry URL cannot be a base"))?;
+            .map_err(|()| anyhow::anyhow!("registry URL cannot be a base"))?;
         parts.pop_if_empty().push(name);
         if matches!(self, Self::Python) {
             parts.push(version).push("json");

@@ -20,12 +20,14 @@ use super::archive::{
     CrateMember, MAX_CRATE_BYTES, crate_from_provider_zip, crate_members, ensure_crates_io_size,
     verify_reconstructed_crate,
 };
+use super::source::Submodules;
 use super::{
     CompletedRunEvent, PublisherContext, PublisherPolicy, ReleaseArtifact, ReleaseRun,
     bind_independent_release_push, bind_native_release_push, bind_prefixed_release_push,
     verify_release_artifact_archive,
 };
 use crate::cli::{PublisherStage, ReleaseCommand};
+use crate::release_identity::TagPrefix;
 
 mod release_plz;
 #[cfg(test)]
@@ -60,9 +62,10 @@ pub(super) fn data_command(program: &str, state: &Path) -> Result<Command> {
         .env("CARGO_TARGET_DIR", state.join("target"))
         .env(
             "RUSTUP_HOME",
-            env::var_os("RUSTUP_HOME")
-                .map(std::path::PathBuf::from)
-                .unwrap_or(std::path::PathBuf::from(env_value("HOME")?).join(".rustup")),
+            env::var_os("RUSTUP_HOME").map_or(
+                std::path::PathBuf::from(env_value("HOME")?).join(".rustup"),
+                std::path::PathBuf::from,
+            ),
         )
         .env("GIT_CONFIG_NOSYSTEM", "1")
         .env("GIT_CONFIG_GLOBAL", "/dev/null")
@@ -118,7 +121,7 @@ pub fn run(command: ReleaseCommand) -> Result<()> {
         );
         return release_plz::run(command);
     }
-    let stage = command
+    let publisher_stage = command
         .publisher_stage
         .context("--publisher-stage is required")?;
     ensure!(
@@ -228,9 +231,9 @@ pub fn run(command: ReleaseCommand) -> Result<()> {
         &format!("repos/{repository}/actions/runs/{}", event.workflow_run.id),
     )?)?;
     let tag_prefix = if command.publisher_tag_prefix == "v" {
-        crate::release_identity::TagPrefix::V
+        TagPrefix::V
     } else {
-        crate::release_identity::TagPrefix::None
+        TagPrefix::None
     };
     let bound = if native {
         bind_native_release_push(
@@ -350,7 +353,7 @@ pub fn run(command: ReleaseCommand) -> Result<()> {
     } else {
         None
     };
-    if namespace.is_some() || tag_prefix == crate::release_identity::TagPrefix::V {
+    if namespace.is_some() || tag_prefix == TagPrefix::V {
         verify_tag_only_source_workflow_with_prefix(
             &signed_workflow.stdout,
             &enrolled_workflow,
@@ -369,7 +372,7 @@ pub fn run(command: ReleaseCommand) -> Result<()> {
             &super::source::github_owner_prefix(&repository)?,
         )?
     } else {
-        Default::default()
+        Submodules::default()
     };
     let tracked = output(
         data_command("git", state.path())?
@@ -572,7 +575,7 @@ pub fn run(command: ReleaseCommand) -> Result<()> {
         name,
         &bound.release_version,
     )?;
-    match stage {
+    match publisher_stage {
         PublisherStage::Prepare => {
             ensure!(
                 env::var_os("CRATES_IO_API_TOKEN").is_none(),
@@ -833,14 +836,14 @@ fn verify_tag_only_source_workflow_with_namespace(
     enrolled: &[u8],
     namespace: Option<&str>,
 ) -> Result<()> {
-    verify_tag_only_source_workflow_with_prefix(signed, enrolled, namespace, Default::default())
+    verify_tag_only_source_workflow_with_prefix(signed, enrolled, namespace, TagPrefix::default())
 }
 
 fn verify_tag_only_source_workflow_with_prefix(
     signed: &[u8],
     enrolled: &[u8],
     namespace: Option<&str>,
-    prefix: crate::release_identity::TagPrefix,
+    prefix: TagPrefix,
 ) -> Result<()> {
     let tag_pattern = if let Some(package) = namespace {
         package_name(package)?;
@@ -924,6 +927,7 @@ fn native_upload_matches_artifact(
     logs: &[u8],
     name: &str,
 ) -> Result<bool> {
+    const MAX_LOG_BYTES: u64 = 4 * 1024 * 1024;
     let steps = builder["steps"]
         .as_array()
         .context("hosted builder has no step records")?;
@@ -950,7 +954,6 @@ fn native_upload_matches_artifact(
         "original native upload log is missing or ambiguous"
     );
     let mut log = archive.by_name(&path)?;
-    const MAX_LOG_BYTES: u64 = 4 * 1024 * 1024;
     ensure!(
         log.size() <= MAX_LOG_BYTES,
         "native upload log exceeds byte limit"
@@ -1064,8 +1067,7 @@ fn verify_native_builder(enrolled: &[u8], namespace: &str) -> Result<String> {
     );
     Ok(upload["name"]
         .as_str()
-        .map(str::to_owned)
-        .unwrap_or_else(|| format!("Run {expected_action}")))
+        .map_or_else(|| format!("Run {expected_action}"), str::to_owned))
 }
 
 fn manifest_string<'a>(table: &'a dyn toml_edit::TableLike, key: &str) -> Option<&'a str> {
@@ -1775,7 +1777,7 @@ mod tests {
             )
             .is_err()
         );
-        let mut wrong_step = job.clone();
+        let mut wrong_step = job;
         wrong_step["steps"][0]["number"] = json!(8);
         assert!(
             native_upload_matches_artifact(
@@ -1791,7 +1793,7 @@ mod tests {
     #[test]
     fn native_upload_proof_reads_the_actual_pinned_action_log_protocol() {
         use std::io::Write;
-        let artifact: ReleaseArtifact = serde_json::from_value(json!({"id":11826996696_u64,"name":"primary-ci-integration-430a6d5be5027d10c80f34c1d9c47d013b0ce2e5-1","expired":false,"digest":"sha256:15206afe6e8a9dabe1b1e05cfa42a0883b99cad13428c729c498eb340d569fae","workflow_run":null})).unwrap();
+        let artifact: ReleaseArtifact = serde_json::from_value(json!({"id":11_826_996_696_u64,"name":"primary-ci-integration-430a6d5be5027d10c80f34c1d9c47d013b0ce2e5-1","expired":false,"digest":"sha256:15206afe6e8a9dabe1b1e05cfa42a0883b99cad13428c729c498eb340d569fae","workflow_run":null})).unwrap();
         let mut zip = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
         zip.start_file(
             "validate/7_Upload native release archive.txt",
@@ -1888,7 +1890,7 @@ mod tests {
         let action = action.split(" #").next().unwrap();
         let unnamed = json!({"jobs":{"validate":{"runs-on":"ubuntu-24.04","steps":[{"uses":action,"with":{"name":"native-release-native-${{ github.run_attempt }}"}}]}}});
         assert_eq!(
-            super::verify_native_builder(
+            verify_native_builder(
                 serde_yaml::to_string(&unnamed).unwrap().as_bytes(),
                 "native"
             )
@@ -1903,7 +1905,7 @@ mod tests {
         ] {
             let workflow = json!({"jobs":{"validate":{"runs-on":runner,"steps":[{"id":"native-upload","name":"Upload native release archive","uses":crate::render::ci::github_action_ref("actions/upload-artifact", "v7.0.2").split(" #").next().unwrap(),"with":{"name":"native-release-native-${{ github.run_attempt }}"}}]}}});
             assert_eq!(
-                super::verify_native_builder(
+                verify_native_builder(
                     &serde_yaml::to_string(&workflow).unwrap().into_bytes(),
                     "native"
                 )
@@ -1912,7 +1914,7 @@ mod tests {
             );
         }
         assert!(
-            super::verify_native_builder(
+            verify_native_builder(
                 b"jobs: {validate: {runs-on: [self-hosted, ubuntu-24.04]}}",
                 "native"
             )
@@ -1928,7 +1930,7 @@ mod tests {
         ] {
             let mut workflow = json!({"jobs":{"validate":{"runs-on":"ubuntu-24.04","steps":[{"id":"native-upload","name":"Upload native release archive","uses":crate::render::ci::github_action_ref("actions/upload-artifact", "v7.0.2").split(" #").next().unwrap(),"with":{"name":"native-release-native-${{ github.run_attempt }}"}}]}}});
             workflow["jobs"]["validate"]["steps"][0][key] = value;
-            let error = super::verify_native_builder(
+            let error = verify_native_builder(
                 serde_yaml::to_string(&workflow).unwrap().as_bytes(),
                 "native",
             )
@@ -2058,7 +2060,7 @@ mod tests {
             archive_root,
             &source,
             &links,
-            &Default::default(),
+            &BTreeMap::default(),
         )
         .unwrap();
         assert!(!members.contains_key(&format!("{archive_root}/.pre-commit-config.yaml")));
@@ -2078,7 +2080,7 @@ mod tests {
                 .args(["status", "--porcelain"]),
         )
         .unwrap();
-        assert!(status.stdout.is_empty());
+        assert_eq!(status.stdout.as_slice(), b"");
     }
 
     #[test]
@@ -2825,7 +2827,7 @@ mod tests {
 
     #[test]
     fn upload_metadata_preserves_renamed_optional_target_and_build_dependencies() {
-        let manifest = r#"[package]
+        let manifest = r"[package]
 name='demo'
 version='1.0.0'
 license='MIT'
@@ -2839,7 +2841,7 @@ features=['x']
 version='2'
 [features]
 default=['dep:alias']
-"#
+"
         .parse()
         .unwrap();
         let metadata =

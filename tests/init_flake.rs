@@ -1,3 +1,4 @@
+use std::fmt::Write as _;
 use std::fs;
 use std::path::Path;
 use std::process::Command;
@@ -500,8 +501,10 @@ fn flake_plan_maintains_only_managed_files_with_locked_inputs() {
     let without_hooks = flake
         .lines()
         .filter(|line| !line.contains("git-hooks.url"))
-        .map(|line| format!("{line}\n"))
-        .collect::<String>();
+        .fold(String::new(), |mut output, line| {
+            writeln!(output, "{line}").expect("write");
+            output
+        });
     fs::write(root.join("flake.nix"), &without_hooks).unwrap();
     let output = plan(root);
     assert!(!output.status.success());
@@ -1244,7 +1247,7 @@ fn custom_mode_requires_docs_shell_when_docs_outputs_are_advertised() {
     )
     .unwrap();
     let flake = custom_skillnet_flake().replace(
-        r#"      devShells.docs = rs-harbor.lib.mkDocsShell {
+        r"      devShells.docs = rs-harbor.lib.mkDocsShell {
         inherit pkgs;
         inherit (toolchain) craneLib;
         cross = rs-harbor.lib.mkCross {inherit pkgs system;};
@@ -1256,7 +1259,7 @@ fn custom_mode_requires_docs_shell_when_docs_outputs_are_advertised() {
         ] ++ pre-commit-check.enabledPackages;
         extraShellHook = pre-commit-check.shellHook;
       };
-"#,
+",
         "",
     );
     fs::write(temp.path().join("flake.nix"), flake).unwrap();
@@ -1427,8 +1430,9 @@ fn check_rejects_disabled_cached_or_redirected_treefmt_hooks() {
         }
         assert_eq!(read(&path), changed, "check mutated {name}");
     }
-    assert!(
-        accepted.is_empty(),
+    assert_eq!(
+        accepted.len(),
+        0,
         "invalid hook contracts accepted: {accepted:?}"
     );
 }
@@ -1540,12 +1544,12 @@ fn check_diff_reports_removed_pre_commit_hook_notes() {
     let hooks_path = temp.path().join("nix/pre-commit.nix");
     fs::write(
         &hooks_path,
-        r#"{
+        r"{
   custom-check = {
     enable = true;
   };
 }
-"#,
+",
     )
     .unwrap();
 

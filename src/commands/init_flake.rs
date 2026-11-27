@@ -56,7 +56,7 @@ pub fn run(command: InitFlakeCommand) -> Result<()> {
     languages.nix = true;
     let rust_edition = cargo::rustfmt_edition(&metadata)?;
     let rust_version = workspace_rust_version(&metadata);
-    let audit_tools = resolve_audit_tools(workspace_root, &cfg, &languages, &metadata)?;
+    let audit_tools = resolve_audit_tools(workspace_root, &cfg, languages, &metadata)?;
     let mut all_files = flake::files_with_components(
         &languages,
         &rust_edition,
@@ -85,13 +85,13 @@ pub fn run(command: InitFlakeCommand) -> Result<()> {
         return Ok(());
     }
 
-    validate_hooks_only_policy(workspace_root, &files, scope, &languages, &rust_edition)?;
+    validate_hooks_only_policy(workspace_root, &files, scope, languages, &rust_edition)?;
 
     if command.check {
         check_files(
             workspace_root,
             &files,
-            &languages,
+            languages,
             &rust_edition,
             rust_version.as_deref(),
             &cfg,
@@ -131,7 +131,7 @@ pub fn run(command: InitFlakeCommand) -> Result<()> {
             content
         };
         let patched = flake::patch_existing(&content, audit_tools, generated_module_needs_package)?;
-        let mut patched_files = files.clone();
+        let mut patched_files = files;
         let flake_file = patched_files
             .iter_mut()
             .find(|file| file.relative_path == Path::new("flake.nix"))
@@ -143,6 +143,10 @@ pub fn run(command: InitFlakeCommand) -> Result<()> {
     write_tail(workspace_root, &files, command.plan_json)
 }
 
+#[expect(
+    clippy::needless_pass_by_value,
+    reason = "Keep the public command entry point's owned argument API"
+)]
 pub fn run_python(command: InitFlakeCommand) -> Result<()> {
     validate_init_flags(&command)?;
     if command.cross {
@@ -168,13 +172,13 @@ pub fn run_python(command: InitFlakeCommand) -> Result<()> {
         return Ok(());
     }
 
-    validate_hooks_only_policy(workspace_root, &files, scope, &languages, "2024")?;
+    validate_hooks_only_policy(workspace_root, &files, scope, languages, "2024")?;
 
     if command.check {
         check_files(
             workspace_root,
             &files,
-            &languages,
+            languages,
             "2024",
             None,
             &cfg,
@@ -204,6 +208,10 @@ pub fn run_python(command: InitFlakeCommand) -> Result<()> {
     write_tail(workspace_root, &files, command.plan_json)
 }
 
+#[expect(
+    clippy::needless_pass_by_value,
+    reason = "Keep the public command entry point's owned argument API"
+)]
 pub fn run_generic(command: InitFlakeCommand) -> Result<()> {
     validate_init_flags(&command)?;
     if command.cross {
@@ -246,13 +254,13 @@ pub fn run_generic(command: InitFlakeCommand) -> Result<()> {
         return Ok(());
     }
 
-    validate_hooks_only_policy(&workspace_root, &files, scope, &languages, "2024")?;
+    validate_hooks_only_policy(&workspace_root, &files, scope, languages, "2024")?;
 
     if command.check {
         check_files(
             &workspace_root,
             &files,
-            &languages,
+            languages,
             "2024",
             None,
             &cfg,
@@ -316,7 +324,7 @@ fn resolve_cross_targets(command: &InitFlakeCommand) -> Option<Vec<FlakeTargetAr
 fn resolve_audit_tools(
     workspace_root: &Path,
     cfg: &ProjectConfig,
-    languages: &Languages,
+    languages: Languages,
     metadata: &cargo::Metadata,
 ) -> Result<flake::AuditTools> {
     if !languages.rust {
@@ -502,11 +510,14 @@ fn scope_arg_hint(scope: FlakeScope) -> &'static str {
     }
 }
 
-#[allow(clippy::too_many_arguments)]
+#[allow(
+    clippy::too_many_arguments,
+    reason = "Keep the generated-file inputs and verification switches explicit"
+)]
 fn check_files(
-    workspace_root: &std::path::Path,
+    workspace_root: &Path,
     files: &[GeneratedFile],
-    languages: &Languages,
+    languages: Languages,
     rust_edition: &str,
     rust_version: Option<&str>,
     cfg: &ProjectConfig,
@@ -602,7 +613,7 @@ fn check_files(
                         .monorepo
                         .as_ref()
                         .is_none_or(|m| m.formatter_modules.is_empty())
-                        && flake::is_generated_treefmt(&actual, languages, rust_edition))
+                        && flake::is_generated_treefmt(&actual, &languages, rust_edition))
                 {
                     continue;
                 }
@@ -615,7 +626,7 @@ fn check_files(
                 if actual == file.content
                     || flake::has_required_pre_commit_with_components(
                         &actual,
-                        languages,
+                        &languages,
                         rust_version,
                         audit_tools,
                         &cfg.flake.components,
@@ -757,7 +768,7 @@ fn validate_hooks_only_policy(
     root: &Path,
     files: &[GeneratedFile],
     scope: FlakeScope,
-    languages: &Languages,
+    languages: Languages,
     edition: &str,
 ) -> Result<()> {
     if scope != FlakeScope::HooksOnly || !root.join("flake.nix").exists() {
@@ -769,7 +780,7 @@ fn validate_hooks_only_policy(
     });
     if uses_treefmt {
         let policy = fs::read_to_string(root.join("nix/treefmt.nix")).unwrap_or_default();
-        if !flake::is_generated_treefmt(&policy, languages, edition) {
+        if !flake::is_generated_treefmt(&policy, &languages, edition) {
             bail!(
                 "hooks-only update requires a recognized generated treefmt policy before removing standalone formatter hooks; custom or imported policies need evaluated coverage evidence. Review `simit init flake --scope full --print` for the generated policy contract"
             );
@@ -961,7 +972,7 @@ mod tests {
 
     #[test]
     fn removal_notes_use_specific_mapping_when_available() {
-        let actual = r#"{
+        let actual = r"{
   cargo-audit = {
     enable = true;
   };
@@ -969,13 +980,13 @@ mod tests {
     enable = true;
   };
 }
-"#;
-        let generated = r#"{
+";
+        let generated = r"{
   cargo-fmt = {
     enable = true;
   };
 }
-"#;
+";
 
         let notes = pre_commit_removal_notes(actual, generated);
         assert_eq!(
@@ -988,12 +999,12 @@ mod tests {
 
     #[test]
     fn removal_notes_fall_back_for_unknown_hooks() {
-        let actual = r#"{
+        let actual = r"{
   custom-check = {
     enable = true;
   };
 }
-"#;
+";
 
         let notes = pre_commit_removal_notes(actual, "{}\n");
         assert_eq!(
@@ -1005,14 +1016,14 @@ mod tests {
     #[test]
     fn extractor_ignores_nested_attributes() {
         let hooks = extract_pre_commit_hook_names(
-            r#"{
+            r"{
   cargo-msrv = {
     stages = {
       pre-push = true;
     };
   };
 }
-"#,
+",
         );
 
         assert!(hooks.contains("cargo-msrv"));

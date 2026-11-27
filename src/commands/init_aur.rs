@@ -9,6 +9,10 @@ use crate::config::ProjectConfig;
 use crate::registry::{self, FeatureStatus};
 use crate::render::pkgbuild;
 
+#[expect(
+    clippy::needless_pass_by_value,
+    reason = "Keep the public command entry point's owned argument API"
+)]
 pub fn run(command: InitAurCommand) -> Result<()> {
     let mode = CheckPrintMode::parse("init aur", command.check, command.print, command.diff)?;
 

@@ -118,6 +118,10 @@ struct VerifySummary {
     exit_code: i32,
 }
 
+#[expect(
+    clippy::needless_pass_by_value,
+    reason = "Keep the public command entry point's owned argument API"
+)]
 pub fn run(command: ReleaseCommand) -> Result<()> {
     reject_non_verify_flags(&command)?;
     if let Some(selection) = crate::monorepo::releases::select(&command)? {
@@ -161,7 +165,7 @@ pub fn run(command: ReleaseCommand) -> Result<()> {
     let hosted = command.component.is_none()
         && (config.release.codeberg.is_some() || config.release.github.is_some());
     let tag = if command.component.is_some() {
-        crate::release_identity::ReleaseTag::for_package(&packages[0].name, version.clone())?
+        ReleaseTag::for_package(&packages[0].name, version.clone())?
     } else {
         config.release.tag_prefix.tag(version.clone())
     };
@@ -432,10 +436,7 @@ fn verify_manifest(
 ) -> Result<()> {
     let package = &selection.package;
     let version = command.verify_version.as_ref().unwrap_or(&package.version);
-    let tag = crate::release_identity::ReleaseTag::for_package(
-        &package.config.namespace,
-        version.clone(),
-    )?;
+    let tag = ReleaseTag::for_package(&package.config.namespace, version.clone())?;
     let platform =
         crate::ci_resolution::release_backend(&selection.project, command.platform, None)?
             .platform();
@@ -573,7 +574,7 @@ fn tagged_native_package(
     let snapshot = tempfile::tempdir()?;
     for path in ["simit.toml", "Cargo.toml"] {
         if let Some(bytes) = read(path)? {
-            std::fs::write(snapshot.path().join(path), bytes)?;
+            fs::write(snapshot.path().join(path), bytes)?;
         }
     }
     let config = ProjectConfig::load(snapshot.path())?;
@@ -594,7 +595,7 @@ fn tagged_native_package(
 /// carry the release bundle's `[package.metadata.binstall]` verbatim.
 fn check_binstall(workspace_root: &Path, metadata: &cargo::Metadata) -> CheckResult {
     const CHECK: &str = "cargo-binstall metadata";
-    let updated = || {
+    let next_step = || {
         format!(
             "run `simit binstall sync`; {}",
             crate::binstall::MISSING_HINT
@@ -612,7 +613,7 @@ fn check_binstall(workspace_root: &Path, metadata: &cargo::Metadata) -> CheckRes
     };
     let updates = match crate::binstall::plan(workspace_root, metadata, &[], &system) {
         Ok(updates) => updates,
-        Err(error) => return CheckResult::fail(CHECK, error.to_string(), updated()),
+        Err(error) => return CheckResult::fail(CHECK, error.to_string(), next_step()),
     };
     if updates.is_empty() {
         return CheckResult::pass(CHECK, "no publishable binary crate needs binstall metadata");
@@ -623,7 +624,7 @@ fn check_binstall(workspace_root: &Path, metadata: &cargo::Metadata) -> CheckRes
             .filter(|(_, state)| *state != crate::binstall::State::InSync)
             .map(|(package, _)| package)
             .collect::<Vec<_>>(),
-        Err(error) => return CheckResult::fail(CHECK, error.to_string(), updated()),
+        Err(error) => return CheckResult::fail(CHECK, error.to_string(), next_step()),
     };
     if drifted.is_empty() {
         CheckResult::pass(
@@ -640,7 +641,7 @@ fn check_binstall(workspace_root: &Path, metadata: &cargo::Metadata) -> CheckRes
                 "{system} binstall metadata drifted in {}",
                 drifted.join(", ")
             ),
-            updated(),
+            next_step(),
         )
     }
 }
@@ -1004,7 +1005,7 @@ fn check_notes(
     config: &ProjectConfig,
     platform: crate::cli::Platform,
     version: &Version,
-    tag: &crate::release_identity::ReleaseTag,
+    tag: &ReleaseTag,
     component_script: Option<&str>,
 ) -> CheckResult {
     match config.release.notes_source(platform) {
@@ -1013,9 +1014,10 @@ fn check_notes(
             CheckResult::pass("release notes", "release notes explicitly disabled")
         }
         crate::config::ReleaseNotesSource::Git => {
-            let script = component_script.map(str::to_owned).unwrap_or_else(|| {
-                crate::release_notes::git_notes_script(config.release.tag_prefix)
-            });
+            let script = component_script.map_or_else(
+                || crate::release_notes::git_notes_script(config.release.tag_prefix),
+                str::to_owned,
+            );
             let output = Command::new("bash")
                 .current_dir(root)
                 .env("TAG", tag.to_string())
@@ -1052,8 +1054,7 @@ impl fmt::Display for CratesIoError {
         match self {
             Self::NotFound => f.write_str("crate not found"),
             Self::Http(status) => write!(f, "HTTP {status}"),
-            Self::Command(message) => f.write_str(message),
-            Self::Parse(message) => f.write_str(message),
+            Self::Command(message) | Self::Parse(message) => f.write_str(message),
         }
     }
 }
@@ -1230,7 +1231,7 @@ mod tests {
         let metadata = publish_false_binary();
         // `binstall::plan` skips this crate, so the platform check must not
         // read its evaluated metadata through that selection.
-        assert!(crate::binstall::candidates(&metadata).is_empty());
+        assert_eq!(crate::binstall::candidates(&metadata).len(), 0);
         assert_eq!(
             crate::binstall::archive_check_names(&metadata),
             [

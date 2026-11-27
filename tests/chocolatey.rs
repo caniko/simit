@@ -114,7 +114,7 @@ fn render_writes_deterministic_package_files() {
         "{}",
         String::from_utf8_lossy(&output.stderr)
     );
-    assert!(output.stdout.is_empty());
+    assert_eq!(output.stdout.as_slice(), b"");
     let nuspec = read(&output_dir.join("demo-app.nuspec"));
     assert!(nuspec.contains("<id>demo-app</id>"));
     assert!(nuspec.contains("<version>0.1.0</version>"));

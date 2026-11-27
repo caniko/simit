@@ -1,10 +1,14 @@
-use super::schema::*;
+use super::schema::{
+    AdapterRequest, AdapterResponse, Command, Config, Forge, PinItem, Profile, Project,
+    Requirement, Workspace, coordinate, credential_bytes, relative, resolved_path,
+};
 use crate::{
     project::CiUpdatePlan,
     review::{canonical_digest, digest, process},
 };
 use anyhow::{Context, Result, ensure};
 use serde::{Deserialize, Serialize};
+use std::fmt::Write as _;
 use std::{
     collections::{BTreeMap, BTreeSet},
     fs::{self, File, OpenOptions},
@@ -13,7 +17,11 @@ use std::{
     time::{Duration, Instant},
 };
 
-pub fn command_output(command: &Command, extra: &[String], cwd: Option<&Path>) -> Result<Vec<u8>> {
+pub(super) fn command_output(
+    command: &Command,
+    extra: &[String],
+    cwd: Option<&Path>,
+) -> Result<Vec<u8>> {
     Ok(run_tool(tool_command(command, extra, cwd)?, command.timeout_seconds)?.into_bytes())
 }
 
@@ -139,7 +147,7 @@ fn git_raw(root: &Path, argv: &[&str]) -> Result<String> {
     run_tool(command, 300)
 }
 
-pub fn lock(root: &Path) -> Result<File> {
+pub(super) fn lock(root: &Path) -> Result<File> {
     private_directory(root)?;
     let file = OpenOptions::new()
         .read(true)
@@ -152,7 +160,7 @@ pub fn lock(root: &Path) -> Result<File> {
     Ok(file)
 }
 
-pub fn verify_lock(root: &Path, held: &File) -> Result<()> {
+pub(super) fn verify_lock(root: &Path, held: &File) -> Result<()> {
     let original = same_file::Handle::from_file(held.try_clone()?)?;
     let current = same_file::Handle::from_path(root.join("lock"))
         .context("workspace lock disappeared or became inaccessible")?;
@@ -177,7 +185,7 @@ fn private_directory(path: &Path) -> Result<()> {
     Ok(())
 }
 
-pub fn save<T: Serialize>(path: &Path, value: &T) -> Result<()> {
+pub(super) fn save<T: Serialize>(path: &Path, value: &T) -> Result<()> {
     let mut temp = tempfile::NamedTempFile::new_in(path.parent().context("missing state parent")?)?;
     serde_json::to_writer_pretty(&mut temp, value)?;
     temp.write_all(b"\n")?;
@@ -192,7 +200,7 @@ pub fn save<T: Serialize>(path: &Path, value: &T) -> Result<()> {
 }
 
 #[derive(Serialize, Deserialize)]
-pub struct FrozenSelection {
+pub(super) struct FrozenSelection {
     pub projects: Vec<Project>,
     /// Explicit flake-input pins bound to this rollout; absent for ordinary
     /// runs, and part of the rollout key so a different file never resumes it.
@@ -209,7 +217,7 @@ pub struct FrozenSelection {
 /// Whether a repository has an unfinished transaction. A failure without one
 /// was refused before anything was committed to the receipt or pushed, so it
 /// repeats identically until the repository, generator or policy changes.
-pub fn in_flight(workspace: &Workspace, profile: &str, coordinate: &str) -> bool {
+pub(super) fn in_flight(workspace: &Workspace, profile: &str, coordinate: &str) -> bool {
     let receipt = profile_directory(workspace, profile)
         .join(format!("repo-{}", digest(coordinate.as_bytes())))
         .join("receipt.json");
@@ -220,11 +228,11 @@ pub fn in_flight(workspace: &Workspace, profile: &str, coordinate: &str) -> bool
         })
 }
 
-pub fn selection_path(root: &Path, key: &str) -> PathBuf {
+pub(super) fn selection_path(root: &Path, key: &str) -> PathBuf {
     root.join(format!("rollout-{key}.json"))
 }
 
-pub fn profile_directory(workspace: &Workspace, name: &str) -> PathBuf {
+pub(super) fn profile_directory(workspace: &Workspace, name: &str) -> PathBuf {
     workspace
         .state_directory
         .join(format!("profile-{}", digest(name.as_bytes())))
@@ -268,7 +276,7 @@ fn semantic_paths(value: &mut serde_json::Value, pointer: &str) {
 /// declared command, enrolled digests and forge, and the inventory source is
 /// not policy at all (a frozen selection binds its observations by digest).
 /// A host rebuild therefore keeps an unfinished rollout resumable.
-pub fn policy_digest(
+pub(super) fn policy_digest(
     config: &Config,
     profile: &Profile,
     workspace: &Workspace,
@@ -331,13 +339,17 @@ pub fn policy_digest(
     canonical_digest(&(scoped, workspace, generator, consumer))
 }
 
+#[expect(
+    clippy::trivially_copy_pass_by_ref,
+    reason = "Serde skip predicates receive a reference"
+)]
 fn is_legacy(version: &u32) -> bool {
     *version == 0
 }
 
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct Receipt {
+pub(super) struct Receipt {
     /// Absent (0) in v1 receipts, which always landed directly. Older binaries
     /// reject v2 fields as unknown rather than misreading a pull request.
     #[serde(default, skip_serializing_if = "is_legacy")]
@@ -396,7 +408,7 @@ fn only_primary(scopes: &[String]) -> bool {
     scopes == ["ci"]
 }
 
-pub fn status(root: &Path) -> Result<Vec<Receipt>> {
+pub(super) fn status(root: &Path) -> Result<Vec<Receipt>> {
     if !root.exists() {
         return Ok(vec![]);
     }
@@ -526,7 +538,7 @@ fn archive(root: &Path, retained: &Receipt) -> Result<()> {
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub struct Retirement {
+pub(super) struct Retirement {
     pub coordinate: String,
     /// `retired` when an unfinished receipt was archived, `idle` otherwise.
     pub phase: &'static str,
@@ -541,7 +553,7 @@ pub struct Retirement {
 /// Abandon one repository's unfinished candidate: delete its maintenance ref,
 /// archive its receipt and drop it from every frozen rollout, so the next run
 /// starts over. Repeating it is a no-op. The caller holds the workspace lock.
-pub fn retire(
+pub(super) fn retire(
     state_directory: &Path,
     workspace: &Workspace,
     profile_name: &str,
@@ -1114,7 +1126,7 @@ fn generate_scopes(
             "readme" => &["upgrade", "--plan-json"],
             _ => anyhow::bail!("unsupported generation scope {scope}"),
         };
-        let mut argv = argv.iter().map(|arg| arg.to_string()).collect::<Vec<_>>();
+        let mut argv = argv.iter().map(ToString::to_string).collect::<Vec<_>>();
         if let Some(migration) = &profile.migrate {
             let backend = [
                 format!("--ci-provider={}", migration.provider),
@@ -1385,8 +1397,11 @@ fn hashes(
         .collect()
 }
 
-#[allow(clippy::too_many_arguments)]
-pub fn update(
+#[allow(
+    clippy::too_many_arguments,
+    reason = "Keep the public update API compatible"
+)]
+pub(super) fn update(
     config: &Config,
     profile_name: &str,
     profile: &Profile,
@@ -1842,7 +1857,7 @@ pub fn update(
             change: None,
             landed: None,
             generator_revision: Some(profile.generator.source_revision.clone()),
-            project_policy_digest: Some(project_digest.clone()),
+            project_policy_digest: Some(project_digest),
         };
         if receipt.diff.is_empty() {
             if push {
@@ -1883,7 +1898,7 @@ pub fn update(
                 )?;
             }
             let receipt = Receipt {
-                candidate: observed.revision.clone(),
+                candidate: observed.revision,
                 phase: "unchanged".into(),
                 ..receipt
             };
@@ -1906,10 +1921,12 @@ pub fn update(
                     .split('\0')
                     .any(|path| !path.is_empty() && !receipt.patches.contains_key(path))
                 {
-                    message.push_str(&format!(
+                    write!(
+                        message,
                         "\n\nci: adopt qualified simit {}",
                         profile.generator.source_revision
-                    ));
+                    )
+                    .expect("write");
                 }
                 message
             }
@@ -2094,7 +2111,7 @@ pub fn update(
             requirements.clone(),
         );
         admission.plan = Some(admission_plan.clone());
-        admission.changed_paths = changed_paths.clone();
+        admission.changed_paths.clone_from(&changed_paths);
         if landing == "pull-request" && branch == target_branch {
             admission = pull_request(admission, Some(branch), None);
         }
@@ -2290,6 +2307,7 @@ pub fn update(
 // Only namespace_* tests execute Bubblewrap; package checks run the rest here.
 #[cfg(all(test, target_os = "linux"))]
 mod tests {
+    use super::super::schema::{Inventory, Override};
     use super::*;
     use serde_json::json;
 
@@ -2299,7 +2317,7 @@ mod tests {
         let path = directory.path().join("receipt.json");
         save(&path, &"previous readable receipt").unwrap();
         // JSON escaping doubles these bytes although raw command output fits.
-        let diff = "\n".repeat(crate::review::MAX_JSON_BYTES as usize / 2);
+        let diff = "\n".repeat(usize::try_from(crate::review::MAX_JSON_BYTES).unwrap() / 2);
         assert!(save(&path, &json!({"diff": diff})).is_err());
         let previous: String = crate::review::read_json(&path).unwrap();
         assert_eq!(previous, "previous readable receipt");
@@ -2364,7 +2382,7 @@ mod tests {
         )
         .unwrap();
         f.publish(&f.source, "enroll a no-input flake");
-        f.inject_generator(&format!(r#"
+        f.inject_generator(&format!(r"
 import os, socket, subprocess
 from pathlib import Path
 assert not Path({secret:?}).exists()
@@ -2384,7 +2402,7 @@ assert 'safe' in safe.stdout
 unsafe = subprocess.run([*argv, '--expr', 'builtins.readFile {nix_path}'], capture_output=True, text=True)
 assert unsafe.returncode != 0
 assert 'private-forge-token' not in unsafe.stdout
-"#, secret = secret.to_str().unwrap(), nix_path = serde_json::to_string(secret.to_str().unwrap()).unwrap()));
+", secret = secret.to_str().unwrap(), nix_path = serde_json::to_string(secret.to_str().unwrap()).unwrap()));
         assert_eq!(f.update(true).unwrap().phase, "qualified");
         assert_eq!(fs::read_to_string(secret).unwrap(), "private-forge-token");
     }
@@ -2432,12 +2450,12 @@ assert 'private-forge-token' not in unsafe.stdout
             }
         })).unwrap();
         f.publish(&f.source, "enroll a locked cached remote input");
-        f.inject_generator(r#"
+        f.inject_generator(r"
 import subprocess
 value = subprocess.run(['nix', 'eval', '--json', '--offline', '--no-update-lock-file', '--no-write-lock-file', '.#simitConfig'], capture_output=True, text=True)
 assert value.returncode == 0, value.stderr
 assert 'offline-input' in value.stdout
-"#);
+");
         assert_eq!(f.update(true).unwrap().phase, "qualified");
     }
 
@@ -2448,7 +2466,7 @@ assert 'offline-input' in value.stdout
         let state = f.config.workspaces["projects"].state_directory.clone();
         let held = lock(&state).unwrap();
         f.inject_generator(&format!(
-            r#"
+            r"
 import os, time
 from pathlib import Path
 assert os.getpid() == 1
@@ -2457,7 +2475,7 @@ if os.fork() == 0:
     time.sleep(0.2)
     Path({:?}).write_text('poisoned')
     os._exit(0)
-"#,
+",
             target.to_str().unwrap()
         ));
         assert_eq!(f.update(true).unwrap().phase, "qualified");
@@ -2500,13 +2518,13 @@ if os.fork() == 0:
         let adopted = f.update(true).unwrap();
         assert_eq!(adopted.phase, "qualified");
         assert_eq!(adopted.managed["new-managed.txt"], None);
-        assert!(
+        assert_eq!(
             git(
                 &f.remote,
                 &["ls-tree", &adopted.candidate, "--", "new-managed.txt"]
             )
-            .unwrap()
-            .is_empty()
+            .unwrap(),
+            ""
         );
     }
 
@@ -2523,7 +2541,7 @@ if os.fork() == 0:
         .unwrap();
         assert_ne!(hashes(&f.source, paths(), None).unwrap(), committed);
         assert_eq!(hashes(&f.source, paths(), Some("HEAD")).unwrap(), committed);
-        assert!(git(&f.source, &["diff", "--cached"]).unwrap().is_empty());
+        assert_eq!(git(&f.source, &["diff", "--cached"]).unwrap(), "");
         git(&f.source, &["config", "core.filemode", "false"]).unwrap();
         assert_eq!(hashes(&f.source, paths(), None).unwrap(), committed);
         git(
@@ -3030,7 +3048,7 @@ if os.fork() == 0:
     fn namespace_unlanded_candidates_rebuild_after_source_movement_and_retain_the_old_receipt() {
         for phase in ["prepared", "candidate", "landing"] {
             let f = Fixture::new();
-            f.control(json!({"candidate":"pending"}));
+            f.control(&json!({"candidate":"pending"}));
             let mut pending = f.update(true).unwrap();
             pending.phase = phase.into();
             save(&f.root().join("receipt.json"), &pending).unwrap();
@@ -3040,7 +3058,7 @@ if os.fork() == 0:
             )
             .unwrap();
             let source = f.publish(&f.source, "advance while the candidate waits");
-            f.control(json!({}));
+            f.control(&json!({}));
             let adopted = f.update(true).unwrap();
             assert_eq!(adopted.phase, "qualified");
             assert_eq!(adopted.source, source);
@@ -3069,7 +3087,7 @@ if os.fork() == 0:
     fn namespace_unrelated_target_history_invalidates_unlanded_candidates() {
         for phase in ["prepared", "candidate", "landing"] {
             let f = Fixture::new();
-            f.control(json!({"candidate":"pending"}));
+            f.control(&json!({"candidate":"pending"}));
             let mut pending = f.update(true).unwrap();
             pending.phase = phase.into();
             save(&f.root().join("receipt.json"), &pending).unwrap();
@@ -3092,7 +3110,7 @@ if os.fork() == 0:
             )
             .unwrap();
             let source = f.remote_head();
-            f.control(json!({}));
+            f.control(&json!({}));
             let adopted = f.update(true).unwrap();
             assert_eq!(adopted.phase, "qualified");
             assert_eq!(adopted.source, source);
@@ -3121,7 +3139,7 @@ if os.fork() == 0:
     fn namespace_source_movement_after_landing_preserves_adoption_reconciliation() {
         for phase in ["landing", "adopting"] {
             let f = Fixture::new();
-            f.control(json!({"adoption":"pending"}));
+            f.control(&json!({"adoption":"pending"}));
             let mut landed = f.update(true).unwrap();
             assert_eq!(landed.phase, "adopting");
             landed.phase = phase.into();
@@ -3129,7 +3147,7 @@ if os.fork() == 0:
             let checkout = f.root().join("checkout");
             fs::write(checkout.join("application.txt"), "after landing\n").unwrap();
             let source = f.publish(&checkout, "advance beyond the landed candidate");
-            f.control(json!({}));
+            f.control(&json!({}));
             assert!(
                 f.update(true)
                     .unwrap_err()
@@ -3153,7 +3171,7 @@ if os.fork() == 0:
             "ssh://git@fixture.example:2222/team/demo.git",
         ] {
             let f = Fixture::new();
-            f.control(json!({"remote":remote}));
+            f.control(&json!({"remote":remote}));
             assert!(f.update(false).is_err());
             let root = profile_directory(&f.config.workspaces["projects"], "fleet")
                 .join(format!("repo-{}", digest(f.project.coordinate.as_bytes())));
@@ -3212,7 +3230,7 @@ if os.fork() == 0:
             let original = fs::read_to_string(&entrypoint).unwrap();
             let (shebang, body) = original.split_once('\n').unwrap();
             let probe = format!(
-                r#"
+                r"
 import json, os, pathlib, sys
 assert os.getpid() == 1
 assert os.environ['HOME'] == '/tmp/home'
@@ -3239,7 +3257,7 @@ except OSError:
     pass
 else:
     raise AssertionError('CI credential mount is writable')
-"#,
+",
                 [&undeclared, &unrelated, &f.control, &f.remote, &f.source]
             );
             // The oracle replaces the host helper after verification, before
@@ -3270,7 +3288,7 @@ else:
             }
             f.config.validate().unwrap();
             let source = f.remote_head();
-            f.control(json!({"replaceHelper":helper}));
+            f.control(&json!({"replaceHelper":helper}));
             let root = f.root();
             private_directory(&root).unwrap();
             let forge = &f.config.forges["fixture"];
@@ -3370,7 +3388,7 @@ else:
                     .insert(script.clone(), digest(original.as_bytes()));
             }
             f.config.validate().unwrap();
-            f.control(json!({"candidate":"pending"}));
+            f.control(&json!({"candidate":"pending"}));
             let pending = f.update(true).unwrap();
             assert_eq!(pending.phase, "candidate");
             let marker = f.control.with_file_name("unverified-adapter-ran");
@@ -3383,7 +3401,7 @@ else:
                 )
             };
             fs::write(&script, original.replacen('\n', &injected, 1)).unwrap();
-            f.control(json!({}));
+            f.control(&json!({}));
             assert!(f.update(true).is_err());
             assert!(!marker.exists());
             assert_eq!(f.remote_head(), pending.source);
@@ -3527,7 +3545,7 @@ else:
             .profiles
             .insert("other".into(), serde_json::from_value(other).unwrap());
         f.write_inventory();
-        f.control(json!({"candidate":"pending"}));
+        f.control(&json!({"candidate":"pending"}));
         assert!(f.cli("fleet", true).is_err());
         // A different profile must prepare its own preview rather than resume
         // the first profile's candidate with incompatible policy.
@@ -3542,7 +3560,7 @@ else:
         assert_eq!(second.len(), 1);
         assert_ne!(first[0].candidate, second[0].candidate);
         let first_receipt = serde_json::to_value(&first[0]).unwrap();
-        f.control(json!({}));
+        f.control(&json!({}));
         f.cli("other", true).unwrap();
         assert_eq!(
             serde_json::to_value(&status(&fleet_root).unwrap()[0]).unwrap(),
@@ -3558,7 +3576,7 @@ else:
     fn namespace_unrelated_configuration_edits_resume_the_same_frozen_candidate() {
         let mut f = Fixture::new();
         f.write_inventory();
-        f.control(json!({"candidate":"pending"}));
+        f.control(&json!({"candidate":"pending"}));
         assert!(f.cli("fleet", true).is_err());
         let pending = status(&profile_directory(
             &f.config.workspaces["projects"],
@@ -3586,7 +3604,7 @@ else:
                 .unwrap(),
         )
         .unwrap();
-        f.control(json!({}));
+        f.control(&json!({}));
         f.cli("fleet", true).unwrap();
         let adopted = status(&profile_directory(
             &f.config.workspaces["projects"],
@@ -3603,7 +3621,7 @@ else:
     fn namespace_referenced_policy_changes_still_block_pending_candidates() {
         for field in ["profile", "workspace", "forge", "generator"] {
             let mut f = Fixture::new();
-            f.control(json!({"candidate":"pending"}));
+            f.control(&json!({"candidate":"pending"}));
             let pending = f.update(true).unwrap();
             match field {
                 // Another generator source produces other candidate bytes.
@@ -3613,7 +3631,7 @@ else:
                         .get_mut("fleet")
                         .unwrap()
                         .generator
-                        .source_revision = "b".repeat(40)
+                        .source_revision = "b".repeat(40);
                 }
                 "profile" => {
                     f.config
@@ -3621,7 +3639,7 @@ else:
                         .get_mut("fleet")
                         .unwrap()
                         .rollout
-                        .batch_size = 2
+                        .batch_size = 2;
                 }
                 "workspace" => f
                     .config
@@ -3647,7 +3665,7 @@ else:
     fn namespace_executes_enrolled_snapshot_when_generator_path_changes_during_qualification() {
         let f = Fixture::new();
         let generator = &f.config.profiles["fleet"].generator.executable;
-        f.control(json!({"replaceGenerator":generator}));
+        f.control(&json!({"replaceGenerator":generator}));
         let receipt = f.update(true).unwrap();
         assert_eq!(receipt.phase, "qualified");
         assert_eq!(
@@ -3717,7 +3735,7 @@ else:
                 .unwrap();
                 let config = f.control.with_file_name("updates.json");
                 save(&config, &f.config).unwrap();
-                f.control(json!({"coordinateStatus":{&f.project.coordinate:{"candidate":qualification_status}}}));
+                f.control(&json!({"coordinateStatus":{&f.project.coordinate:{"candidate":qualification_status}}}));
                 let run = || {
                     super::super::run(super::super::Args {
                         config: config.clone(),
@@ -3827,7 +3845,7 @@ else:
         assert_eq!(environment["GIT_TERMINAL_PROMPT"], "0");
         // Nix Python wrappers may normalize "1" to "true"; Python treats
         // every nonempty value as disabling user-site packages.
-        assert!(!environment["PYTHONNOUSERSITE"].is_empty());
+        assert_ne!(environment["PYTHONNOUSERSITE"], "");
     }
 
     #[test]
@@ -3929,9 +3947,9 @@ else:
         assert!(!f.config.workspaces["projects"].state_directory.exists());
     }
 
-    fn scoped_plans(f: &mut Fixture, scopes: &[&str], plans: serde_json::Value) {
+    fn scoped_plans(f: &mut Fixture, scopes: &[&str], plans: &serde_json::Value) {
         f.config.profiles.get_mut("fleet").unwrap().scopes =
-            scopes.iter().map(|scope| scope.to_string()).collect();
+            scopes.iter().map(ToString::to_string).collect();
         save(&f.source.join("fixture-plans.json"), &plans).unwrap();
         f.publish(&f.source, "enroll scoped generation plans");
     }
@@ -3990,7 +4008,8 @@ else:
         )
         .unwrap();
         let (plan, qualification) = merge(&["ci".into()]).unwrap();
-        assert!(plan.patches.is_empty() && plan.schema_matches());
+        assert_eq!(plan.patches.len(), 0);
+        assert!(plan.schema_matches());
         assert_eq!(plan.files[1].content, extra.files[1].content);
         assert_eq!(qualification, [".github/workflows/ci.yaml"]);
         let (plan, _) = merge(&["ci".into(), "ci-extra".into()]).unwrap();
@@ -4067,7 +4086,8 @@ else:
         fs::remove_file(&obsolete_path).unwrap();
         fs::write(&obsolete_path, &marked).unwrap();
         let (plan, qualification) = merge(&["ci".into()]).unwrap();
-        assert!(plan.patches.is_empty() && plan.schema_matches());
+        assert_eq!(plan.patches.len(), 0);
+        assert!(plan.schema_matches());
         assert_eq!(plan.files[1].relative_path, Path::new(release_path));
         assert_eq!(plan.obsolete, [PathBuf::from(obsolete)]);
         assert_eq!(qualification, [".github/workflows/ci.yaml"]);
@@ -4092,6 +4112,7 @@ else:
     }
 
     fn self_pinned_candidate(explicit_pin: bool) {
+        use std::os::unix::fs::PermissionsExt;
         let mut f = Fixture::new();
         let generator = &mut f.config.profiles.get_mut("fleet").unwrap().generator;
         let revision = generator.source_revision.clone();
@@ -4144,14 +4165,14 @@ else:
         scoped_plans(
             &mut f,
             &["ci"],
-            json!({
+            &json!({
                 "init ci --primary-only --plan-json":{"schema":"simit.ci-update-plan.v1","files":[primary_ci()],"obsolete":[]},
                 "init ci --plan-json":{"schema":"simit.ci-update-plan.v1","files":[primary_ci(), extra],"obsolete":[]},
                 "init release --plan-json":{"schema":"simit.ci-update-plan.v1","files":[released],"obsolete":[]}
             }),
         );
         f.inject_generator(&format!(
-            r#"
+            r"
 from pathlib import Path
 import json
 flake = Path('flake.nix').read_text()
@@ -4160,7 +4181,7 @@ assert 'ref=trunk&rev={revision}' in flake
 assert 'github:other/simit/{decoy_revision}' in flake
 assert nodes['simit']['locked']['rev'] == '{revision}'
 assert nodes['decoy']['locked']['rev'] == '{decoy_revision}'
-"#
+"
         ));
         let tools = tempfile::tempdir().unwrap();
         let nix = tools.path().join("nix");
@@ -4173,9 +4194,10 @@ assert nodes['decoy']['locked']['rev'] == '{decoy_revision}'
             ),
         )
         .unwrap();
-        use std::os::unix::fs::PermissionsExt;
         fs::set_permissions(&nix, fs::Permissions::from_mode(0o700)).unwrap();
-        f.control(json!({"candidate":"pending","expectedWorkflows":[".github/workflows/ci.yaml"]}));
+        f.control(
+            &json!({"candidate":"pending","expectedWorkflows":[".github/workflows/ci.yaml"]}),
+        );
         super::super::pin::NIX.set(Some(nix));
         let item = explicit_pin.then(|| PinItem {
             coordinate: f.project.coordinate.clone(),
@@ -4218,13 +4240,15 @@ assert nodes['decoy']['locked']['rev'] == '{decoy_revision}'
         scoped_plans(
             &mut f,
             &["ci", "readme"],
-            json!({
+            &json!({
                 "init ci --primary-only --plan-json": {"schema":"simit.ci-update-plan.v1","files":[primary_ci()],"obsolete":[]},
                 "upgrade --plan-json": {"schema":"simit.ci-update-plan.v2","files":[],"obsolete":[],"patches":[readme]},
             }),
         );
-        f.control(json!({"candidate":"pending","expectedWorkflows":[".github/workflows/ci.yaml"]}));
-        assert!(f.update(true).unwrap().patches.is_empty());
+        f.control(
+            &json!({"candidate":"pending","expectedWorkflows":[".github/workflows/ci.yaml"]}),
+        );
+        assert_eq!(f.update(true).unwrap().patches.len(), 0);
     }
 
     #[test]
@@ -4244,13 +4268,15 @@ assert nodes['decoy']['locked']['rev'] == '{decoy_revision}'
         scoped_plans(
             &mut f,
             &["ci", "ci-extra", "readme"],
-            json!({
+            &json!({
                 "init ci --primary-only --plan-json": {"schema":"simit.ci-update-plan.v1","files":[primary_ci()],"obsolete":[]},
                 "init ci --plan-json": {"schema":"simit.ci-update-plan.v2","files":[primary_ci(), publish],"obsolete":[],"patches":[config]},
                 "upgrade --plan-json": {"schema":"simit.ci-update-plan.v2","files":[],"obsolete":[],"patches":[readme]},
             }),
         );
-        f.control(json!({"candidate":"pending","expectedWorkflows":[".github/workflows/ci.yaml"]}));
+        f.control(
+            &json!({"candidate":"pending","expectedWorkflows":[".github/workflows/ci.yaml"]}),
+        );
         let pending = f.update(true).unwrap();
         assert_eq!(pending.phase, "candidate");
         assert_eq!(
@@ -4285,7 +4311,7 @@ assert nodes['decoy']['locked']['rev'] == '{decoy_revision}'
         );
         fs::write(f.root().join("workflows.json"), saved).unwrap();
 
-        f.control(json!({"expectedWorkflows":[".github/workflows/ci.yaml"]}));
+        f.control(&json!({"expectedWorkflows":[".github/workflows/ci.yaml"]}));
         let adopted = f.update(true).unwrap();
         assert_eq!(adopted.phase, "qualified");
         assert!(adopted.managed[".github/workflows/publish-crate.yaml"].is_some());
@@ -4320,7 +4346,7 @@ assert nodes['decoy']['locked']['rev'] == '{decoy_revision}'
             .map(|path| crate::review::read_json::<serde_json::Value>(&path).unwrap())
             .filter(|evidence| evidence[0]["operation"] == "admit")
             .collect::<Vec<_>>();
-        assert!(!admissions.is_empty());
+        assert_ne!(admissions.len(), 0);
         for evidence in admissions {
             assert_eq!(evidence[0]["schemaVersion"], 2);
             assert_eq!(evidence[0]["plan"]["patches"].as_array().unwrap().len(), 2);
@@ -4398,15 +4424,15 @@ assert nodes['decoy']['locked']['rev'] == '{decoy_revision}'
         }
         let pin = temporary.path().join("pin.json");
         let item = json!({
-            "coordinate": f.project.coordinate.clone(),
-            "relativePath": f.project.relative_path.clone(),
+            "coordinate": f.project.coordinate,
+            "relativePath": f.project.relative_path,
             "input": "harbor-rs", "target": TARGET
         });
         save(
             &pin,
             &json!({
                 "contract": "fleetix.supply-work-items.v1", "producer": "fixture",
-                "target": TARGET, "items": [item.clone()]
+                "target": TARGET, "items": [item]
             }),
         )
         .unwrap();
@@ -4425,7 +4451,7 @@ assert nodes['decoy']['locked']['rev'] == '{decoy_revision}'
                 .map(super::super::pin::PinSkip::reason),
             Some("unrecognised-input-declaration")
         );
-        f.control(json!({"candidate":"pending"}));
+        f.control(&json!({"candidate":"pending"}));
         // A parked candidate is an incomplete rollout, exactly like `--repo`.
         assert!(f.cli_pin(&pin).is_err());
         let pending: Receipt = crate::review::read_json(&f.root().join("receipt.json")).unwrap();
@@ -4520,7 +4546,7 @@ assert nodes['decoy']['locked']['rev'] == '{decoy_revision}'
                 .contains("an unfinished rollout uses another policy")
         );
         // The same file resumes the retained candidate without a new commit.
-        f.control(json!({}));
+        f.control(&json!({}));
         f.cli_pin(&pin).unwrap();
         let adopted: Receipt = crate::review::read_json(&f.root().join("receipt.json")).unwrap();
         assert_eq!(adopted.phase, "qualified");
@@ -4546,7 +4572,7 @@ assert nodes['decoy']['locked']['rev'] == '{decoy_revision}'
         scoped_plans(
             &mut f,
             &["ci"],
-            json!({"init ci --primary-only --plan-json": primary}),
+            &json!({"init ci --primary-only --plan-json": primary}),
         );
         assert_eq!(f.update(true).unwrap().phase, "qualified");
 
@@ -4644,7 +4670,7 @@ assert nodes['decoy']['locked']['rev'] == '{decoy_revision}'
         scoped_plans(
             &mut f,
             &["ci", "ci-extra"],
-            json!({
+            &json!({
                 format!("init ci --primary-only --plan-json {migrated}"): {"schema":"simit.ci-update-plan.v1","files":[primary_ci()],"obsolete":[".crow/build.yaml"]},
                 format!("init ci --plan-json {migrated}"): {"schema":"simit.ci-update-plan.v2","files":[primary_ci()],"obsolete":[".crow/build.yaml"],"patches":[config]},
             }),
@@ -4655,7 +4681,7 @@ assert nodes['decoy']['locked']['rev'] == '{decoy_revision}'
             )
             .unwrap(),
         );
-        f.control(json!({"expectedWorkflows":[".github/workflows/ci.yaml"]}));
+        f.control(&json!({"expectedWorkflows":[".github/workflows/ci.yaml"]}));
         let adopted = f.update(true).unwrap();
         assert_eq!(adopted.phase, "qualified");
         assert_eq!(adopted.managed[".crow/build.yaml"], None);
@@ -4710,7 +4736,7 @@ assert nodes['decoy']['locked']['rev'] == '{decoy_revision}'
             let mut f = Fixture::new();
             let mut plans = json!({"init ci --primary-only --plan-json": primary.clone()});
             plans[command] = plan;
-            scoped_plans(&mut f, &scopes, plans);
+            scoped_plans(&mut f, &scopes, &plans);
             let source = f.remote_head();
             let message = f.update(true).unwrap_err().to_string();
             assert!(message.contains(error), "{command}: {message}");
@@ -4734,7 +4760,7 @@ assert nodes['decoy']['locked']['rev'] == '{decoy_revision}'
             &["push", f.remote.to_str().unwrap(), "HEAD:refs/heads/trunk"],
         )
         .unwrap();
-        f.control(json!({"expectedWorkflows":[".crow/build.yaml","new-managed.txt"]}));
+        f.control(&json!({"expectedWorkflows":[".crow/build.yaml","new-managed.txt"]}));
         let receipt = f.update(true).unwrap();
         assert_eq!(receipt.phase, "qualified");
         assert_eq!(f.remote_head(), receipt.candidate);
@@ -4768,6 +4794,7 @@ assert nodes['decoy']['locked']['rev'] == '{decoy_revision}'
 
     impl Fixture {
         fn new() -> Self {
+            use std::os::unix::fs::PermissionsExt;
             let temp = tempfile::tempdir().unwrap();
             let root = temp.path();
             let source = root.join("source");
@@ -4826,7 +4853,6 @@ assert nodes['decoy']['locked']['rev'] == '{decoy_revision}'
                 ),
             )
             .unwrap();
-            use std::os::unix::fs::PermissionsExt;
             fs::set_permissions(&generator, fs::Permissions::from_mode(0o700)).unwrap();
             let adapter = root.join("adapter");
             let ready = root.join("oracle-port");
@@ -4999,7 +5025,7 @@ assert nodes['decoy']['locked']['rev'] == '{decoy_revision}'
         fn remote_head(&self) -> String {
             git(&self.remote, &["rev-parse", "refs/heads/trunk"]).unwrap()
         }
-        fn control(&self, value: serde_json::Value) {
+        fn control(&self, value: &serde_json::Value) {
             save(&self.control, &value).unwrap();
         }
         fn land_pull_requests(mut self) -> Self {
@@ -5032,7 +5058,7 @@ assert nodes['decoy']['locked']['rev'] == '{decoy_revision}'
         assert_eq!(preview.phase, "preview");
         assert!(preview.diff.contains("new-managed.txt"));
         assert_eq!(f.remote_head(), source);
-        f.control(json!({"candidate":"pending"}));
+        f.control(&json!({"candidate":"pending"}));
         let pending = f.update(true).unwrap();
         assert_eq!(pending.phase, "candidate");
         assert_eq!(f.remote_head(), source);
@@ -5050,13 +5076,13 @@ assert nodes['decoy']['locked']['rev'] == '{decoy_revision}'
         .unwrap();
         assert_eq!(status_before[0].candidate, pending.candidate);
         assert_eq!(status_before[0].generator_revision, None);
-        f.control(json!({"adoption":"pending"}));
+        f.control(&json!({"adoption":"pending"}));
         let adopting = f.update(true).unwrap();
         assert_eq!(adopting.phase, "adopting");
         assert_eq!(adopting.candidate, pending.candidate);
         assert_eq!(adopting.generator_revision, generator_revision);
         assert_eq!(f.remote_head(), pending.candidate);
-        f.control(json!({}));
+        f.control(&json!({}));
         let adopted = f.update(true).unwrap();
         assert_eq!(adopted.phase, "qualified");
         assert_eq!(adopted.candidate, pending.candidate);
@@ -5097,7 +5123,7 @@ assert nodes['decoy']['locked']['rev'] == '{decoy_revision}'
         )
         .unwrap();
         assert_eq!(f.remote_head(), source);
-        f.control(json!({"raceAtInspection":2,"raceRevision":race}));
+        f.control(&json!({"raceAtInspection":2,"raceRevision":race}));
         assert!(f.update(true).is_err());
         assert_eq!(f.remote_head(), race);
         assert_eq!(
@@ -5114,16 +5140,16 @@ assert nodes['decoy']['locked']['rev'] == '{decoy_revision}'
     #[test]
     fn namespace_changed_policy_or_source_invalidates_retained_candidate() {
         let f = Fixture::new();
-        f.control(json!({"candidate":"pending"}));
+        f.control(&json!({"candidate":"pending"}));
         let pending = f.update(true).unwrap();
-        f.control(json!({"policy":"c".repeat(64)}));
+        f.control(&json!({"policy":"c".repeat(64)}));
         assert!(
             f.update(true)
                 .unwrap_err()
                 .to_string()
                 .contains("protection changed")
         );
-        f.control(json!({"defaultBranch":"main"}));
+        f.control(&json!({"defaultBranch":"main"}));
         assert!(f.update(true).is_err());
         assert_eq!(f.remote_head(), pending.source);
     }
@@ -5182,11 +5208,11 @@ assert nodes['decoy']['locked']['rev'] == '{decoy_revision}'
     fn namespace_failed_or_unsupported_qualification_cannot_land() {
         let f = Fixture::new();
         let source = f.remote_head();
-        f.control(json!({"candidate":"pending"}));
+        f.control(&json!({"candidate":"pending"}));
         let pending = f.update(true).unwrap();
         assert_eq!(pending.phase, "candidate");
         for status in ["failed", "unsupported", "skipped", "cancelled"] {
-            f.control(json!({"candidate":status}));
+            f.control(&json!({"candidate":status}));
             let error = f.update(true).unwrap_err().to_string();
             assert!(
                 error.contains(if matches!(status, "failed" | "unsupported") {
@@ -5206,7 +5232,7 @@ assert nodes['decoy']['locked']['rev'] == '{decoy_revision}'
             assert_eq!(request.branch.as_deref(), Some(pending.branch.as_str()));
             assert_eq!(f.remote_head(), source);
         }
-        f.control(json!({}));
+        f.control(&json!({}));
         assert_eq!(f.update(true).unwrap().phase, "qualified");
     }
 
@@ -5232,7 +5258,7 @@ assert nodes['decoy']['locked']['rev'] == '{decoy_revision}'
                 landing: None,
             },
         );
-        f.control(json!({"expectedAdmissionChecks":[
+        f.control(&json!({"expectedAdmissionChecks":[
             {"name":"test","authority":"777"},
             {"name":"profile-check","authority":"777"},
             {"name":"override-check","authority":"777"}
@@ -5249,7 +5275,7 @@ assert nodes['decoy']['locked']['rev'] == '{decoy_revision}'
             .unwrap()
             .adapter
             .arguments = vec!["update-github-adapter".into()];
-        f.control(json!({"admission": "pending"}));
+        f.control(&json!({"admission": "pending"}));
         let error = f.update(true).unwrap_err();
         assert!(
             error.to_string().contains("admission is incomplete"),
@@ -5281,7 +5307,7 @@ assert nodes['decoy']['locked']['rev'] == '{decoy_revision}'
         )
         .unwrap();
         f.publish(&f.source, "generate a docs-gated workflow");
-        f.control(json!({"admission": "pending"}));
+        f.control(&json!({"admission": "pending"}));
         let error = f.update(true).unwrap_err();
         assert!(
             error.to_string().contains("admission is incomplete"),
@@ -5309,7 +5335,7 @@ assert nodes['decoy']['locked']['rev'] == '{decoy_revision}'
             })
             .collect::<BTreeMap<_, _>>();
         for status in ["unsupported", "failed", "pending"] {
-            f.control(json!({"admission": status, "expectedAdmissionBlobs": expected}));
+            f.control(&json!({"admission": status, "expectedAdmissionBlobs": expected}));
             let error = f.update(true).unwrap_err().to_string();
             assert!(
                 error.contains(if status == "pending" {
@@ -5320,14 +5346,13 @@ assert nodes['decoy']['locked']['rev'] == '{decoy_revision}'
                 "{status}: {error}"
             );
             assert!(!f.root().join("receipt.json").exists());
-            assert!(
-                git(&f.remote, &["for-each-ref", "refs/heads/maintenance/"])
-                    .unwrap()
-                    .is_empty()
+            assert_eq!(
+                git(&f.remote, &["for-each-ref", "refs/heads/maintenance/"]).unwrap(),
+                ""
             );
             assert_eq!(f.remote_head(), source);
         }
-        f.control(json!({"expectedAdmissionBlobs": expected}));
+        f.control(&json!({"expectedAdmissionBlobs": expected}));
         assert_eq!(f.update(true).unwrap().phase, "qualified");
     }
 
@@ -5335,14 +5360,14 @@ assert nodes['decoy']['locked']['rev'] == '{decoy_revision}'
     fn namespace_resumed_candidates_repeat_admission_before_any_push() {
         for phase in ["prepared", "candidate", "landing"] {
             let f = Fixture::new();
-            f.control(json!({"candidate":"pending"}));
+            f.control(&json!({"candidate":"pending"}));
             let mut retained = f.update(true).unwrap();
             retained.phase = phase.into();
             save(&f.root().join("receipt.json"), &retained).unwrap();
             let reference = format!("refs/heads/{}", retained.branch);
             git(&f.remote, &["update-ref", "-d", &reference]).unwrap();
             let before = fs::read(f.root().join("receipt.json")).unwrap();
-            f.control(json!({"admission":"failed"}));
+            f.control(&json!({"admission":"failed"}));
             assert!(
                 f.update(true)
                     .unwrap_err()
@@ -5350,13 +5375,9 @@ assert nodes['decoy']['locked']['rev'] == '{decoy_revision}'
                     .contains("adapter rejected admit")
             );
             assert_eq!(f.remote_head(), retained.source);
-            assert!(
-                git(&f.remote, &["for-each-ref", &reference])
-                    .unwrap()
-                    .is_empty()
-            );
+            assert_eq!(git(&f.remote, &["for-each-ref", &reference]).unwrap(), "");
             assert_eq!(fs::read(f.root().join("receipt.json")).unwrap(), before);
-            f.control(json!({}));
+            f.control(&json!({}));
             let adopted = f.update(true).unwrap();
             assert_eq!(adopted.phase, "qualified");
             assert_eq!(adopted.candidate, retained.candidate);
@@ -5368,7 +5389,7 @@ assert nodes['decoy']['locked']['rev'] == '{decoy_revision}'
         for style in ["merge", "squash", "rebase", "ff"] {
             let f = Fixture::new().land_pull_requests();
             let source = f.remote_head();
-            f.control(json!({"mergeStyle": style}));
+            f.control(&json!({"mergeStyle": style}));
             let receipt = f.update(true).unwrap();
             assert_eq!(receipt.phase, "qualified", "{style}");
             assert_eq!(receipt.schema_version, 2);
@@ -5384,7 +5405,7 @@ assert nodes['decoy']['locked']['rev'] == '{decoy_revision}'
                 source
             );
             assert_eq!(f.pulls()[0]["state"], "merged");
-            assert!(f.maintenance_refs().is_empty(), "{style}");
+            assert_eq!(f.maintenance_refs(), "", "{style}");
             assert_eq!(f.update(true).unwrap().phase, "unchanged");
         }
     }
@@ -5393,14 +5414,14 @@ assert nodes['decoy']['locked']['rev'] == '{decoy_revision}'
     fn namespace_pull_requests_park_until_mergeable_and_resume_the_same_change() {
         let f = Fixture::new().land_pull_requests();
         let source = f.remote_head();
-        f.control(json!({"merge": "pending"}));
+        f.control(&json!({"merge": "pending"}));
         let parked = f.update(true).unwrap();
         assert_eq!(parked.phase, "proposed");
         assert_eq!(parked.change.as_deref(), Some("1"));
         assert_eq!(f.remote_head(), source);
         assert_eq!(f.update(true).unwrap().phase, "proposed");
         assert_eq!(f.pulls().as_array().unwrap().len(), 1);
-        f.control(json!({}));
+        f.control(&json!({}));
         let adopted = f.update(true).unwrap();
         assert_eq!(adopted.phase, "qualified");
         assert_eq!(adopted.candidate, parked.candidate);
@@ -5412,10 +5433,10 @@ assert nodes['decoy']['locked']['rev'] == '{decoy_revision}'
     fn namespace_stale_or_closed_pull_requests_retire_their_ref_and_regenerate() {
         for change in ["target", "policy", "closed"] {
             let mut f = Fixture::new().land_pull_requests();
-            f.control(json!({"merge": "pending"}));
+            f.control(&json!({"merge": "pending"}));
             let parked = f.update(true).unwrap();
             assert_eq!(parked.phase, "proposed");
-            f.control(json!({}));
+            f.control(&json!({}));
             match change {
                 "target" => {
                     fs::write(f.source.join("application.txt"), "moved target\n").unwrap();
@@ -5427,9 +5448,9 @@ assert nodes['decoy']['locked']['rev'] == '{decoy_revision}'
                         .get_mut("fleet")
                         .unwrap()
                         .rollout
-                        .batch_size = 2
+                        .batch_size = 2;
                 }
-                _ => f.control(json!({"humanClose": true})),
+                _ => f.control(&json!({"humanClose": true})),
             }
             let adopted = f.update(true).unwrap();
             assert_eq!(adopted.phase, "qualified", "{change}");
@@ -5437,7 +5458,7 @@ assert nodes['decoy']['locked']['rev'] == '{decoy_revision}'
             let pulls = f.pulls();
             assert_eq!(pulls[0]["state"], "closed", "{change}");
             assert_eq!(pulls[1]["state"], "merged", "{change}");
-            assert!(f.maintenance_refs().is_empty(), "{change}");
+            assert_eq!(f.maintenance_refs(), "", "{change}");
             assert!(
                 f.root()
                     .join(format!(
@@ -5452,23 +5473,23 @@ assert nodes['decoy']['locked']['rev'] == '{decoy_revision}'
     #[test]
     fn namespace_human_merged_pull_requests_are_verified_then_adopted() {
         let f = Fixture::new().land_pull_requests();
-        f.control(json!({"merge": "pending"}));
+        f.control(&json!({"merge": "pending"}));
         let parked = f.update(true).unwrap();
-        f.control(json!({"merge": "pending", "humanMerge": "squash"}));
+        f.control(&json!({"merge": "pending", "humanMerge": "squash"}));
         let adopted = f.update(true).unwrap();
         assert_eq!(adopted.phase, "qualified");
         assert_eq!(adopted.candidate, parked.candidate);
         let landed = adopted.landed.unwrap();
         assert_ne!(landed, parked.candidate);
         assert_eq!(f.remote_head(), landed);
-        assert!(f.maintenance_refs().is_empty());
+        assert_eq!(f.maintenance_refs(), "");
     }
 
     #[test]
     fn namespace_landed_tree_or_parent_mismatch_fails_closed() {
         for style in ["wrong-tree", "wrong-parent"] {
             let f = Fixture::new().land_pull_requests();
-            f.control(json!({"mergeStyle": style}));
+            f.control(&json!({"mergeStyle": style}));
             for _ in 0..2 {
                 assert!(
                     f.update(true)
@@ -5507,7 +5528,7 @@ assert nodes['decoy']['locked']['rev'] == '{decoy_revision}'
             let mut inventory: Inventory = crate::review::read_json(&inventory_path).unwrap();
             inventory.projects.push(second.clone());
             save(&inventory_path, &inventory).unwrap();
-            f.control(json!({"coordinateStatus":{&f.project.coordinate:{"merge":"pending"}}}));
+            f.control(&json!({"coordinateStatus":{&f.project.coordinate:{"merge":"pending"}}}));
             let profile_root = profile_directory(&f.config.workspaces["projects"], "fleet");
             let phase = |coordinate: &str| {
                 status(&profile_root)
@@ -5530,7 +5551,7 @@ assert nodes['decoy']['locked']['rev'] == '{decoy_revision}'
     #[test]
     fn namespace_v1_receipts_resume_as_direct_landing_and_retire_their_ref() {
         let f = Fixture::new();
-        f.control(json!({"candidate":"pending"}));
+        f.control(&json!({"candidate":"pending"}));
         let pending = f.update(true).unwrap();
         assert_eq!(pending.phase, "candidate");
         let path = f.root().join("receipt.json");
@@ -5539,8 +5560,8 @@ assert nodes['decoy']['locked']['rev'] == '{decoy_revision}'
             legacy.as_object_mut().unwrap().remove(key).unwrap();
         }
         save(&path, &legacy).unwrap();
-        assert!(!f.maintenance_refs().is_empty());
-        f.control(json!({}));
+        assert_ne!(f.maintenance_refs(), "");
+        f.control(&json!({}));
         let adopted = f.update(true).unwrap();
         assert_eq!(adopted.phase, "qualified");
         assert_eq!(adopted.schema_version, 0);
@@ -5550,7 +5571,7 @@ assert nodes['decoy']['locked']['rev'] == '{decoy_revision}'
         assert_eq!(adopted.candidate, pending.candidate);
         assert_eq!(adopted.landed, None);
         assert_eq!(f.remote_head(), pending.candidate);
-        assert!(f.maintenance_refs().is_empty());
+        assert_eq!(f.maintenance_refs(), "");
     }
 
     #[test]
@@ -5600,7 +5621,7 @@ assert nodes['decoy']['locked']['rev'] == '{decoy_revision}'
         let source = f.remote_head();
         let demo = "fixture.example/team/demo";
         f.write_inventory();
-        f.control(json!({"candidate":"pending"}));
+        f.control(&json!({"candidate":"pending"}));
         assert!(f.cli("fleet", true).is_err());
         // Refs no receipt names survive an ordinary retirement: one shaped like
         // a simit candidate (named after its commit) and one made by hand.
@@ -5633,7 +5654,8 @@ assert nodes['decoy']['locked']['rev'] == '{decoy_revision}'
                 .is_some_and(|name| name.to_string_lossy().starts_with("rollout-"))
             {
                 let frozen: FrozenSelection = crate::review::read_json(&path).unwrap();
-                assert!(frozen.completed && frozen.projects.is_empty());
+                assert!(frozen.completed);
+                assert_eq!(frozen.projects.len(), 0);
             }
         }
         // Repeating it is a no-op; pruning deletes only the simit-shaped orphan.
@@ -5652,7 +5674,7 @@ assert nodes['decoy']['locked']['rev'] == '{decoy_revision}'
                 .contains("has no receipt")
         );
         // The next run starts over.
-        f.control(json!({}));
+        f.control(&json!({}));
         let fresh = f.update(true).unwrap();
         assert_eq!(fresh.phase, "qualified");
         assert_eq!(f.remote_head(), fresh.candidate);
@@ -5664,7 +5686,7 @@ assert nodes['decoy']['locked']['rev'] == '{decoy_revision}'
     #[test]
     fn namespace_retire_refuses_a_landed_candidate() {
         let f = Fixture::new();
-        f.control(json!({"adoption":"pending"}));
+        f.control(&json!({"adoption":"pending"}));
         let adopting = f.update(true).unwrap();
         assert_eq!(adopting.phase, "adopting");
         let error = f.retire(&f.project.coordinate, false).unwrap_err();
@@ -5685,7 +5707,7 @@ assert nodes['decoy']['locked']['rev'] == '{decoy_revision}'
             .canaries
             .push(demo.clone());
         f.write_inventory();
-        f.control(json!({"candidate":"pending"}));
+        f.control(&json!({"candidate":"pending"}));
         assert!(f.cli("fleet", true).is_err());
         let retired = f.retire(&demo, false).unwrap();
         assert_eq!((retired.phase, retired.rollouts), ("retired", 0));
@@ -5713,7 +5735,7 @@ assert nodes['decoy']['locked']['rev'] == '{decoy_revision}'
                 .unwrap();
         f.config.profiles.insert("other".into(), other);
         f.write_inventory();
-        f.control(json!({"candidate":"pending"}));
+        f.control(&json!({"candidate":"pending"}));
         assert!(f.cli("fleet", true).is_err());
         assert!(f.cli("other", true).is_err());
         let retired = f.retire(&demo, false).unwrap();
@@ -5737,7 +5759,7 @@ assert nodes['decoy']['locked']['rev'] == '{decoy_revision}'
     #[test]
     fn namespace_inventory_source_changes_keep_pending_candidates() {
         let mut f = Fixture::new();
-        f.control(json!({"candidate":"pending"}));
+        f.control(&json!({"candidate":"pending"}));
         let pending = f.update(true).unwrap();
         // A host rebuild moves the inventory command to another store path.
         let inventory = &mut f.config.workspaces.get_mut("projects").unwrap().inventory;
@@ -5746,7 +5768,7 @@ assert nodes['decoy']['locked']['rev'] == '{decoy_revision}'
             serde_json::from_value(json!({"program":"/nix/store/rebuilt-canix/bin/canix"}))
                 .unwrap(),
         );
-        f.control(json!({}));
+        f.control(&json!({}));
         let adopted = f.update(true).unwrap();
         assert_eq!(adopted.phase, "qualified");
         assert_eq!(adopted.candidate, pending.candidate);
@@ -5756,7 +5778,7 @@ assert nodes['decoy']['locked']['rev'] == '{decoy_revision}'
     fn namespace_other_repository_policy_edits_keep_pending_candidates() {
         for own in [false, true] {
             let mut f = Fixture::new();
-            f.control(json!({"candidate":"pending"}));
+            f.control(&json!({"candidate":"pending"}));
             let pending = f.update(true).unwrap();
             let coordinate = if own {
                 f.project.coordinate.clone()
@@ -5769,7 +5791,7 @@ assert nodes['decoy']['locked']['rev'] == '{decoy_revision}'
                 coordinate,
                 serde_json::from_value(json!({"targetBranch":"trunk"})).unwrap(),
             );
-            f.control(json!({}));
+            f.control(&json!({}));
             let resumed = f.update(true);
             if own {
                 assert!(resumed.unwrap_err().to_string().contains("another policy"));
@@ -5784,25 +5806,25 @@ assert nodes['decoy']['locked']['rev'] == '{decoy_revision}'
     #[test]
     fn namespace_previews_never_retire_parked_pull_requests_or_refs() {
         let f = Fixture::new().land_pull_requests();
-        f.control(json!({"merge": "pending"}));
+        f.control(&json!({"merge": "pending"}));
         assert_eq!(f.update(true).unwrap().phase, "proposed");
         fs::write(f.source.join("application.txt"), "moved target\n").unwrap();
         f.publish(&f.source, "advance the parked target");
         let receipt = fs::read(f.root().join("receipt.json")).unwrap();
         let refs = f.maintenance_refs();
-        assert!(!refs.is_empty());
+        assert_ne!(refs, "");
         assert_eq!(f.update(false).unwrap().phase, "proposed");
         assert_eq!(fs::read(f.root().join("receipt.json")).unwrap(), receipt);
         assert_eq!(f.maintenance_refs(), refs);
         assert_eq!(f.pulls()[0]["state"], "open");
         // A preview that invalidates a direct candidate keeps its published ref.
         let f = Fixture::new();
-        f.control(json!({"candidate": "pending"}));
+        f.control(&json!({"candidate": "pending"}));
         f.update(true).unwrap();
         fs::write(f.source.join("application.txt"), "moved target\n").unwrap();
         f.publish(&f.source, "advance the pending target");
         let refs = f.maintenance_refs();
-        assert!(!refs.is_empty());
+        assert_ne!(refs, "");
         assert_eq!(f.update(false).unwrap().phase, "preview");
         assert_eq!(f.maintenance_refs(), refs);
     }

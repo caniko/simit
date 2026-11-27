@@ -7,7 +7,7 @@ use rnix::ast::{Attr, AttrSet, Entry, Expr, HasEntry, Param};
 
 use super::unparen;
 
-fn literal_attrs(set: AttrSet) -> Option<BTreeMap<String, Expr>> {
+fn literal_attrs(set: &AttrSet) -> Option<BTreeMap<String, Expr>> {
     if set.rec_token().is_some() {
         return None;
     }
@@ -83,14 +83,14 @@ fn recognize(source: &str) -> Option<()> {
     let Expr::AttrSet(body) = unparen(lambda.body()?)? else {
         return None;
     };
-    let mut hooks = literal_attrs(body)?;
+    let mut hooks = literal_attrs(&body)?;
     if hooks.contains_key("cargo-fmt") || hooks.contains_key("uv-ruff-format") {
         return None;
     }
     let Expr::AttrSet(hook) = hooks.remove("treefmt")? else {
         return None;
     };
-    let fields = literal_attrs(hook)?;
+    let fields = literal_attrs(&hook)?;
     for (name, expected) in [
         ("enable", "true"),
         ("entry", r#""${treefmtWrapper}/bin/treefmt --ci""#),

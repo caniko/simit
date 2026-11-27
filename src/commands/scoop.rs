@@ -17,12 +17,12 @@ use crate::sha256;
 
 pub fn run(command: ScoopCommand) -> Result<()> {
     match command.action {
-        ScoopAction::Render(args) => render(args),
+        ScoopAction::Render(args) => render(&args),
         ScoopAction::Bump(args) => bump(args),
     }
 }
 
-fn render(args: ScoopRenderArgs) -> Result<()> {
+fn render(args: &ScoopRenderArgs) -> Result<()> {
     let (resolved, package_version) = resolve(args.scoop.as_overrides())?;
     let version = args.version.as_deref().unwrap_or(&package_version);
     validate_version(version)?;
@@ -105,10 +105,10 @@ fn prepare_bucket(args: &ScoopBumpArgs, resolved: &ResolvedScoop) -> Result<Utf8
         return Ok(bucket);
     }
     if bucket.exists() {
-        fs::remove_dir_all(bucket.as_std_path()).with_context(|| format!("removing {}", bucket))?;
+        fs::remove_dir_all(bucket.as_std_path()).with_context(|| format!("removing {bucket}"))?;
     }
     if let Some(parent) = bucket.parent() {
-        fs::create_dir_all(parent).with_context(|| format!("creating {}", parent))?;
+        fs::create_dir_all(parent).with_context(|| format!("creating {parent}"))?;
     }
     let remote = args
         .bucket_url

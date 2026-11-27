@@ -9,6 +9,10 @@ use crate::project;
 use crate::python;
 use crate::render::gitignore;
 
+#[expect(
+    clippy::needless_pass_by_value,
+    reason = "Keep the public command entry point's owned argument API"
+)]
 pub fn run(command: InitGitignoreCommand) -> Result<()> {
     let mode = CheckPrintMode::parse("init gitignore", command.check, command.print, command.diff)?;
     let workspace_root = workspace_root()?;

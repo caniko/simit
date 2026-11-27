@@ -126,6 +126,10 @@ pub(super) fn workflow_reference(reference: &str) -> bool {
             .any(|byte| byte <= b' ' || byte == 0x7f || b"~^:?*[\\".contains(&byte))
         && !reference.ends_with('.')
         && reference.split('/').all(|component| {
-            !component.is_empty() && !component.starts_with('.') && !component.ends_with(".lock")
+            !component.is_empty()
+                && !component.starts_with('.')
+                && component
+                    .rsplit_once('.')
+                    .is_none_or(|(_, ext)| ext != "lock")
         })
 }

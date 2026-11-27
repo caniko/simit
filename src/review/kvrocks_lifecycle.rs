@@ -215,7 +215,7 @@ pub fn validate_process_identity(
 
 /// Every process-owned socket must be in the Unix table. Exactly one may be a
 /// listener, at the canonical path. An unknown inode could be an Internet socket
-/// and is rejected even when systemd reports RestrictAddressFamilies=AF_UNIX.
+/// and is rejected even when systemd reports `RestrictAddressFamilies=AF_UNIX`.
 pub fn validate_unix_listeners(table: &str, owned: &[u64], socket: &str) -> Result<()> {
     ensure!(table.len() <= 1024 * 1024, "Unix socket table is too large");
     let wanted = owned.iter().copied().collect::<BTreeSet<_>>();
@@ -254,7 +254,7 @@ mod tests {
     use crate::review::kvrocks::{self, BootstrapReceipt, WorkerIdentity};
     use std::path::Path;
 
-    fn plan() -> kvrocks::ServicePlan {
+    fn plan() -> ServicePlan {
         let manifest = EngineManifest {
             schema_version: 1,
             repository: "caniko/simit".into(),
@@ -291,7 +291,7 @@ mod tests {
         .unwrap()
     }
 
-    fn properties(plan: &kvrocks::ServicePlan) -> String {
+    fn properties(plan: &ServicePlan) -> String {
         format!(
             "Id={}\nDescription=Simit Kvrocks {}\nLoadState=loaded\nActiveState=active\nSubState=running\nInvocationID={}\nMainPID=12345\nControlGroup=/system.slice/{}\nUser=runner\nGroup=nixbld\nKillMode=control-group\nTimeoutStopUSec=30s\nSendSIGKILL=yes\nKillSignal=15\nFinalKillSignal=9\nRestrictAddressFamilies=AF_UNIX\nLimitNOFILE=8192\n",
             plan.unit,
@@ -489,7 +489,7 @@ mod tests {
     #[test]
     fn cancellation_supervisor_is_an_independent_managed_root_invocation() {
         let plan = plan();
-        let unit = super::super::kvrocks::supervisor_unit(&plan);
+        let unit = kvrocks::supervisor_unit(&plan);
         let original = properties(&plan)
             .replace(&plan.unit, &unit)
             .replace(
@@ -516,21 +516,15 @@ mod tests {
             "/nix/store/{}-simit-review-tools/bin/repo-review",
             "2".repeat(32)
         );
-        let args = super::super::kvrocks::supervisor_arguments(
-            &plan,
-            Path::new(&wrapper),
-            plan.identity.uid,
-        )
-        .unwrap();
+        let args =
+            kvrocks::supervisor_arguments(&plan, Path::new(&wrapper), plan.identity.uid).unwrap();
         assert!(args.contains(&"--pipe".into()) && args.contains(&"--wait".into()));
         assert!(args.contains(&"--property=TimeoutStopSec=45s".into()));
         assert!(args.contains(&format!("--setenv=SUDO_UID={}", plan.identity.uid)));
         assert!(!args.iter().any(|arg| arg.contains("--replace")));
+        assert!(kvrocks::supervisor_arguments(&plan, Path::new(&wrapper), 0).is_err());
         assert!(
-            super::super::kvrocks::supervisor_arguments(&plan, Path::new(&wrapper), 0).is_err()
-        );
-        assert!(
-            super::super::kvrocks::supervisor_arguments(
+            kvrocks::supervisor_arguments(
                 &plan,
                 Path::new("/tmp/mutable/bin/repo-review"),
                 plan.identity.uid

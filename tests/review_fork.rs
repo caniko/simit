@@ -2,6 +2,7 @@
 
 use serde_json::json;
 use simit::review::{contract::*, read_json, write_json};
+use std::fmt::Write as _;
 use std::{fs, os::unix::fs::PermissionsExt, process::Command};
 
 #[test]
@@ -190,9 +191,7 @@ esac
         );
         let mut fetches = format!("https://github.com/{source}.git {commit}\n");
         if nixpkgs {
-            fetches.push_str(&format!(
-                "https://github.com/{base_repository}.git {base}\n"
-            ));
+            writeln!(fetches, "https://github.com/{base_repository}.git {base}").expect("write");
         }
         assert_eq!(fs::read_to_string(root.join("fetch.log")).unwrap(), fetches);
     }

@@ -2,14 +2,14 @@
 //! the Crow origin named by the check authority owns workflow outcomes.
 use super::{
     github::{Api, branch_pattern, encoded, number, text, workflow_bytes},
-    schema::*,
+    schema::{AdapterRequest, AdapterResponse, Check, Requirement},
 };
 use anyhow::{Context, Result, bail, ensure};
 use base64::Engine;
 use serde_json::Value;
 use std::collections::{BTreeMap, BTreeSet};
 
-pub fn execute(request: &AdapterRequest) -> Result<AdapterResponse> {
+pub(super) fn execute(request: &AdapterRequest) -> Result<AdapterResponse> {
     request.validate()?;
     let forge = Api::with(
         &request.api_url,
@@ -146,15 +146,13 @@ fn workflow(
             )),
         "Crow workflow {path} uses keys that need a source-aware adapter"
     );
-    let name = match yaml.get("name") {
-        Some(name) => literal(name)?,
-        // Crow's SanitizePath: file name without extension or leading dot.
-        None => {
-            let base = path.rsplit('/').next().unwrap_or(path);
-            let base = base.strip_suffix(".yml").unwrap_or(base);
-            let base = base.strip_suffix(".yaml").unwrap_or(base);
-            literal(&base.strip_prefix('.').unwrap_or(base).into())?
-        }
+    let name = if let Some(name) = yaml.get("name") {
+        literal(name)?
+    } else {
+        let base = path.rsplit('/').next().unwrap_or(path);
+        let base = base.strip_suffix(".yml").unwrap_or(base);
+        let base = base.strip_suffix(".yaml").unwrap_or(base);
+        literal(&base.strip_prefix('.').unwrap_or(base).into())?
     };
     // Crow collects only workflows whose `when` names an event.
     ensure!(
@@ -236,7 +234,8 @@ fn owned(
             continue;
         }
         ensure!(
-            path.ends_with(".yaml") || path.ends_with(".yml"),
+            path.rsplit_once('.')
+                .is_some_and(|(_, ext)| matches!(ext, "yaml" | "yml")),
             "Crow workflow {path} needs a source-aware adapter (Jsonnet or unknown format)"
         );
         if let Some(workflow) = workflow(path, &source(path)?, branch, default_branch)? {
@@ -447,7 +446,7 @@ fn execute_with(
         .revision
         .clone()
         .context("admission and qualification need an exact revision")?;
-    response.revision = revision.clone();
+    response.revision.clone_from(&revision);
     if request.operation == "admit" {
         let plan = request.plan.as_ref().context("missing admission plan")?;
         let workflows = owned(&request.workflows, branch, &default_branch, |path| {
@@ -752,7 +751,7 @@ mod tests {
         let mut request = request("inspect");
         let inspected = replay(&request, &forge, &crow).unwrap();
         assert_eq!(inspected.revision, REVISION);
-        assert!(inspected.requirements.is_empty());
+        assert_eq!(inspected.requirements.len(), 0);
         // The commit's real push status contexts bind to Crow workflow names.
         forge[BRANCH]["enable_status_check"] = json!(true);
         forge[BRANCH]["status_check_contexts"] = json!(
@@ -843,11 +842,11 @@ mod tests {
             // Same name and id on another forge connection.
             &|crow| {
                 crow["repos/lookup/caniko/pink-raven"]["clone_url"] =
-                    json!("https://forge.example/caniko/pink-raven.git")
+                    json!("https://forge.example/caniko/pink-raven.git");
             },
             &|crow| crow["repos/lookup/caniko/pink-raven"]["default_branch"] = json!("main"),
             &|crow| {
-                crow["repos/lookup/caniko/pink-raven"]["require_approval"] = json!("all_events")
+                crow["repos/lookup/caniko/pink-raven"]["require_approval"] = json!("all_events");
             },
             &|crow| crow["repos/lookup/caniko/pink-raven"]["config_file"] = json!(".ci/"),
             // Duplicate originals for one commit are ambiguous.
@@ -860,12 +859,12 @@ mod tests {
             &|crow| crow[PIPELINE]["event"] = json!("manual"),
             &|crow| {
                 crow[CONFIG][0]["data"] =
-                    json!(base64::engine::general_purpose::STANDARD.encode("name: build\n"))
+                    json!(base64::engine::general_purpose::STANDARD.encode("name: build\n"));
             },
             &|crow| crow[CONFIG][0]["generated_from"] = json!(".crow/build.jsonnet"),
             &|crow| crow[CONFIG].as_array_mut().unwrap().truncate(1),
             &|crow| crow[PIPELINE]["workflows"][0]["attempt"] = json!(2),
-            &|crow| crow[PIPELINE]["workflows"][0]["original_workflow_id"] = json!(150914),
+            &|crow| crow[PIPELINE]["workflows"][0]["original_workflow_id"] = json!(150_914),
             &|crow| {
                 let rerun = crow[PIPELINE]["workflows"][0].clone();
                 crow[PIPELINE]["workflows"]
@@ -945,7 +944,7 @@ mod tests {
             "protected_file_patterns":"","enable_push":true,"enable_push_whitelist":false});
         let protected = |rule: Value| {
             move |forge: &mut Value| {
-                forge["repos/caniko/pink-raven/branch_protections"] = json!([rule.clone()])
+                forge["repos/caniko/pink-raven/branch_protections"] = json!([rule.clone()]);
             }
         };
         mutated(&inspect, &protected(rule.clone())).unwrap();
@@ -965,7 +964,7 @@ mod tests {
             );
         }
         // A maintenance-ref rule applies before that branch exists.
-        let mut maintenance = rule.clone();
+        let mut maintenance = rule;
         maintenance["rule_name"] = json!("simit/update/*");
         maintenance["require_signed_commits"] = json!(true);
         let mut admit = admission(&forge, &[(BUILD, String::new())]);
@@ -1118,8 +1117,8 @@ mod tests {
 
     #[test]
     fn crow_conditions_names_and_compile_time_step_filters_follow_crow() {
-        let steps = "steps:\n- name: test\n  image: alpine\n  commands: [true]\n- name: pr\n  image: alpine\n  commands: [true]\n  when:\n    event: pull_request\n";
         const RESTRICTED: &str = "when:\n- event: push\n  branch: ['${CI_REPO_DEFAULT_BRANCH}', 'simit/update/**']\n- event: pull_request\n";
+        let steps = "steps:\n- name: test\n  image: alpine\n  commands: [true]\n- name: pr\n  image: alpine\n  commands: [true]\n  when:\n    event: pull_request\n";
         for (when, branch, runs) in [
             ("when:\n  event: push\n", MAINTENANCE, true),
             ("when:\n  event: [tag, pull_request]\n", MAINTENANCE, false),
@@ -1244,7 +1243,7 @@ mod tests {
                         workspace: true,
                     },
                     runners: &runners,
-                    step_runners: &Default::default(),
+                    step_runners: &BTreeMap::default(),
                     options: CiOptions {
                         repository_checks: true,
                         ..Default::default()
@@ -1266,7 +1265,7 @@ mod tests {
                             .into_bytes())
                     })
                     .unwrap();
-                    assert!(!admitted.is_empty(), "{runtime:?} {paths:?}");
+                    assert_ne!(admitted.len(), 0, "{runtime:?} {paths:?}");
                 }
             }
         }

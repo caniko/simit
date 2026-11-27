@@ -98,7 +98,7 @@ fn no_tag_skips_tag_creation() {
     assert!(manifest.contains("version = \"0.2.0\""));
 
     let tags = output(root, "git", &["tag", "--list"]);
-    assert!(tags.trim().is_empty());
+    assert_eq!(tags.trim(), "");
 }
 
 #[test]

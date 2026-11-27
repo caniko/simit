@@ -4,7 +4,11 @@ use std::path::{Path, PathBuf};
 use anyhow::{Result, ensure};
 use serde_json::{Value, json};
 
-use crate::{config::ProjectConfig, project::GeneratedFile, render::ci::GENERATED_WORKFLOW_MARKER};
+use crate::{
+    config::ProjectConfig,
+    project::GeneratedFile,
+    render::ci::{CiOptions, GENERATED_WORKFLOW_MARKER},
+};
 
 use super::native_registry::Registry;
 
@@ -89,7 +93,7 @@ pub(super) fn files(
             );
             crate::render::ci::validate_credential_free_workflow(
                 &serde_yaml::to_string(&workflow)?,
-                &Default::default(),
+                &CiOptions::default(),
             )?;
             let bootstrap: Value = serde_yaml::from_str(&format!(
                 "steps:\n{}",

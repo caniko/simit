@@ -87,7 +87,7 @@ fi
     )
     .unwrap();
     let expected = "a".repeat(40);
-    let argv = root.path().join("dispatch.argv");
+    let dispatch_log = root.path().join("dispatch.argv");
     for (selector, resolved, kind, accepted) in [
         ("reviewed-release", "c".repeat(40), "branch", false),
         (expected.as_str(), expected.clone(), "none", false),
@@ -106,17 +106,17 @@ fi
             .env("PATH", &path)
             .env("TEST_RESOLVED_SHA", resolved)
             .env("TEST_REF_KIND", kind)
-            .env("TEST_DISPATCH_ARGV", &argv)
+            .env("TEST_DISPATCH_ARGV", &dispatch_log)
             .output()
             .unwrap();
         assert_eq!(output.status.success(), accepted, "{output:?}");
         assert_eq!(
-            argv.exists(),
+            dispatch_log.exists(),
             accepted,
             "dispatch must fail before submission"
         );
         if accepted {
-            let lines = fs::read_to_string(&argv).unwrap();
+            let lines = fs::read_to_string(&dispatch_log).unwrap();
             let args: Vec<_> = lines.lines().collect();
             assert!(args.windows(2).any(|a| a == ["--ref", "reviewed-release"]));
             assert!(
@@ -126,7 +126,7 @@ fi
             let receipt: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
             assert_eq!(receipt["revision"], expected);
             assert_eq!(receipt["dispatch_ref"], selector);
-            fs::remove_file(&argv).unwrap();
+            fs::remove_file(&dispatch_log).unwrap();
         }
     }
 }

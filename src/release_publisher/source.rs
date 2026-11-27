@@ -308,13 +308,13 @@ mod tests {
         let source = tempfile::tempdir().unwrap();
         let link = source.path().join(".pre-commit-config.yaml");
         let target = b"/outside/must-never-be-read";
-        std::fs::write(&link, target).unwrap();
+        fs::write(&link, target).unwrap();
         let tracked =
             b"120000 0609598af200c6de3c32af590bf245ec3a27dfff 0\t.pre-commit-config.yaml\0";
         let links = validate_tree(source.path(), tracked).unwrap();
         assert_eq!(links, BTreeSet::from([link.clone()]));
-        assert!(std::fs::symlink_metadata(&link).unwrap().is_file());
-        assert_eq!(std::fs::read(link).unwrap(), target);
+        assert!(fs::symlink_metadata(&link).unwrap().is_file());
+        assert_eq!(fs::read(link).unwrap(), target);
     }
 
     #[test]

@@ -10,11 +10,11 @@ use crate::render::{copr_makefile, rpm_spec};
 
 pub fn run(command: CoprCommand) -> Result<()> {
     match command.action {
-        CoprAction::Render(args) => render(args),
+        CoprAction::Render(args) => render(&args),
     }
 }
 
-fn render(args: CoprRenderArgs) -> Result<()> {
+fn render(args: &CoprRenderArgs) -> Result<()> {
     let (resolved, package_version) = resolve(args.copr.as_overrides(), args.package.as_deref())?;
     let version = args.version.as_deref().unwrap_or(&package_version);
     let rendered = render_files(&resolved, version);

@@ -193,7 +193,7 @@ pub(crate) struct Package {
 pub(super) fn validate(
     root: &Path,
     graph: &Graph,
-    metadata: Option<&crate::cargo::Metadata>,
+    metadata: Option<&cargo::Metadata>,
 ) -> Result<()> {
     let mut namespaces: BTreeSet<_> = graph
         .components

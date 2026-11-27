@@ -88,7 +88,7 @@ mod tests {
             .unwrap();
         listener.listen(0).unwrap();
         let _queued = UnixStream::connect(&path).unwrap();
-        let start = std::time::Instant::now();
+        let start = Instant::now();
         assert!(ping(&path).is_err());
         assert!(start.elapsed() < Duration::from_secs(3));
     }

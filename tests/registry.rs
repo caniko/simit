@@ -41,7 +41,7 @@ impl EnvGuard {
         self.data_home.path()
     }
 
-    fn disable_registry(&self) {
+    fn disable_registry() {
         // SAFETY: guarded by ENV_LOCK for the lifetime of EnvGuard.
         unsafe {
             std::env::set_var("SIMIT_NO_REGISTRY", "1");
@@ -172,7 +172,7 @@ fn schema_version_mismatch_errors_with_required_version() {
 #[test]
 fn no_registry_env_suppresses_touch_io() {
     let env = EnvGuard::new();
-    env.disable_registry();
+    EnvGuard::disable_registry();
     let project = TempDir::new().unwrap();
     init_package(project.path(), "demo");
 
