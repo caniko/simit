@@ -48,14 +48,77 @@ with_docs = true
 with_msrv = true
 ```
 
+## Native Cargo on Crow
+
+Crow uses the same Rust image as Actions unless `[ci.crow].image` overrides it.
+Native Crow checks use `--locked`, so commit `Cargo.lock` before enabling them.
+
+```toml
+[ci]
+provider = "crow"
+platform = "forgejo"
+runtime = "cargo"
+workspace = true
+workspace_strategy = "aggregate"     # one .crow/build.yaml
+exclude_packages = ["test-fixtures"]
+package_features = { app = ["sqlite"] }
+all_features = false
+unit_tests_only = true
+clippy_all_targets = false
+format_all_rust_files = true
+format_excludes = ["vendor/**"]
+
+[ci.crow]
+combine_steps = true
+cargo_home = ".crow-cargo"
+build_jobs = 4
+strip_ci_debug = true
+shallow_clone = true
+paths_include = ["**/*.rs", "**/Cargo.toml", "Cargo.lock", "simit.toml", ".crow/**"]
+paths_exclude = ["docs/**"]
+```
+
+Aggregate CI excludes the listed workspace members. `package_features` applies
+only to selected members on the first test and Clippy pass, and only when
+`all_features = false`. Unit-only checks split library crates and binary-only
+crates when needed. `clippy_all_targets = false` skips integration tests, benches
+and examples. On Crow or Actions, `format_all_rust_files` checks every tracked
+`.rs` file against the workspace edition, including files referenced by
+`include!()`. `format_excludes` takes Git pathspec patterns.
+
+`combine_steps` runs setup, formatting, Clippy and tests in the same container,
+then runs the optional checks. It cannot be used with a custom check command or
+per-step runners. `cargo_home` defaults to `/tmp/.cargo`; use a workspace-relative
+path to share registry downloads between containers. `strip_ci_debug` disables
+incremental builds and debug info for dev and test profiles. `build_jobs` caps
+compilation parallelism. Explicit `[ci].extra_env` values take precedence.
+`shallow_clone` skips LFS and fetches one commit; do not use it with `skip_clone`
+or checks that need history. The path filters apply to both push and PR triggers.
+
+For compiler caching, put `sccache` on the runner image's `PATH` and set
+`[ci.crow.sccache].enabled = true`. Use `env` for backend configuration and
+`secret` for a same-named Crow secret. The cache is used by PR checks too; do not
+give untrusted PRs a privileged cache credential.
+
+Crow renders each `[[ci.manual_gates]]` entry as `.crow/manual-<id>.yaml`.
+Set `runtime = "nix"` or `"cargo"` to override the main workflow runtime, `env`
+for gate variables, and `secret` for a same-named Crow secret available only to
+that gate. Run `simit init ci --ci-provider crow --check --diff` to verify drift.
+
+Track quota usage with `simit ci usage --repo crow:owner/repo --since 7d
+--budget-minutes 2500`. The report shows measured wall-clock minutes and a linear
+30-day projection; add `--json` for the structured `budget` object.
+
 ## Local gate
 
 `local_gate = true` under `[ci]` also generates `scripts/ci-local.sh`, for
 projects whose forge runs no hosted CI. It replays every `run` step of the
-generated `ci*.yaml` workflows in CI order, then builds each `[ci].nix_builds`
+generated Actions `ci*.yaml` workflows or the commands from Crow's build and CI
+workflows, in CI order. It skips manual gates and does not replay runner
+environment variables or secrets. It then builds each `[ci].nix_builds`
 installable with the `[ci.nix_build]` job limits. Steps tied to the hosted
 runner, such as those using `$GITHUB_*`, Actions expressions or global Git
-configuration, are left out, and so is job `env`.
+configuration, are left out.
 
 Checks that no hosted CI runs, such as a development browser suite, go in
 `[ci].local_gate_steps`. Each entry runs after the derived steps and Nix builds,
