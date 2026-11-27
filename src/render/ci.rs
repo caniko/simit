@@ -3425,7 +3425,7 @@ fn ci_workflow_multi_job(
             }
             Runtime::Cargo => {
                 if options.repository_checks {
-                    capture(STEP_CARGO_FMT, &cargo_format_step(package, &options));
+                    capture(STEP_CARGO_FMT, &cargo_format_step(package, options));
                 }
 
                 let mut test = String::new();
@@ -6182,10 +6182,11 @@ pub(super) fn test_selections<'a>(
 }
 
 fn member_selector(members: &[String]) -> String {
-    members
-        .iter()
-        .map(|name| format!(" -p {}", shell_word(name)))
-        .collect()
+    let mut selector = String::new();
+    for name in members {
+        write!(selector, " -p {}", shell_word(name)).expect("write");
+    }
+    selector
 }
 
 pub(super) fn feature_args(
@@ -6236,10 +6237,9 @@ pub(super) fn clippy_targets(package: &Package, options: &CiOptions) -> &'static
         }
     } else {
         match (package.has_library_target(), package.has_binary_target()) {
-            (true, true) => " --lib --bins",
             (true, false) => " --lib",
             (false, true) => " --bins",
-            (false, false) => " --lib --bins",
+            _ => " --lib --bins",
         }
     }
 }
@@ -6255,11 +6255,10 @@ pub(super) fn cargo_format_command(package: &Package, options: &CiOptions) -> St
             .or(package.edition.as_deref())
             .unwrap_or("2021"),
     );
-    let excludes: String = options
-        .format_excludes
-        .iter()
-        .map(|glob| format!(" {}", shell_quote(&format!(":!{glob}"))))
-        .collect();
+    let mut excludes = String::new();
+    for glob in &options.format_excludes {
+        write!(excludes, " {}", shell_quote(&format!(":!{glob}"))).expect("write");
+    }
     let check = if excludes.is_empty() {
         format!("rustfmt --edition {edition} --check --")
     } else {
@@ -6336,7 +6335,11 @@ fn push_test_steps(
         for (selector, targets, members) in test_selections(package, options, pass) {
             let features = feature_args(options, members, pass);
             let suffix = if members.is_some() { targets } else { "" };
-            workflow.push_str(&format!("      - name: {name}{suffix}\n        run: {prefix}{harness}{selector}{targets}{features}\n\n"));
+            writeln!(
+                workflow,
+                "      - name: {name}{suffix}\n        run: {prefix}{harness}{selector}{targets}{features}\n"
+            )
+            .expect("write");
         }
     }
     if options.with_nextest && !options.unit_tests_only && has_doctests(package, options) {
@@ -6378,7 +6381,11 @@ fn push_clippy_steps(
             "Clippy"
         };
         let features = feature_args(options, None, pass);
-        workflow.push_str(&format!("      - name: {name}\n        run: {prefix}cargo clippy{selector}{targets}{features} -- --deny warnings\n\n"));
+        writeln!(
+            workflow,
+            "      - name: {name}\n        run: {prefix}cargo clippy{selector}{targets}{features} -- --deny warnings\n"
+        )
+        .expect("write");
     }
 }
 
@@ -6559,12 +6566,11 @@ fn push_package_selector(workflow: &mut String, package: &Package, options: &CiO
 
 pub(super) fn package_selector(package: &Package, options: &CiOptions) -> String {
     if options.workspace_strategy == WorkspaceStrategy::Aggregate {
-        let excludes: String = options
-            .exclude_packages
-            .iter()
-            .map(|name| format!(" --exclude {}", shell_word(name)))
-            .collect();
-        format!(" --workspace{excludes}")
+        let mut selector = " --workspace".to_owned();
+        for name in &options.exclude_packages {
+            write!(selector, " --exclude {}", shell_word(name)).expect("write");
+        }
+        selector
     } else if options.package_scoped {
         format!(" -p {}", shell_word(&package.name))
     } else {

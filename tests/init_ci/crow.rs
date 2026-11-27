@@ -48,7 +48,7 @@ cargo_home = "/work/cargo"
     assert_eq!(config["ci"]["all_features"].as_bool(), Some(false));
     for key in ["with_audit", "with_deny"] {
         assert_ne!(
-            config["ci"].get(key).and_then(|item| item.as_bool()),
+            config["ci"].get(key).and_then(toml_edit::Item::as_bool),
             Some(true)
         );
     }
@@ -492,17 +492,17 @@ secret = "SCCACHE_TOKEN"
             .output()
             .unwrap()
     };
-    let tmp = root.join("tmp");
-    fs::create_dir(&tmp).unwrap();
+    let scratch = root.join("tmp");
+    fs::create_dir(&scratch).unwrap();
     let output = std::process::Command::new("/bin/sh")
         .current_dir(root)
-        .env("TMPDIR", &tmp)
+        .env("TMPDIR", &scratch)
         .env("GIT_DIR", root.join("missing.git"))
         .args(["-ec", &format_command])
         .output()
         .unwrap();
     assert_eq!(output.status.code(), Some(128), "{output:?}");
-    assert_eq!(fs::read_dir(tmp).unwrap().count(), 0);
+    assert_eq!(fs::read_dir(scratch).unwrap().count(), 0);
     let output = format();
     assert!(!output.status.success());
     assert!(String::from_utf8_lossy(&output.stdout).contains("lib_parts/piece.rs"));

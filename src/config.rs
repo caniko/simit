@@ -1550,6 +1550,10 @@ impl PrebuildConfig {
 
 /// `[ci.crow]` — project-side Crow workflow rendering options.
 #[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "These independent switches are part of the project TOML schema"
+)]
 #[serde(default, deny_unknown_fields)]
 pub struct CrowCiConfig {
     pub format: CrowWorkflowFormat,
