@@ -9,7 +9,7 @@
 
 ## Working tree
 
-`/data/nvme0/can/Projects/simit`. Depends on Phase 01 (the homebrew/scoop config
+`<workspace>/simit`. Depends on Phase 01 (the homebrew/scoop config
 must exist so docs/tests describe the final surface). Same repo/files as 01 — do
 not run concurrently with 01.
 
@@ -72,10 +72,10 @@ release`, `dist aur|copr|apt`, and the `[aur]`/`[copr]`/`[apt]`/
 
 ## Files likely touched
 
-- `/data/nvme0/can/Projects/simit/tests/{init_aur,init_copr,init_apt,init_release}.rs`
-- `/data/nvme0/can/Projects/simit/tests/common/` (fixture helpers, if extended)
-- `/data/nvme0/can/Projects/simit/{README.md,CHANGELOG.md}`
-- `/data/nvme0/can/Projects/simit/docs/src/**` (+ `SUMMARY.md`)
+- `<workspace>/simit/tests/{init_aur,init_copr,init_apt,init_release}.rs`
+- `<workspace>/simit/tests/common/` (fixture helpers, if extended)
+- `<workspace>/simit/{README.md,CHANGELOG.md}`
+- `<workspace>/simit/docs/src/**` (+ `SUMMARY.md`)
 
 ## Pitfalls
 

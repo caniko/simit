@@ -11,7 +11,7 @@
 
 ## Working tree
 
-`/data/nvme0/can/Projects/simit` — same repo as the simit tool. This is the
+`<workspace>/simit` — same repo as the simit tool. This is the
 first simit phase; Phase 02 also touches `simit/src` and `simit/tests`, so land
 this before starting 02.
 
@@ -81,7 +81,7 @@ This is the last configurability gap before simit can be released (Phase 03).
 5. `cargo build`, `cargo test`, `cargo clippy --all-targets -- -D warnings`.
 6. Regenerate rs-modde's `release.yml` with the freshly built binary and confirm
    **no diff** when defaults are used:
-   `cd /data/nvme0/can/Projects/rs-modde && /data/nvme0/can/Projects/simit/target/debug/simit init release --check` → CLEAN.
+   `cd <workspace>/rs-modde && <workspace>/simit/target/debug/simit init release --check` → CLEAN.
 7. Commit the entire simit multichannel feature (this phase's change **plus** the
    already-uncommitted session work) in coherent groups using the
    `grouped-git-commits` approach: e.g. (a) config schema, (b) render modules,
@@ -94,15 +94,15 @@ This is the last configurability gap before simit can be released (Phase 03).
 - [ ] `HomebrewConfig`/`ScoopConfig` expose `tap_token_secret`/`bucket_token_secret` with the documented defaults; `cargo test` passes including a new assertion proving a custom secret name reaches the generated workflow.
 - [ ] `cargo clippy --all-targets -- -D warnings` reports zero warnings.
 - [ ] From rs-modde, `simit init release --check` is CLEAN (defaults preserve byte-identical output) — i.e. rs-modde's committed `release.yml` is unchanged by this phase.
-- [ ] `git -C /data/nvme0/can/Projects/simit status --porcelain` shows a clean tree after commits (all session work committed in coherent groups, nothing pushed).
+- [ ] `git -C <workspace>/simit status --porcelain` shows a clean tree after commits (all session work committed in coherent groups, nothing pushed).
 
 ## Files likely touched
 
-- `/data/nvme0/can/Projects/simit/src/config.rs`
-- `/data/nvme0/can/Projects/simit/src/render/release_workflow.rs`
-- `/data/nvme0/can/Projects/simit/src/render/ci.rs`
-- `/data/nvme0/can/Projects/simit/src/commands/init_ci.rs`
-- `/data/nvme0/can/Projects/simit/tests/{homebrew.rs,scoop.rs}` (struct-literal updates)
+- `<workspace>/simit/src/config.rs`
+- `<workspace>/simit/src/render/release_workflow.rs`
+- `<workspace>/simit/src/render/ci.rs`
+- `<workspace>/simit/src/commands/init_ci.rs`
+- `<workspace>/simit/tests/{homebrew.rs,scoop.rs}` (struct-literal updates)
 
 ## Pitfalls
 

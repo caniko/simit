@@ -9,7 +9,7 @@
 
 ## Working tree
 
-[/data/nvme0/can/Projects/simit](file:///data/nvme0/can/Projects/simit)
+`<workspace>/simit`
 — same repo as the parent project. Branch off current `trunk`.
 
 ## Goal

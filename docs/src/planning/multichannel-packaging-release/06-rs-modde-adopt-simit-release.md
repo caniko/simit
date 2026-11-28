@@ -10,7 +10,7 @@
 
 ## Working tree
 
-`/data/nvme0/can/Projects/rs-modde`. Depends on Phase 03 (a released simit to pin)
+`<workspace>/rs-modde`. Depends on Phase 03 (a released simit to pin)
 and on Phase 05's handoff of the chocolatey credential env/secret name. Blocks
 Phase 07.
 
@@ -67,15 +67,15 @@ closes the skew and makes the repo self-consistent and drift-checkable in CI.
       `simit init release --check` is CLEAN.
 - [ ] The chocolatey step in `release.yml` references the credential exactly as
       Phase 05 exposes it (env name or secret name match).
-- [ ] `git -C /data/nvme0/can/Projects/rs-modde status --porcelain` is empty
+- [ ] `git -C <workspace>/rs-modde status --porcelain` is empty
       after commits (all session changes committed in coherent groups; nothing
       pushed).
 
 ## Files likely touched
 
-- `/data/nvme0/can/Projects/rs-modde/flake.nix`, `flake.lock`
-- `/data/nvme0/can/Projects/rs-modde/.forgejo/workflows/*` (regenerated)
-- `/data/nvme0/can/Projects/rs-modde/{modde.spec,.copr/Makefile,dist/**}`
+- `<workspace>/rs-modde/flake.nix`, `flake.lock`
+- `<workspace>/rs-modde/.forgejo/workflows/*` (regenerated)
+- `<workspace>/rs-modde/{modde.spec,.copr/Makefile,dist/**}`
 
 ## Pitfalls
 

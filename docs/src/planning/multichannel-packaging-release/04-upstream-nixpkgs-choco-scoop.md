@@ -10,7 +10,7 @@
 
 ## Working tree
 
-`/data/nvme0/can/Projects/nixpkgs-add-chocolatey-scoop` (fork of
+`<workspace>/nixpkgs` (fork of
 `NixOS/nixpkgs`, branch `add-chocolatey-scoop`, origin `caniko/nixpkgs`). Fully
 independent repo — runs in parallel with all other phases.
 
@@ -62,8 +62,8 @@ dependency. Start early because nixpkgs review latency is measured in weeks.
 
 ## Files likely touched
 
-- `/data/nvme0/can/Projects/nixpkgs-add-chocolatey-scoop/pkgs/by-name/ch/chocolatey/package.nix`
-- `/data/nvme0/can/Projects/nixpkgs-add-chocolatey-scoop/pkgs/by-name/sc/scoop/package.nix`
+- `<workspace>/nixpkgs/pkgs/by-name/ch/chocolatey/package.nix`
+- `<workspace>/nixpkgs/pkgs/by-name/sc/scoop/package.nix`
 
 ## Pitfalls
 

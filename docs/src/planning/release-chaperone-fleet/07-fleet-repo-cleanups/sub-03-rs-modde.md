@@ -13,7 +13,7 @@
 
 ## Working tree
 
-[/data/nvme0/can/Projects/rs-modde](file:///data/nvme0/can/Projects/rs-modde)
+`<workspace>/rs-modde`
 — feature branch off `trunk`. Remote:
 `ssh://git@codeberg.org/caniko/rs-modde.git`.
 
@@ -94,7 +94,7 @@ origin/simit-ci-adoption-20260525` onto a working branch.
    nix develop -c simit init ci \
      --platform forgejo \
      --runtime nix \
-     --runner atlas-nix-trusted \
+     --runner "${RUNNER_LABEL:?set the trusted Nix runner label}" \
      --workspace \
      --with-deny --with-docs \
      --with-artifacts \
@@ -237,6 +237,6 @@ project-owned` change, the project deny.toml should not be
 - Research dossier: per-repo cleanups (rs-modde).
 - Phase 07 README.
 - Phase 11 sub-03 in
-  `/home/can/.claude/plans/detritus-rust-cache/11-fleet-adoption/sub-03-rs-modde.md`
+  `~/.claude/plans/detritus-rust-cache/11-fleet-adoption/sub-03-rs-modde.md`
   (predecessor).
 - Phase 06 (`simit release plan` — workspace order).

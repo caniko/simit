@@ -12,7 +12,7 @@
 
 ## Working tree
 
-[/data/nvme0/can/Projects/simit](file:///data/nvme0/can/Projects/simit)
+`<workspace>/simit`
 — branch off `trunk`. Independent of phases 01 and 02; can land in
 either order.
 
@@ -120,7 +120,7 @@ removed; the equivalent CI check now lives in
 
 ## Acceptance criteria
 
-- [ ] `simit init flake` on `/data/nvme0/can/Projects/skillnet`
+- [ ] `simit init flake` on `<workspace>/skillnet`
       (after merging this change into its simit input) does not
       propose to rewrite `flake.nix`.
 - [ ] The simit repo itself continues to generate the full flake

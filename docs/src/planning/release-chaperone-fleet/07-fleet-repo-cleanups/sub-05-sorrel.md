@@ -11,7 +11,7 @@
 
 ## Working tree
 
-[/data/nvme0/can/Projects/sorrel](file:///data/nvme0/can/Projects/sorrel)
+`<workspace>/sorrel`
 — feature branch off `trunk`. Remote:
 `ssh://git@codeberg.org/caniko/sorrel.git`.
 
@@ -110,7 +110,7 @@ origin/simit-ci-adoption-20260525` onto the working branch
    nix develop -c simit init ci \
      --platform forgejo \
      --runtime cargo \
-     --runner atlas \
+     --runner "${RUNNER_LABEL:?set the runner label}" \
      --workspace \
      --with-audit --with-deny --with-docs
    ```
@@ -215,5 +215,5 @@ origin/simit-ci-adoption-20260525` onto the working branch
 - Phase 06 (`simit release plan` — workspace order).
 - Phase 07 README.
 - Phase 11 sub-05 in
-  `/home/can/.claude/plans/detritus-rust-cache/11-fleet-adoption/sub-05-sorrel.md`
+  `~/.claude/plans/detritus-rust-cache/11-fleet-adoption/sub-05-sorrel.md`
   (predecessor).

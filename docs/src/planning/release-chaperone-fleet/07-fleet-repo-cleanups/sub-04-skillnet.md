@@ -9,7 +9,7 @@
 
 ## Working tree
 
-[/data/nvme0/can/Projects/skillnet](file:///data/nvme0/can/Projects/skillnet)
+`<workspace>/skillnet`
 — feature branch off the default branch (`main`). Remote:
 `ssh://git@codeberg.org/caniko/skillnet.git`.
 
@@ -68,7 +68,7 @@ the default `simit init flake` wants to remove them.
 
 4. **Resolve the CI "drift".** Two paths:
    - **Phase 01 landed**: run `simit init ci --platform forgejo
---runtime cargo --runner atlas --with-audit --with-deny
+--runtime cargo --runner <runner-label> --with-audit --with-deny
 --with-docs --with-msrv` once to populate `simit.toml [ci]`;
      thereafter bare `simit init ci --check --diff` is clean.
    - **Phase 01 not landed**: add a `simit.toml [ci]` skeleton
@@ -145,5 +145,5 @@ the default `simit init flake` wants to remove them.
 - Phase 03 (preferred dependency for clean flake `--check`).
 - Phase 07 README.
 - Phase 11 sub-04 in
-  `/home/can/.claude/plans/detritus-rust-cache/11-fleet-adoption/sub-04-skillnet.md`
+  `~/.claude/plans/detritus-rust-cache/11-fleet-adoption/sub-04-skillnet.md`
   (predecessor).

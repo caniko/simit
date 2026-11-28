@@ -3,7 +3,7 @@
 ## Goal And Trigger
 
 User goal: turn the existing readiness report at
-`/home/can/.claude/plans/detritus-rust-cache/11-fleet-adoption/release-chaperone-gap-report.md`
+`~/.claude/plans/detritus-rust-cache/11-fleet-adoption/release-chaperone-gap-report.md`
 into a list of concrete improvements that can land in simit, and the
 follow-up cleanups the five target repositories (`open-data-license`,
 `rs-memory-admission`, `rs-modde`, `skillnet`, `sorrel`) need before
@@ -35,7 +35,7 @@ fix is always "bump to current `trunk`", not "match this exact rev".
 
 ### simit baseline
 
-- Working tree: `/data/nvme0/can/Projects/simit`, branch `trunk`.
+- Working tree: `<workspace>/simit`, branch `trunk`.
   Recent generator changes that adopting repos need to absorb:
   absolute `CARGO_HOME` for Nix runtime, `cargo-audit` advisory-DB
   pre-fetch, pinned `cargo-deny 0.18.3` policy-checks,
@@ -52,12 +52,12 @@ fix is always "bump to current `trunk`", not "match this exact rev".
 
 Snapshots below are point-in-time. Re-run the checks before acting.
 
-- [`open-data-license`](file:///data/nvme0/can/Projects/open-data-license):
+- `open-data-license` (`<workspace>/open-data-license`):
   default branch `trunk`. `flake.nix` does not consume simit as a
   flake input; CI/dev shells fall back to whatever simit is in PATH.
   `simit init ci --platform forgejo --check --diff` (no extra flags)
   reports both `ci.yaml` and `publish-crate.yaml` as drifted because
-  the actual file uses `--runtime nix --runner atlas-nix-trusted
+  the actual file uses `--runtime nix --runner <runner-label>
 --with-om-ci --with-msrv --with-audit --with-deny --with-docs`,
   none of which the bare check restores. An adoption branch
   (`simit-ci-adoption-20260525`) carries up-to-date generated CI
@@ -66,7 +66,7 @@ Snapshots below are point-in-time. Re-run the checks before acting.
   `simit` available deterministically (either add it as a flake
   input or document the PATH expectation).
 
-- [`rs-memory-admission`](file:///data/nvme0/can/Projects/rs-memory-admission):
+- `rs-memory-admission` (`<workspace>/rs-memory-admission`):
   `simit init flake --check --diff` would replace the current
   `nix/pre-commit.nix` `cargo-audit` pre-commit hook with a
   `cargo-msrv` hook. That is a deliberate generator change (audit
@@ -76,7 +76,7 @@ Snapshots below are point-in-time. Re-run the checks before acting.
   at snapshot time plus an untracked `.claude/` directory; re-verify
   before acting.
 
-- [`rs-modde`](file:///data/nvme0/can/Projects/rs-modde):
+- `rs-modde` (`<workspace>/rs-modde`):
   the `simit` flake input is pinned to a pre-CLI-restructure
   revision, so `simit init ci ...` invocations inside `nix develop`
   fail with `unrecognized subcommand 'init'`. The report's
@@ -88,7 +88,7 @@ Snapshots below are point-in-time. Re-run the checks before acting.
   tag. Many stale `worktree-agent-*` branches still live in
   `git branch -a`.
 
-- [`skillnet`](file:///data/nvme0/can/Projects/skillnet):
+- `skillnet` (`<workspace>/skillnet`):
   default branch `main` is current; an adoption branch exists at
   snapshot time but appears behind `main`. `simit projects list`
   flags `ci=drift`, but with the full flag set
@@ -99,7 +99,7 @@ Snapshots below are point-in-time. Re-run the checks before acting.
   project-specific flake that consumes the shared `harbor-rs` flake
   plus `home-manager` and `advisory-db` inputs.
 
-- [`sorrel`](file:///data/nvme0/can/Projects/sorrel):
+- `sorrel` (`<workspace>/sorrel`):
   local `trunk` carries additional commits beyond `origin/trunk`
   and a substantial dirty worktree (modified `Cargo.lock`, multiple
   `crates/sorrel-*/` source files, modified docs, untracked
@@ -116,7 +116,7 @@ Snapshots below are point-in-time. Re-run the checks before acting.
 ### simit-managed registry view
 
 `nix develop -c simit projects list` (run from
-`/data/nvme0/can/Projects/simit`) reports the same 5 fleet
+`<workspace>/simit`) reports the same 5 fleet
 projects as `ci(drift)`, plus `sorrel` as
 `flake(drift) ci(drift) hooks(conflicted)`. The footer also lists
 ephemeral `/tmp/*` entries left over from test runs; the recent
@@ -148,7 +148,7 @@ re-verified before acting.
 
 ## Existing Plan Status
 
-Source: `/home/can/.claude/plans/detritus-rust-cache/11-fleet-adoption/`
+Source: `~/.claude/plans/detritus-rust-cache/11-fleet-adoption/`
 sub-layer plan set, plus the report itself.
 
 | Item                                         | Status       | Notes                                                                                                                                                                                             |
@@ -203,9 +203,9 @@ repos that consume `harbor-rs`/shared toolchain flakes.
    from generated hook wiring without losing project-owned
    customizations. Today the diff is wholesale-replace, which
    triggers `flake(drift)` permanently on
-   [skillnet](file:///data/nvme0/can/Projects/skillnet/flake.nix),
-   [rs-modde](file:///data/nvme0/can/Projects/rs-modde/flake.nix),
-   and [sorrel](file:///data/nvme0/can/Projects/sorrel/flake.nix).
+   skillnet (`<workspace>/skillnet/flake.nix`),
+   rs-modde (`<workspace>/rs-modde/flake.nix`),
+   and sorrel (`<workspace>/sorrel/flake.nix`).
    Options:
    - Split the generator into "hook file" (`nix/pre-commit.nix`)
      and "flake skeleton" (`flake.nix`); only the hook file needs

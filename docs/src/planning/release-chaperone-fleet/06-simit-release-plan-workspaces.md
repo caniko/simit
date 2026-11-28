@@ -8,7 +8,7 @@
 
 ## Working tree
 
-[/data/nvme0/can/Projects/simit](file:///data/nvme0/can/Projects/simit)
+`<workspace>/simit`
 — branch off `trunk`. Independent of phases 01–05; sequencing with
 phase 05 only matters if they edit `src/commands/release.rs`
 concurrently (land 05 first to minimize conflict surface).
