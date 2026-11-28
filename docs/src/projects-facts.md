@@ -1,33 +1,32 @@
 # Usage Facts
 
-`simit projects facts` reports how each checkout consumes simit and which
-upgrade path covers each usage. It prints one JSON document in the
-`fleetix.supply-facts.v1` envelope with the `simit.usage-facts.v1`
-vocabulary. Fleetix merges it with other producers' facts (such as a canix
-overlay of updater enrollment) and computes the gaps.
+`simit projects facts` reports each checkout's simit usage and corresponding
+upgrade paths. It prints one JSON document using the `fleetix.supply-facts.v1`
+envelope and `simit.usage-facts.v1` vocabulary. Fleetix merges it with other
+producers' facts (e.g. a canix updater enrollment overlay) to find gaps.
 
 ```sh
 simit projects facts PATH...            # defaults to the current directory
 simit projects facts --eval-flake PATH... # also evaluate flake simitConfig
 ```
 
-The command is read-only. It never writes files or the project registry, and
-its `init ... --check` children run with `SIMIT_NO_REGISTRY=1`. A repository
-that cannot be observed becomes an entry in `errors`; the exit code stays 0,
-also when usages drift. Argument errors and failures to write the document
-exit with 2.
+The command is read-only: it never writes files, and neither it nor its
+`init ... --check` children (which receive `SIMIT_NO_REGISTRY=1`) update the
+project registry. Unobservable repositories appear in `errors`. The command
+exits with 0 even on drift or observation errors, and with 2 on argument errors
+or document output failures.
 
-Each path must be a checkout whose `origin` remote names `HOST/OWNER/REPO`;
-that coordinate identifies the repository. Run it on exact default-branch
-snapshots: local edits are reported as they are.
+Each input path must be a checkout whose `origin` names its repository as
+`HOST/OWNER/REPO`; that coordinate identifies the repository. Use exact
+default-branch snapshots; the report reflects local edits.
 
 ## Flake configuration
 
-A flake `outputs.simitConfig` is evaluated only with `--eval-flake`. Without it
-the repository reports `config-unresolved`, and nothing runs `nix`, including
-the `init ... --check` children (they receive `SIMIT_NO_FLAKE_EVAL=1`, which
-any simit process honours). A flake source always reports
-`config-not-persistable`, because the generator cannot rewrite it.
+Simit evaluates flake `outputs.simitConfig` only with `--eval-flake`. Without
+`--eval-flake`, it reports `config-unresolved`, no process runs `nix`, and the
+`init ... --check` children receive `SIMIT_NO_FLAKE_EVAL=1`, which every simit
+process honors. Flake sources always report `config-not-persistable`: the
+generator can't rewrite them.
 
 ## Nodes and edges
 
@@ -45,22 +44,20 @@ Edges: repository `uses` usage, usage `pins` revision, usage and workflow
 `github.com`), usage `publishesTo` cache (`[release.attic]`), and usage
 `contains` workflow (the repository when no usage owns the file).
 
-Every workflow file under `.github/workflows`, `.forgejo/workflows`, `.crow`
-and `.gitlab-ci.yml` becomes a workflow node from a static parse.
-`triggers` is `{events, branches}`: events normalized to `push`,
-`pull_request`, `tag`, `manual`, `cron`, `deployment` and `release` (other
-Actions events keep their names), and `branches` the push branch filter as
-written, empty when push runs on every branch; `branchesIgnore` lists push
-exclusions (`branches-ignore`, Crow `branch.exclude`) when present. A Crow file without `when` runs
-on every event. Jsonnet and GitLab files report `triggers: null`. `labels` are
-Actions `runs-on` labels (a runner group as `group=<name>`) or Crow `labels`
-as `key=value`; `steps` are step
-names. Per-file reference usages carry `generated`, true inside a
-simit-generated workflow.
+Static parsing creates one workflow node per workflow file in `.github/workflows`,
+`.forgejo/workflows`, `.crow` and `.gitlab-ci.yml`. `triggers` is `{events, branches}`:
+events normalize to `push`, `pull_request`, `tag`, `manual`, `cron`, `deployment`
+and `release`; other Actions events keep their names. `branches` keeps the
+written push filter (empty for all branches). `branchesIgnore` lists push
+exclusions when present (`branches-ignore`, Crow `branch.exclude`). Crow files
+without `when` run on every event. Jsonnet and GitLab report `triggers: null`.
+`labels` holds Actions `runs-on` labels (runner groups as `group=<name>`) or
+Crow `labels` as `key=value`. `steps` holds step names. Each per-file reference
+usage carries `generated`, true inside simit-generated workflows.
 
-Generated usages expect a `generatorRevision` attribute that only a receipt
-or pin can supply (`unknown-generator-revision`); repository-variable usages
-expect the variable's `revision`.
+Generated usages expect `generatorRevision` from a receipt or pin only
+(`unknown-generator-revision`); repository-variable usages expect the
+variable's `revision`.
 
 ### Usage kinds
 
@@ -80,16 +77,17 @@ expect the variable's `revision`.
 | `script.invocation`                                                                               | `simit` commands in `scripts/`                                                                                                                     |
 | `cargo.dependency`                                                                                | a `simit` package in `Cargo.lock`                                                                                                                  |
 
-A reference whose revision comes from another variable (`github:caniko/simit/$VAR`)
-records it in `variables` and expects a `revision`. A generated release
-workflow without its trust root reports `keys.trust-root` as `drift` with the
-`trust-root-missing` blocker. Unreadable lock files and `scripts/`
-directories are `errors`, never silently empty.
+A reference whose revision comes from another variable
+(`github:caniko/simit/$VAR`) records that variable in `variables` and expects a
+`revision`. Generated release workflows missing
+their trust root report `keys.trust-root` as `drift` with `trust-root-missing`
+as the blocker. Unreadable lock files and `scripts/` directories report `errors`,
+not empty results.
 
 States are `current`, `drift`, `hand-rolled`, `absent` and `unknown`. Pins and
-runtime references report `unknown`: their freshness depends on the
-orchestrator's generator revision, so compare their `pins` edges with it. A
-floating reference adds the `unpinned-runtime` blocker.
+runtime references report `unknown`; compare their `pins` edges against the
+orchestrator's generator revision for freshness. Floating references add
+the `unpinned-runtime` blocker.
 
 ### Repository blockers
 
@@ -102,18 +100,17 @@ floating reference adds the `unpinned-runtime` blocker.
 
 ## Capability matrix
 
-`capabilities` lists every upgrade path simit knows:
+`capabilities` lists every upgrade path known to simit:
 `{usageKind, match, path, via, lands, orchestrator?, status, blocker?, reason,
-fallback?}`. `match` keys compare with repository attributes (`forge`,
-`ciTarget`, and `landing` from an overlay); fleetix uses the most specific
-matching row. A row covers a usage only when it is `implemented` and `lands`;
-otherwise its `blocker` explains the gap (`no-orchestrator`,
+fallback?}`. Fleetix picks the most specific `match` against repository
+attributes (`forge`, `ciTarget`, and overlay `landing`). A row covers a usage
+only if it is `implemented` and `lands`; otherwise `blocker` explains the gap (`no-orchestrator`,
 `adapter-missing`, `scope-unsupported`, `pr-required-unsupported`,
 `provider-mismatch`, `manual-pin`, `transitive-pin`).
 
-Updater rows are `implemented` exactly when their scope, adapter and landing
-appear in `SUPPORTED_SCOPES`, `UPDATER_ADAPTERS` and `SUPPORTED_LANDINGS`
-(`src/commands/projects_update/schema.rs`); a unit test enforces this. A change
-that adds updater support therefore flips its rows and refreshes the golden
-document `tests/fixtures/supply-facts/simit-usage-facts.v1.json` with
+A unit test enforces that updater rows are `implemented` exactly when scope,
+adapter and landing appear in `SUPPORTED_SCOPES`, `UPDATER_ADAPTERS` and
+`SUPPORTED_LANDINGS` (`src/commands/projects_update/schema.rs`). A change that
+adds updater support flips the corresponding rows to `implemented`; verify that
+status and refresh `tests/fixtures/supply-facts/simit-usage-facts.v1.json` with
 `SIMIT_BLESS=1 cargo test --test projects_facts`.

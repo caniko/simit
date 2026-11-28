@@ -1,29 +1,26 @@
 # Project Registry
 
-Simit keeps a per-user project registry at `$XDG_DATA_HOME/simit/projects.toml`
-on every supported platform when `XDG_DATA_HOME` is an absolute path. It uses
-the platform default data directory when the override is unset, empty, or relative.
-Mutating commands update this registry after their primary work succeeds, so registry
-failures warn but do not fail the command that generated project files.
+On every supported platform, Simit stores the per-user registry at
+`$XDG_DATA_HOME/simit/projects.toml` if `XDG_DATA_HOME` is absolute, or in the
+platform's default data directory if unset, empty, or relative. Mutating commands
+update the registry after their main work succeeds. A registry-update failure
+warns without failing the file-generating command.
 
-The registry records each project path, package name, first and last time simit
-saw it, and feature status for known surfaces such as `flake`, `ci`,
+The registry records project path, package name, first and last sightings, and
+feature status for surfaces such as `flake`, `ci`,
 `homebrew`, `chocolatey`, `scoop`, `changelog`, and `hooks`.
 
-For hooks, the registry distinguishes `configured`, `installed`,
-`conflicted`, and `absent`. `configured` means hook config exists but Git would
-not currently execute the project's managed wrappers. `installed` means the
-resolved hook path would execute the managed wrappers. `conflicted` means hook
-config exists, but the effective or repo-local `core.hooksPath` bypasses the
+Hook states are `configured`, `installed`, `conflicted`, and `absent`.
+`configured` means hook config exists but Git wouldn't run the project's managed
+wrappers. `installed` means the resolved hook path would run them. `conflicted`
+means config exists but effective or repo-local `core.hooksPath` bypasses the
 managed route and needs attention.
 
-For CI, the registry distinguishes `managed`, `managed+extra`, `hand-rolled`,
-`drift`, and `absent`. `hand-rolled` means workflow YAML exists under
-`.forgejo/workflows/` or `.github/workflows/` but does not carry simit's
-generated-workflow marker. `managed+extra` means simit's generated workflows are
-current and supplementary non-generated workflow files are also present.
-`drift` means a marked generated workflow no longer matches what simit would
-render for the project.
+CI states are `managed`, `managed+extra`, `hand-rolled`, `drift`, and `absent`.
+`hand-rolled` means workflow YAML in `.forgejo/workflows/` or `.github/workflows/`
+lacks simit's generated-workflow marker. `managed+extra` means current generated
+workflows coexist with non-generated ones. `drift` means a marked workflow no
+longer matches simit's render for the project.
 
 CI drift detection uses the same option resolution order as
 `simit init ci --check --diff`:
@@ -33,41 +30,35 @@ CI drift detection uses the same option resolution order as
 3. Inference from existing generated workflow content.
 4. Generator defaults.
 
-That means a project with persisted `[ci]` settings should report the same
-result from `simit projects list` and from a bare
-`simit init ci --platform <forgejo|github> --check --diff`. Repositories that
-have not adopted `simit.toml` still get best-effort zero-config drift detection
-from the generated workflow content, but persisted `[ci]` fields win when they
-disagree with inference.
+With persisted `[ci]` settings, `simit projects list` should agree with a bare
+`simit init ci --platform <forgejo|github> --check --diff`. Without `simit.toml`,
+best-effort drift detection infers settings from generated workflows. Persisted
+`[ci]` fields override inference.
 
 ## Live fleet audits
 
-`projects list`, `show`, and `scan` intentionally operate on cached registry
-state. Use `projects audit` when the question is whether the current checkout
-matches the current generator:
+`projects list`, `show`, and `scan` use cached registry state. Use
+`projects audit` to compare the current checkout against the current generator:
 
 ```sh
 simit projects audit /path/to/project
 simit projects audit --json /path/to/project
 ```
 
-The audit never reads or writes the project registry. Its JSON report is stable
-for automation and includes the generator version, CI provider and platform,
-CI status, changed/missing/extra generated workflow paths, a regeneration
-command when it can be inferred, and per-project errors. The explicit
-`provider` fact (`actions` or `crow`) reflects the validated CI backend;
-for Crow backends the `platform` value is the provider-conflated legacy
-string, so automation should key off `provider`, not `platform`. Exit status
-`0` means clean, `1` means attention is required, and `2` means the live
-comparison could not be completed for one or more projects.
+The audit never reads or writes the registry. Its stable JSON report includes
+generator version, CI provider, platform and status, changed/missing/extra
+generated workflow paths, a regeneration command if inferable, and per-project
+errors. `provider` (`actions` or `crow`) identifies the validated CI backend.
+Crow's legacy `platform` conflates provider and platform; automation should use
+`provider` instead. Exit `0` means clean, `1` means attention needed, and `2`
+means the comparison couldn't finish for at least one project.
 
-`simit projects facts` extends this to every simit usage, not only CI, and
-says which upgrade path covers each one; see [Usage Facts](../projects-facts.md).
+`simit projects facts` covers all simit usage, not just CI, and reports which
+upgrade path covers each usage. See [Usage Facts](../projects-facts.md).
 
 ## Onboarding existing projects
 
-Run discovery once per machine to populate the registry from projects simit
-already manages:
+Run discovery once per machine to register projects simit already manages:
 
 ```sh
 # one-shot per machine
@@ -75,18 +66,15 @@ simit projects discover ~/Projects --dry-run
 simit projects discover ~/Projects
 ```
 
-`discover` walks a filesystem subtree and adds new registry entries it finds.
-`scan` refreshes feature status for projects that are already registered; use
-`simit projects scan --prune` afterwards if you also want stale paths removed.
-Pass `--include-empty` when you want to register Cargo workspaces that do not
-currently use simit; human output marks those entries with `[no simit features]`
-and `projects list` shows them with a `-` indicator. Default human discovery
-output prints only the skipped count; use `--json` when you need the full list
-of skipped paths.
+`discover` walks a filesystem subtree and adds new entries. `scan` refreshes
+registered projects' feature status. Run `simit projects scan --prune` afterward
+to remove stale paths too. `--include-empty` registers Cargo workspaces without
+simit usage: human discovery output marks them `[no simit features]`, and
+`projects list` marks them `-`. By default, human discovery output gives only
+the skipped count; `--json` lists every skipped path.
 
-When a registered project path no longer exists, `scan` reports it instead of
-silently leaving stale feature state behind. Use `--prune` to delete those
-entries after reviewing them.
+`scan` reports missing registered paths. Review them before deleting their
+entries with `--prune`.
 
 List registered projects:
 
@@ -94,9 +82,8 @@ List registered projects:
 simit projects list
 ```
 
-By default, `projects list` skips ephemeral `/tmp/...` registry entries left
-behind by scratch test runs. Pass `--include-ephemeral` when you need to see
-them again.
+`projects list` hides ephemeral `/tmp/...` entries from scratch tests by
+default. Show them with `--include-ephemeral`.
 
 Filter by feature status:
 
@@ -112,7 +99,7 @@ Omitting `=STATUS` matches any non-absent status:
 simit projects list --feature homebrew
 ```
 
-Use JSON output when another tool or an AI agent needs structured state:
+Use JSON for tools and AI agents that need structured state:
 
 ```sh
 simit projects list --json --feature ci=drift
@@ -120,16 +107,16 @@ simit projects list --json --feature ci=hand-rolled
 simit projects show --json .
 ```
 
-Human `simit projects show <path>` output also includes a `regen:` line for
-generated CI projects. When `simit.toml [ci]` already captures the current CI
-shape, the hint stays minimal:
+Human `simit projects show <path>` output includes a `regen:` line for
+generated CI projects. If `simit.toml [ci]` captures the current CI settings,
+the hint is minimal:
 
 ```sh
 regen: simit init ci --platform forgejo
 ```
 
-Legacy projects without persisted `[ci]` options print the inferred flag set
-instead so the command still reproduces the current workflows.
+Without persisted `[ci]` options, simit prints inferred flags to reproduce
+the current workflows.
 
 Refresh feature detection across registered projects:
 
@@ -145,14 +132,14 @@ simit projects scan --dry-run --prune
 simit projects prune --dry-run
 ```
 
-Clear all registry state when you want to rebuild it from discovery:
+Clear the registry to rebuild it from discovery:
 
 ```sh
 simit projects clear-state --dry-run
 simit projects clear-state
 ```
 
-Remove one entry when you no longer want simit to track it:
+Stop tracking one project:
 
 ```sh
 simit projects forget /absolute/project/path
@@ -160,15 +147,14 @@ simit projects forget /absolute/project/path
 
 ## Disabling the registry
 
-Set `SIMIT_NO_REGISTRY=1` to skip all registry IO. Sandboxed CI runs
-that should not leak per-project state into a shared home directory
-should export this. Registry IO failures already warn-and-continue, so
-this env var is only needed when you want zero filesystem touches.
+In sandboxed CI where project state must not leak into a shared home directory,
+export `SIMIT_NO_REGISTRY=1` or set it in the command's environment to skip all
+registry IO. Registry IO failures only warn; set this variable only to avoid all
+registry filesystem access.
 
 ## Writing integration tests
 
-Integration tests under `tests/` route through the shared
-`tests/common/` harness, which points `XDG_DATA_HOME` at a per-test
-temporary directory so the developer's real registry is never touched.
-New tests that exercise mutating commands should use the same harness
-and avoid spawning `simit` with the inherited environment.
+Integration tests in `tests/` use the shared `tests/common/` harness, which
+sets `XDG_DATA_HOME` to a per-test temporary directory, so tests never touch
+the developer's registry. Use the harness for new tests of mutating commands;
+don't spawn `simit` with the inherited environment.

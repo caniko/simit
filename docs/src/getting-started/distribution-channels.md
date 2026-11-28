@@ -1,23 +1,24 @@
 # Distribution Channels
 
-`simit` can keep distribution packaging files and the tag-triggered release
-workflow in sync with project config. The Linux channels are:
+`simit` can keep distribution packaging files and tag-triggered release
+workflows in sync with project config. It also generates editor publisher and
+Crow workflows:
 
 - AUR: `simit init aur` writes `dist/aur/<pkg>/PKGBUILD` files for source,
   `-bin`, and `-git` flavors.
 - COPR: `simit init copr` writes the RPM spec and `.copr/Makefile`.
 - apt: `simit init apt` writes `dist/apt/conf/distributions` for reprepro.
-- Release workflow: `simit init release` writes
-  `.forgejo/workflows/release.yml` by default, or
-  `.github/workflows/release.yml` for GitHub, for artifact build, hosted release
-  upload, and configured channel publish steps.
+- Release workflow: `simit init release` writes `.forgejo/workflows/release.yml`
+  by default or `.github/workflows/release.yml` for GitHub. The generated
+  workflow builds artifacts, uploads the hosted release, and publishes
+  configured channels.
 - Editor marketplaces: `simit init ci --with-vscode` and
   `simit init ci --with-jetbrains` write the VS Code Marketplace/Open VSX and
   JetBrains publisher workflows (see [Editor Marketplaces](#editor-marketplaces)).
 - Crow: `simit init ci --ci-provider crow` and
   `simit init release --ci-provider crow` write project-side Crow v6.1
-  workflows under `.crow` without invoking a Crow CLI or server. YAML is the
-  default; set `[ci.crow].format = "jsonnet"` for Jsonnet output.
+  workflows under `.crow` without a Crow CLI or server. YAML is the default;
+  set `[ci.crow].format = "jsonnet"` for Jsonnet.
 
 All four init commands support `--check`, `--diff`, and `--print`.
 
@@ -31,7 +32,7 @@ simit init ci --ci-provider crow --runtime nix
 simit init release --ci-provider crow
 ```
 
-Render the same channel templates to stdout for inspection:
+Render the same channel templates to stdout:
 
 ```sh
 simit dist aur render
@@ -41,9 +42,9 @@ simit dist apt render
 
 ## Configuration
 
-The same schema can live in `simit.toml`, root Cargo metadata under
-`[workspace.metadata.simit]` or `[package.metadata.simit]`, or flake
-`outputs.simitConfig`. Keep exactly one simit project config source in a repo.
+Keep exactly one Simit project config source per repo: `simit.toml`, root Cargo
+metadata under `[workspace.metadata.simit]` or `[package.metadata.simit]`, or
+flake `outputs.simitConfig`. All use the same schema.
 
 ```toml
 [ci]
@@ -85,53 +86,47 @@ public_url = "https://apt.example.com/"
 
 `copr.makefile_path` is a workspace-relative path without parent traversal.
 Render, init, drift checks, next-step instructions, and the managed COPR badge
-all use that path. The managed apt badge uses `apt.public_url` when declared;
-otherwise it links to `dist/apt/conf/distributions`.
+use it. The managed apt badge links to `apt.public_url` if set, otherwise to
+`dist/apt/conf/distributions`.
 
 The COPR release workflow creates the `repo-vVERSION.tar.gz` basename expected
-by the generated RPM spec. `copr.srpm_dir` selects the same workspace-relative
-staging directory for the build and publisher. Publication requires exactly
-one nonempty `.src.rpm` there.
+by the generated RPM spec. `copr.srpm_dir` sets a shared workspace-relative
+staging directory for build and publication. Publication requires exactly one
+nonempty `.src.rpm` there.
 
-AUR metadata generation works for unprivileged and root release runners.
-Root runners use `setpriv` with an unprivileged UID/GID for `makepkg`, then
-restore the clone's original ownership on success or failure. Metadata is
-replaced only after generation succeeds; failed generation does not publish.
+AUR metadata generation works on unprivileged and root release runners. Root
+runners run `makepkg` via `setpriv` with an unprivileged UID/GID, then restore
+the clone's ownership on success or failure. Only successful generation replaces
+metadata and allows publication.
 
-Chocolatey publication runs inside the project's declared Nix development
-environment, with `chocolatey.nix_tool` supplying the external packager. It
-retains the exact packed candidate and its source/content hashes under
-`<package-dir>/.simit-candidates/`; keep that directory when retrying the same
-publication. A retry skips publication only when the registry's downloaded
-package is byte-identical. Different bytes, failed lookups, and unverified
-push failures remain errors. The public Chocolatey push service is checked
-through its community NuGet v2 feed. For custom HTTP(S) push sources, provide
-the NuGet v2 base URL or a NuGet v3 service index. Packing and registry lookups
-do not receive the configured API-key environment variable.
+Chocolatey publishes from the project's declared Nix development environment
+using the external packager in `chocolatey.nix_tool`. Keep
+`<package-dir>/.simit-candidates/` for retries: it holds the exact packed
+candidate and source/content hashes. A retry skips publication only if the
+downloaded registry package is byte-identical. Different bytes, failed lookups
+and unverified push failures are errors. When pushing to the public Chocolatey
+service, verification uses its community NuGet v2 feed. For custom HTTP(S) push
+sources, provide the NuGet v2 base URL or NuGet v3 service index. Packing and
+lookups never receive the configured API-key environment variable.
 
 Use `simit dist chocolatey bump --pack` with the same package/archive options
-to retain a candidate without registry access or an API key. Actions release
-workflows restore and explicitly save that source-bound candidate before
-publication, then require a successful restore so a fresh hosted retry uses
-the original package bytes. The cache key includes repository, ref, commit,
-and generated payload hashes. Packing discovers the single nonempty package
-and retains its actual filename, including Chocolatey CLI 2.x version
-normalization.
+to keep a candidate without registry access or an API key. Actions release
+workflows restore and explicitly save the source-bound candidate before
+publication, then require a successful restore so fresh hosted retries use the
+original bytes. The cache key includes repository, ref, commit and generated
+payload hashes. Packing finds the single nonempty package and keeps its actual
+filename, including Chocolatey CLI 2.x version normalization.
 
-Registry byte verification discovers NuGet v3 `PackageBaseAddress/3.0.0`
-resources from the configured service index and uses normalized, lowercase
-package IDs/versions for content URLs. NuGet v2 feeds retain their package
-download route. Build metadata is omitted from normalized filenames and lookup
-versions. Discovery and downloads keep publication credentials out of their
-environment; unavailable or malformed service indexes fail verification.
-Service discovery and package downloads must allow anonymous reads, even when
-publication requires an API key. Feeds requiring authenticated reads are not
-supported: HTTP 401/403 from discovery or download is rejected before upload,
-without retrying with publication credentials or forwarding them through redirects.
+To verify bytes, Simit discovers NuGet v3 `PackageBaseAddress/3.0.0` resources
+from the configured service index and uses normalized, lowercase package
+IDs/versions in content URLs. NuGet v2 uses its package download route.
+Normalized filenames and lookup versions omit build metadata. Unavailable or
+malformed indexes fail verification. Discovery and downloads require anonymous
+reads, even when publishing needs an API key. They receive no publication
+credentials: HTTP 401/403 fails before upload, with no credentialed retry or
+credential forwarding through redirects.
 
-For an harbor-rs project whose flake exposes the conventional
-`packages.<system>.release-bundle`, the release artifact section can instead
-use the simple opt-in:
+If the harbor-rs flake exposes `packages.<system>.release-bundle`, opt in with:
 
 ```toml
 [release.artifacts]
@@ -146,9 +141,9 @@ publishes multiple bundles.
 
 ### cargo-binstall
 
-`cargo binstall` reads `[package.metadata.binstall]` from the crate manifest,
-so harbor-rs derives that block from the release bundle and simit keeps the two
-equal. Declare the check next to the bundle:
+`cargo binstall` reads `[package.metadata.binstall]` from the crate manifest.
+Harbor-rs derives it from the release bundle and simit keeps the two equal.
+Declare the check next to the bundle:
 
 ```nix
 packages.release-bundle = binaryRelease.releaseBundle;
@@ -160,9 +155,8 @@ checks.binstall-metadata = harbor.lib.rust.mkBinstallCheck {
 };
 ```
 
-`mkBinstallRelease` exposes the release archives per system; the check is
-`binstall-metadata` for a single binary crate and `binstall-metadata-<crate>`
-for a workspace with several.
+`mkBinstallRelease` exposes archives per system. Use `binstall-metadata` for
+one binary crate or `binstall-metadata-<crate>` for a workspace with several.
 
 Build the bundles on native runners and require the metadata in the manifest:
 
@@ -173,26 +167,24 @@ binstall = true
 system_runners = { x86_64-linux = "ubuntu-24.04", aarch64-darwin = "macos-15" }
 ```
 
-With `system_runners`, the release workflow builds
-`packages.<system>.<bundle>` in one job per system on the given runner, uploads
-that system's archives and merges them into the single checksummed, signed
-release. Tag validation still runs before any build, and two systems shipping
-the same archive name fails publication. Without `system_runners` the release
-job keeps building the bundle inline as before.
+With `system_runners`, one job per system builds `packages.<system>.<bundle>`
+on the specified runner and uploads its archives. The workflow merges them
+into one checksummed, signed release. Tag validation precedes all builds;
+duplicate archive names across systems fail publication. Without
+`system_runners`, the release job builds the bundle inline.
 
-`simit binstall sync` writes the evaluated
-`checks.<system>.binstall-metadata*.toml` into every publishable binary crate's
-`Cargo.toml`, replacing only the `[package.metadata.binstall*]` tables:
-`--check` reports each drifted package with a unified diff and a non-zero exit,
-`--package NAME` limits the selection, and `--system SYS` overrides the host
-system. A crate with binaries but no check is reported as `missing` with the
-hint to expose `mkBinstallRelease` checks. With `binstall = true`,
-`simit release verify` runs the same check fatally.
+`simit binstall sync` writes evaluated `checks.<system>.binstall-metadata*.toml`
+into each publishable binary crate's `Cargo.toml`, replacing only
+`[package.metadata.binstall*]` tables. `--check` prints a unified diff for each
+drifted package and exits nonzero. `--package NAME` limits selection;
+`--system SYS` overrides the host system. For any crate with binaries but no
+check, it reports `missing` and suggests exposing `mkBinstallRelease` checks.
+With `binstall = true`, `simit release verify` runs the same check fatally.
 
 ### Release platforms
 
-`platforms` names the operating systems a release ships, so the project does
-not repeat the Nix system table. `linux` expands to `x86_64-linux` on
+`platforms` lists release operating systems without repeating the Nix system
+table. `linux` expands to `x86_64-linux` on
 `ubuntu-24.04`, `macos` to `aarch64-darwin` on `macos-15`, and `windows` adds
 no runner: the `x86_64-linux` job cross-builds `x86_64-pc-windows-gnu` with
 MinGW, so `windows` requires `linux`. An explicit `system_runners` entry wins
@@ -208,17 +200,17 @@ A nonempty `platforms` selects the conventional `packages.<system>.release-bundl
 output, so `prebuild_binaries = true` is not required; an explicit
 `nix_bundle_attrs` list still wins.
 
-`simit release verify` fails when a requested platform has no archive in the
-evaluated release bundle metadata and reports `blocked` when the flake exposes
-no `binstall-metadata` check to read the archive targets from.
+`simit release verify` fails if evaluated bundle metadata lacks an archive for
+a requested platform, or reports `blocked` when the flake exposes no
+`binstall-metadata` check from which to read archive targets.
 
 ### Desktop binaries
 
 A webview app cannot use the static musl archive: a Linux build links
 webkit2gtk/GTK from glibc, macOS links system frameworks, and Windows links
 WebView2, which the `x86_64-linux` job cross-builds against MinGW. Keep the
-same release config and ship the Linux archives from a portable nix-bundle
-build, next to the Windows cross archive and the macOS native archive, all in
+release config. Ship portable nix-bundle Linux archives, the Windows cross
+archive, and the native macOS archive in
 `packages.<system>.release-bundle`:
 
 ```toml
@@ -236,18 +228,17 @@ desktop = harbor.lib.mkPortableBinaryRelease {
 packages.release-bundle = desktop.releaseBundle;
 ```
 
-`mkPortableBinaryRelease` produces the Linux archives. The Windows `.zip` from
-the MinGW cross target and the macOS archive must join the same bundle, and
-the flake must expose the bundle's `binstall` metadata as a
+`mkPortableBinaryRelease` produces the Linux archives. Add the MinGW Windows
+`.zip` and macOS archive to that bundle. Expose its `binstall` metadata as a
 `checks.<system>.binstall-metadata*` check so `simit binstall sync` and
-`simit release verify` can prove every requested platform is shipped.
+`simit release verify` can verify every requested platform ships.
 
 With `auto_draft`, `simit release` runs `simit changelog draft` before
-promoting `[Unreleased]`. The draft uses the latest reachable semver tag (or
-the root commit for a first release), accepts optional guidance from
-`.skills/release-changelog/SKILL.md`, and fails closed when Codex returns no
-valid notable entries. Use `--no-changelog` only as an explicit release escape
-hatch.
+promoting `[Unreleased]`. Drafting uses the latest reachable semver tag (the
+root commit for a first release), accepts guidance from
+`.skills/release-changelog/SKILL.md` if present, and fails closed if Codex
+returns no valid notable entries. Use `--no-changelog` only as an explicit
+release changelog escape hatch.
 
 The public distribution and release sections are `[aur]`, `[copr]`, `[apt]`,
 `[homebrew]`, `[chocolatey]`, `[scoop]`, `[flatpak]`, `[winget]`,
@@ -255,20 +246,20 @@ The public distribution and release sections are `[aur]`, `[copr]`, `[apt]`,
 `[release.changelog]`, `[release.announce]`, `[release.windows_signing]`, and
 `[release.pypi]`.
 
-`[winget]` submits a PR to `microsoft/winget-pkgs` through the GitHub API as the
-`WINGET_PAT` user (no wine or `wingetcreate`), for new packages and new
-versions alike: the release step writes the version, installer and
-default-locale manifests, commits them to a branch on the token owner's fork and
-opens the PR. Reruns reuse an open PR. The optional `publisher`,
-`package_name`, `license`, `license_url`, `short_description`, `homepage`,
-`binary` and `command` fields and their Cargo-metadata defaults are listed in
+For new packages and versions, `[winget]` uses the GitHub API as the
+`WINGET_PAT` user (no wine or `wingetcreate`). The release step writes and
+commits version, installer and default-locale manifests to a branch on the
+token owner's fork and opens a PR to `microsoft/winget-pkgs`. Reruns reuse an
+open PR. The optional `publisher`, `package_name`, `license`, `license_url`,
+`short_description`, `homepage`, `binary` and `command` fields and their
+Cargo-metadata defaults are listed in
 [Windows Packaging](windows-packaging.md#winget).
 
 ## Release Secrets
 
 ### Binary-only releases and tag conventions
 
-Keep package versions unprefixed and configure Git tag identity separately:
+Keep package versions unprefixed; configure Git tags separately:
 
 ```toml
 [ci]
@@ -296,21 +287,20 @@ while archive names and artifact manifests use the semantic version.
 Required gates run after signature validation and checkout of the tagged
 revision, before artifact publication.
 
-Git notes list commit subjects in chronological order from the closest
-reachable matching release tag through the exact release tag. Tags on the
-same commit and unreachable tags are excluded. The first release lists
-all reachable history. This policy needs no `CHANGELOG.md`. Explicit notes
-configuration overrides the legacy hosted `body_from_changelog` setting;
-without an explicit source, `body_from_changelog = false` disables notes
-and the changelog precondition.
+Git notes list chronological commit subjects from the closest reachable
+matching release tag through the exact release tag. They exclude same-commit
+and unreachable tags. The first release lists all reachable history. Git
+notes need no `CHANGELOG.md`. Explicit notes configuration overrides legacy
+hosted `body_from_changelog`; without an explicit notes source,
+`body_from_changelog = false` disables notes and the changelog precondition.
 
 For hosted-only projects, `simit release verify` checks the release workflow,
 artifact producer, configured credentials, trust root and tag without
 checking crates.io publication. Credential presence remains a remote check;
 inspect the contract with `simit release secrets contract --json`.
 
-Generated release workflows name required or optional secrets in the workflow
-header. These names are configurable:
+Generated release workflow headers list required and optional secrets. Configure
+their names as follows:
 
 - AUR: `[aur].ssh_key_secret` defaults to `AUR_SSH_KEY`.
 - COPR: `[copr].login_secret`, `[copr].username_secret`, and
@@ -344,22 +334,22 @@ header. These names are configurable:
 
 ## Editor Marketplaces
 
-`[vscode]` publishes a VS Code Marketplace and Open VSX extension;
-`[jetbrains]` signs and publishes an IntelliJ Platform plugin. `simit init ci`
-writes `publish-vscode-extension.yaml` and `publish-jetbrains-plugin.yaml` into
-the workflow directory of the configured platform whenever those sections
-exist (or when `--with-vscode` / `--with-jetbrains` is passed). Both workflows
-run only for a `push` of a `[release].tag_prefix` tag holding an exact semver
-version, and the JetBrains one also accepts a `workflow_dispatch` `version`.
-Before publishing they re-check the GPG signature against the default branch's
-`keys/maintainers.gpg`, the tag object name, that the tag is the checked-out
-commit, the version in `Cargo.toml` (`cargo_package`), the extension
-`package.json` version or the plugin's `gradle.properties` `pluginVersion`,
-and then run `prepublish_commands`. Nix comes from the single pinned
-`cachix/install-nix-action` version, on every platform.
+`[vscode]` publishes extensions to VS Code Marketplace and Open VSX;
+`[jetbrains]` signs and publishes an IntelliJ Platform plugin. With either
+section or its corresponding `--with-vscode` / `--with-jetbrains` flag,
+`simit init ci` writes `publish-vscode-extension.yaml` or
+`publish-jetbrains-plugin.yaml` to the configured platform's workflow directory.
+Both require a `push` of an exact semver tag with `[release].tag_prefix`, except
+that JetBrains also accepts a `workflow_dispatch` `version`. Before publishing,
+the publish job rechecks the GPG signature against the default branch's
+`keys/maintainers.gpg`, the tag object name, and that checkout matches the tag's
+commit. They check the version in `Cargo.toml` (`cargo_package`) and in the
+extension's `package.json` or the plugin's `gradle.properties`
+(`pluginVersion`), then run `prepublish_commands`. Every platform installs Nix
+with the same pinned `cachix/install-nix-action`.
 
-On GitHub the publish job defaults to a hosted `ubuntu-24.04` runner when
-`runner` is unset; on Forgejo it keeps the project's release runner.
+Without `runner`, the GitHub publish job defaults to hosted `ubuntu-24.04`;
+Forgejo keeps the project's release runner.
 
 ```toml
 [ci]
@@ -385,13 +375,12 @@ cargo_package = "pkl-lsp-server"
 prepublish_commands = ["nix flake check --no-build"]
 ```
 
-With `pat_source`/`credential_source` of `actions-secret` (or `both`), the job
-declares `environment: <name>` and reads its credentials as environment
-secrets. Create that environment (default `simit-marketplace`) and allow the
-release tags in its deployment policy: a job whose tag the policy rejects fails
-before its steps run and never receives the secrets. The workflow only runs for
-tag pushes and dispatches, so pull-request runs never see these secrets.
-The secret names a GitHub consumer must provide in that environment are:
+With `pat_source`/`credential_source` set to `actions-secret` or `both`, the
+job declares `environment: <name>` and reads environment secrets. Create that
+environment (default `simit-marketplace`) and allow release tags in its
+deployment policy. Rejected tags fail before any steps run or secrets arrive.
+Only tag pushes and dispatches run the workflow; pull requests never receive
+these secrets. In that GitHub environment, provide:
 
 - VS Code/Open VSX: `VSCE_PAT` and `OVSX_PAT` (`vsce_pat_secret`,
   `ovsx_pat_secret`).
@@ -401,18 +390,17 @@ The secret names a GitHub consumer must provide in that environment are:
   `private_key_secret`, `private_key_password_secret`).
 
 The VS Code workflow packages `release/*` with `package_command` and attaches
-the assets to the release of the pushed tag with
-`gh release upload <tag> ... --clobber` and the job's `GITHUB_TOKEN`
-(`permissions: contents: write`). It never creates a release: it waits up to
-two minutes for the release workflow to create it and then fails with that
-instruction, so rerun the publish after the release run finishes. A pinned
-self-hosted `runner` therefore needs `gh` on `PATH`. The JetBrains workflow
-uploads the signed archive only as a workflow artifact and keeps
-`contents: read`.
+the resulting assets to the pushed tag's release via
+`gh release upload <tag> ... --clobber` using `GITHUB_TOKEN`
+(`permissions: contents: write`). It never creates a
+release. If the release workflow hasn't created one after two minutes, the
+publish job fails and tells you to rerun after the release run finishes. A
+pinned self-hosted `runner` needs `gh` on `PATH`. JetBrains uploads the signed
+archive only as a workflow artifact and keeps `contents: read`.
 
-On Forgejo nothing changes: `codeberg_repo` (required there) receives the
-release assets through the Codeberg API with the `codeberg_token` secret
-(`codeberg_token_secret`), and `file-env` PATs keep working from the runner.
+On Forgejo, the Codeberg API uploads assets to the required `codeberg_repo`
+using `codeberg_token` (`codeberg_token_secret`). `file-env` PATs still work
+from the runner.
 
 ## Release Workflow
 
@@ -425,17 +413,16 @@ and the committed minisign public key path. Optional `[release.attic]`,
 stable-release announcements, and Authenticode signing steps.
 
 Optional `[release.pypi]` uploads the wheels the release build left in
-`release/` (for example from a Nix `release-bundle`) to PyPI with
-`uv publish --check-url`, after the hosted release, so a rerun skips files
-PyPI already has. Nothing is built for PyPI; add `"*.whl"` to
-`checksum_globs` to attach the same wheels to the hosted release. Prerelease
-tags publish too. `trusted_publishing = true` uses the job's GitHub OIDC token
-(register the trusted publisher with workflow `release.yml`; GitHub Actions
-only, unless the `pypi` channel is disabled); otherwise the token secret is
-checked before anything is published. Under
-`[release.publish].enforcement = "activated-remote"` the channel stays soft
-until the project exists on PyPI, and a `staged` channel skips a missing token
-or missing wheels with a warning:
+`release/` (for example from a Nix `release-bundle`) after the hosted release,
+including prereleases. `uv publish --check-url` skips files already on PyPI on
+rerun. This step builds nothing; add `"*.whl"` to `checksum_globs` to attach the
+same wheels to the hosted release. `trusted_publishing = true` uses the job's
+GitHub OIDC token: register `release.yml` as the trusted publisher. This
+requires GitHub Actions unless the `pypi` channel is disabled. Without trusted
+publishing, the workflow checks the token secret before any publication. Under
+`[release.publish].enforcement = "activated-remote"`, the channel stays soft
+until the project exists on PyPI, and a `staged` channel warns and skips if the
+token or wheels are missing:
 
 ```toml
 [release.pypi]
@@ -445,78 +432,71 @@ trusted_publishing = true # or: token_secret = "PYPI_TOKEN"
 This differs from `[ci].pypi_*`, which builds and publishes a Python project
 in a separate `publish-pypi.yaml` workflow.
 
-The workflow publishes only channels whose config sections are present. AUR,
-apt, Homebrew, Scoop, Chocolatey, Flatpak, and winget are stable-release-only
-publish steps; COPR switches to its testing project for prerelease tags when
-configured.
+Only channels whose config sections are present publish. AUR, apt, Homebrew,
+Scoop, Chocolatey, Flatpak, and winget publish stable releases only. COPR uses
+its testing project for prerelease tags if configured.
 
 ### Republishing channels for an existing release
 
-A downstream channel can fail after the GitHub release is out (a Chocolatey
-push rejected while an earlier version sits in moderation, a winget PR that
-failed validation). Fix the cause, then rerun just those channels against the
-existing release instead of cutting a new tag:
+If a downstream channel fails after the GitHub release (for example,
+Chocolatey rejects a push during moderation of an earlier version, or winget
+rejects a PR on validation), fix the cause and rerun only those channels.
+Reuse the existing release instead of cutting a tag:
 
 ```sh
 gh workflow run release.yml -f tag=0.2.1 -f channels=winget
 gh workflow run release.yml -f tag=0.2.1 -f channels=winget,chocolatey
 ```
 
-Run it from the default branch so the generated `republish` job (and any fixed
-manifests or scripts) comes from current code. Without `tag` a dispatch
-behaves as before. The `tag` and `channels` inputs and the `republish` job
-exist only for GitHub releases with `sign = true` and at least one
-republishable channel: `aur`, `flathub`, `winget`, `homebrew`, `scoop`,
-`pypi` and `chocolatey`. `apt` and `copr` build their inputs in the release
-job and cannot be republished. `channels` is a comma-separated subset of
-those that are configured; an empty, unknown, unconfigured or
-non-republishable name fails before anything is checked out.
+Dispatch from the default branch to use the current `republish` job and fixed
+manifests or scripts. Without `tag`, dispatch behaves as before. The `tag`
+and `channels` inputs and `republish` job require GitHub, `sign = true`, and
+at least one republishable channel: `aur`, `flathub`, `winget`, `homebrew`,
+`scoop`, `pypi` and `chocolatey`. `apt` and `copr` cannot be republished
+because the release job builds their inputs. Set `channels` to a comma-separated
+subset of configured channels. Empty, unknown, unconfigured or non-republishable
+names fail before checkout.
 
 The job:
 
-- checks out `refs/tags/<tag>` and runs the same tag validation as a push
-  run (signed tag against the default branch's `keys/maintainers.gpg`, tag
-  label, version and changelog checks), requiring the checkout to be the
-  signed tag's commit;
+- checks out `refs/tags/<tag>` and validates it as for a push: verifies the
+  signature against the default branch's `keys/maintainers.gpg`, checks the
+  tag label, version and changelog, and requires checkout at the signed tag's
+  commit;
 - skips the build, signing, attestation, smoke checks, release publication,
-  Attic push and announcements; instead it downloads `SHA256SUMS.txt` and its
-  `.minisig` from the existing release, verifies them with minisign against the
-  committed `keys/minisign.pub`, downloads only the assets the selected
-  channels read, and runs `sha256sum -c --strict` on them. Any missing asset,
-  bad signature or checksum mismatch fails the job before a channel step runs;
+  Attic push and announcements. It downloads `SHA256SUMS.txt` and its `.minisig`
+  from the existing hosted release, verifies them with minisign and committed
+  `keys/minisign.pub`, downloads only the assets the selected channels read,
+  and runs `sha256sum -c --strict` on those selected downloaded assets. Missing
+  assets, bad signatures or checksum mismatches fail the job before any channel
+  step;
 - runs the publisher probe (under `activated-remote`) and then only the selected
   channel steps, with the same soft-skip semantics as a release run.
 
-It has `contents: read` (plus `id-token: write` only for PyPI trusted
-publishing), and shares a per-tag concurrency group with that tag's release
-run, so it queues behind a release still in progress.
+The job has `contents: read` (plus `id-token: write` only for PyPI trusted
+publishing). Its shared per-tag concurrency group queues it behind an active
+release of that tag.
 
-The channel steps are idempotent. winget reuses an open PR and, when the PR
-head is `<id>-<version>` on the token user's own fork, force-moves that branch
-to a commit with the regenerated manifests and keeps the PR (nothing changes
-if the blobs already match); a version already in winget-pkgs is skipped.
-Chocolatey compares the registry's package bytes with the packed candidate,
-and the candidate cache is keyed by the tag and its commit, as in the push run,
-so repeated republishes of one tag reuse one candidate. A cache written by the
-tag's push run is scoped to the tag ref and is only reachable when the
-republish is dispatched on that ref (`--ref <tag>`, possible once the tag's
-own `release.yml` has the inputs); from the default branch the first republish
-packs a fresh candidate, and if the registry already holds different bytes for
-that version the step fails closed. PyPI uses `uv publish --check-url`, and the
-Homebrew, Scoop, AUR and Flathub steps already skip an unchanged tree.
+Channel steps are idempotent. winget reuses an open PR and skips versions
+already upstream. If the PR head is `<id>-<version>` on the token user's fork,
+winget keeps the PR and force-moves that branch to a commit with regenerated
+manifests unless the blobs match. Chocolatey compares registry bytes with the
+packed candidate. The tag and commit key the cache as in the push run, so
+repeated republishes of a tag reuse one candidate. Only a dispatch on the tag
+ref can read its push cache (`--ref <tag>`, once that tag's `release.yml` has
+the inputs). The default branch's first republish packs a fresh candidate and
+fails closed if the registry already has different bytes for that version.
+PyPI uses `uv publish --check-url`; Homebrew, Scoop, AUR and Flathub skip
+unchanged trees.
 
-Hosted release assets are the primary release product. The generated workflow
-therefore fails early for missing hosted-release and signing credentials, but treats
-runner-side cache and downstream packaging as secondary. Attic cache pushes skip
-with a warning when the runner token is unavailable. Debian package generation is
-also best-effort: it attempts to build `.deb` assets before checksums and
-hosted-release upload, but it warns and continues when the runner container cannot
-provide a mount-capable debootstrap/chroot environment. In that case the
-the hosted release still publishes the artifacts that were actually produced, and
-the apt repository publish step skips because there are no `.deb` files.
+Hosted assets are primary: the workflow fails early if hosted-release or signing
+credentials are missing. Cache and downstream packaging are secondary. Attic
+pushes warn and skip without a runner token. The workflow tries to build `.deb`
+assets before checksums and hosted-release upload. If the runner container
+lacks a mount-capable debootstrap/chroot environment, it warns and publishes
+the artifacts it built. Without `.deb` files, apt publication skips.
 
-For projects that require `.deb` assets on every release, validate the runner
-contract before tagging:
+If every release needs `.deb` assets, validate the runner before tagging:
 
 ```sh
 simit init release --check --diff
@@ -525,13 +505,13 @@ nix develop -c debootstrap --variant=minbase bookworm "$(mktemp -d)" \
   http://deb.debian.org/debian
 ```
 
-The debootstrap check must run in the same runner image/container policy used by
-Forgejo Actions. A host shell passing the check does not prove the release job
-can mount or chroot inside the runner container.
+Run the debootstrap check under Forgejo Actions' runner image/container policy.
+Passing in a host shell does not prove the release job can mount or chroot in
+the container.
 
-Keep `release.yml` as the only automatic signed-tag workflow. Normal
-simit-managed CI workflows ignore tags explicitly so a release tag does not queue
-per-crate checks ahead of the artifact publisher on small trusted runner pools.
-Generated release scripts also avoid implicit shell state such as `OLDPWD`; under
-`set -u`, those variables can be unset in Forgejo runner shells and must not sit
-between successful artifact builds and hosted-release upload.
+Keep `release.yml` as the only automatic signed-tag workflow. Ordinary
+Simit-managed CI qualification workflows explicitly ignore tags so per-crate
+checks don't queue ahead of the artifact publisher on small trusted runner
+pools. Generated release scripts avoid implicit shell state such as `OLDPWD`:
+with `set -u`, unset variables in Forgejo runner shells can interrupt a release
+between artifact build and upload.

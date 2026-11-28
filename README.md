@@ -8,7 +8,7 @@
 
 `simit` is a semver-aware commit helper for Rust projects.
 
-Building Simit requires Rust 1.88 or newer. Generated projects retain their own
+Building Simit requires Rust 1.88 or newer. Generated projects keep their
 declared compiler requirements.
 
 ```sh
@@ -18,10 +18,10 @@ simit commit major -m "remove deprecated API"
 simit commit patch --pre rc.1 -m "prepare release candidate"
 ```
 
-The command bumps the selected package version in `Cargo.toml`, updates
-`Cargo.lock` when present, stages only the version files it changed, delegates
-to `git commit`, and creates a signed release tag named exactly like the new
-version with the message `Release <version>`.
+Simit bumps the selected package's version in `Cargo.toml`, updates `Cargo.lock`
+if present, stages only the version files Simit changed, and calls `git commit`.
+It creates a signed tag named exactly like the new version with the message
+`Release <version>`.
 
 Use `--no-tag` to skip tag creation:
 
@@ -29,80 +29,73 @@ Use `--no-tag` to skip tag creation:
 simit commit --no-tag patch -m "prepare unreleased patch"
 ```
 
-Use `--no-sign` to create an unsigned lightweight tag in environments where
-GPG signing is unavailable:
+If GPG signing is unavailable, use `--no-sign` for an unsigned lightweight tag:
 
 ```sh
 simit commit --no-sign patch -m "release without tag signing"
 ```
 
-Preview a release commit without touching the worktree:
+Preview a release commit without writing to the worktree:
 
 ```sh
 simit commit --dry-run patch -m "preview patch release"
 ```
 
-For workspaces with more than one package, choose the target package:
+In multi-package workspaces, select one package or all:
 
 ```sh
 simit commit --package memory-admission patch -m "release memory-admission"
 simit commit --workspace patch -m "release all workspace crates"
 ```
 
-Run the full local release flow, including checks and a strict Keep a Changelog
-update:
+Check and release locally with a strict Keep a Changelog update:
 
 ```sh
 simit release --no-sign patch -m "release patch"
 ```
 
 `simit release` runs `cargo test`, `cargo clippy --all-targets --all-features
--- --deny warnings`, promotes `CHANGELOG.md` from `[Unreleased]` when that file
-exists, commits, and tags locally. It does not push. Use `--no-changelog` to
-skip changelog promotion for one release.
+-- --deny warnings`, promotes `[Unreleased]` if `CHANGELOG.md` exists,
+then commits and tags without pushing. `--no-changelog` skips promotion for
+one release.
 
-If a pushed release tag runs CI on a bad commit, commit the fix and move the
-current-version tag to `HEAD`:
+If a pushed release tag runs CI on a bad commit, commit the fix and retag
+the current version at `HEAD`:
 
 ```sh
 simit release sync-up --push
 ```
 
-Without `--push`, sync-up only moves the local tag.
+Omit `--push` to move only the local tag.
 
 ## Running tests with Git fixtures
 
-Run any project's test command directly, with its exit status and arguments
-preserved:
+Run a project's test command directly, preserving arguments and exit status:
 
 ```sh
 simit test -- cargo test
 simit test --git-fixtures -- pnpm test:run
 ```
 
-On Unix, `--git-fixtures` creates a disposable temp directory and sets `TMPDIR`, `TMP`,
-and `TEMP` for the test subprocess. A temporary Git configuration includes the
-operator's original global configuration, then uses `includeIf gitdir:` to
-disable inherited hooks and automatic commit/tag signing **only for repositories
-whose Git directories are beneath that temp root**. It does not change identity,
-system configuration, checkout configuration, or hook files. Git operations in
-the original checkout retain their normal policy; linked worktrees with Git
-metadata outside the fixture root retain it too. Explicit local and
-command-scope Git settings still take precedence.
+On Unix, `--git-fixtures` sets `TMPDIR`, `TMP`, and `TEMP` for the test subprocess
+to a disposable directory. Temporary Git config includes the operator's global
+config, then uses `includeIf gitdir:` to disable inherited hooks and automatic
+commit/tag signing **only for Git directories under that root**. Identity, system
+and checkout config, and hook files stay unchanged. The original checkout and
+linked worktrees with Git metadata outside the root keep their normal policy.
+Explicit local and command-scope Git settings take precedence.
 
-Tests must honor the supplied temp directory. Hard-coded `/tmp` fixtures and
-tests that replace `GIT_CONFIG_GLOBAL` are outside this isolation. Set `TMPDIR`
-before invoking Simit to select a parent directory; use a short parent when
-testing Unix sockets. The runner needs Git with `git var GIT_CONFIG_GLOBAL`
-support. It executes the command without a shell, streams its standard I/O, and
-removes the temporary directory after the command exits, including failed tests.
-It does not install dependencies or provide an OS sandbox. Without
-`--git-fixtures`, the command's environment is unchanged.
+Tests must use that directory. Hard-coded `/tmp` fixtures or a replacement
+`GIT_CONFIG_GLOBAL` bypass isolation. Set `TMPDIR` before invoking Simit to
+choose the parent; use a short path for Unix sockets. Git must support
+`git var GIT_CONFIG_GLOBAL`. Simit runs the command without a shell, streams
+standard I/O, and removes the directory after the test command exits, even if
+the command failed. It neither installs dependencies nor provides an OS sandbox.
+Without `--git-fixtures`, the environment is unchanged.
 
 ## Project registry
 
-Simit records projects it has acted on in a per-user registry. Inspect that
-state with `simit projects`:
+Inspect the per-user registry of projects Simit has acted on with `simit projects`:
 
 ```sh
 simit projects list
@@ -113,15 +106,14 @@ simit projects scan --prune
 simit projects clear-state --dry-run
 ```
 
-The JSON output is intended for scripts and AI agents that need to find all
-projects where simit manages a feature such as flake, CI, or packaging.
-Run `simit projects discover <ROOT>` once per machine to add existing
-simit-managed projects to the registry.
+JSON lets scripts and AI agents find all projects with a Simit-managed feature,
+such as flake, CI, or packaging. Register existing Simit-managed projects once
+per machine with `simit projects discover <ROOT>`.
 
 ## Project upgrades
 
-Apply deterministic simit upgrades to the current workspace, explicit paths, or
-all registered simit-managed projects:
+Apply deterministic upgrades to this workspace, explicit paths, or all
+registered Simit-managed projects:
 
 ```sh
 simit upgrade
@@ -131,10 +123,9 @@ simit upgrade --dry-run --diff
 simit upgrade --check
 ```
 
-The current upgrade maintains a simit-managed README badge block immediately
-after the top-level heading. Badges are generated from actual initialized
-features and project configuration, including CI, Nix, docs, crates.io readiness,
-release artifacts, and configured distribution channels.
+The upgrade maintains Simit's README badge block directly below the top-level heading.
+Badges reflect initialized features and project config, including
+CI, Nix, docs, crates.io readiness, release artifacts, and configured distribution channels.
 
 ## Changelog management
 
@@ -144,7 +135,7 @@ Initialize a canonical Keep a Changelog file:
 simit changelog init
 ```
 
-Add entries under `[Unreleased]` with one of the standard section kinds:
+Add entries under `[Unreleased]` with one standard section kind per entry:
 
 ```sh
 simit changelog add added "support artifact workflows"
@@ -166,8 +157,7 @@ simit changelog show
 simit changelog show 0.3.1
 ```
 
-`simit release` automatically runs the same promotion logic when `CHANGELOG.md`
-is present, so the normal local release flow is:
+`simit release` runs the same promotion logic if `CHANGELOG.md` exists:
 
 ```sh
 simit changelog add added "describe the release"
@@ -176,17 +166,17 @@ simit release patch -m "release patch"
 
 ## Project hygiene
 
-Generate a compact, language-aware .gitignore for the current project with
-simit init gitignore. Use --check to verify it in CI and --print to inspect the
-rendered template without writing it.
+Run `simit init gitignore` to generate a compact, language-aware `.gitignore`
+for the current project. Use `--check` in CI to verify it, or `--print` to
+preview without writing.
 
 The template covers common local outputs and adds Rust or uv/Python entries
-when those project types are detected. Existing project-specific ignore rules
-should be reviewed before replacing an older .gitignore.
+when it detects those project types. Review custom rules before replacing an
+existing .gitignore.
 
 ## CI wiring
 
-Generate lightweight Rust CI and crates.io publish workflows for a repository:
+Generate lightweight Rust CI and crates.io publish workflows:
 
 ```sh
 simit init ci --platform forgejo
@@ -194,15 +184,17 @@ simit init ci --platform github
 simit init ci --ci-provider crow
 ```
 
-GitHub output is written under `.github/workflows`, uses native pinned GitHub
-Actions, and defaults to GitHub-hosted runners (`ubuntu-latest` and
-`windows-latest`). Forgejo output remains under `.forgejo/workflows` and keeps
-its Forgejo action references and runner-fleet defaults.
+Simit writes `.github/workflows` with pinned native GitHub Actions and defaults
+to GitHub-hosted `ubuntu-latest` and `windows-latest`. `.forgejo/workflows`
+keeps Forgejo action references and runner-fleet defaults.
 
-Crow output is project-side configuration under `.crow`; simit does not invoke
-the Crow CLI or contact a Crow server. It emits Crow v6.1 YAML by default, or
-Jsonnet when selected, and renders the same CI, publishing, Pages, extension,
-plugin, artifact, and release options into Crow workflows:
+See the [Chaosbox v1 integration](docs/integrations/chaosbox-v1.md) for required
+gates and dependency-ordered workspace publication on GitHub Actions.
+
+Simit writes only project config under `.crow`; it never calls the Crow CLI
+or server. Crow workflows default to v6.1 YAML, with optional Jsonnet, and Simit
+renders the same CI, publishing, Pages, extension, plugin, artifact, and release
+options into Crow workflows:
 
 ```sh
 simit init ci --ci-provider crow --runtime cargo
@@ -210,7 +202,7 @@ simit init ci --ci-provider crow --crow-format jsonnet --runtime nix
 simit init release --ci-provider crow
 ```
 
-Crow-specific settings live below `[ci.crow]`:
+Configure Crow under `[ci.crow]`:
 
 ```toml
 [ci]
@@ -236,26 +228,23 @@ default = "staging"
 required = true
 ```
 
-Generated Crow workflows use Crow's native `labels`, `platform`, `when`,
-`workspace`, `variables`, `skip_clone`, step `commands`, and `from_secret`
-bindings. Shell variables are escaped as `$${NAME}` for Crow interpolation.
-`check_command` keeps setup and self-check steps but replaces the default
-flake/Cargo checks with a single `project-check` step. With
-`check_push_secret`, the same command runs in event-gated push and pull-request
-steps: only the push step has a `from_secret` binding. The secret must not also
-be listed in `[ci].required_secrets`, which binds to every step. For Nix runtimes,
-choose a `nix_image` whose Crow container can write to `/nix`; the default
-image may require runner-specific permissions.
+Crow workflows use native `labels`, `platform`, `when`, `workspace`, `variables`,
+`skip_clone`, step `commands`, and `from_secret` bindings. Simit escapes shell
+variables as `$${NAME}` for Crow interpolation. `check_command` keeps setup
+and self-check but replaces the default flake/Cargo checks with one `project-check`
+step. `check_push_secret` runs the same complete command in separate event-gated
+push and pull-request steps. Only the push step gets a `from_secret` binding. Never list the
+secret in `[ci].required_secrets`, which binds it to every step. For Nix, use a
+`nix_image` whose container can write to `/nix`; the default may need
+runner-specific permissions.
 
-Forgejo workflows use direct Rust container jobs by default, even when the
-repository has a `flake.nix`. The default container is derived from
+Forgejo defaults to direct Rust container jobs, even with `flake.nix`. Simit
+chooses the default image from
 `package.rust-version`: `rust:<version>-bookworm` for current MSRVs, or
 `rust:<version>-trixie` once the matching official tag exists. Without
-`rust-version`, simit uses `rust:bookworm`. MSRV is only checked when
-`--with-msrv` is requested.
+`rust-version`, Simit uses `rust:bookworm`. Only `--with-msrv` checks MSRV.
 
-Forgejo runner labels are user infrastructure. Before generating Forgejo
-workflows, configure your local runner fleet in the simit user config:
+Set Forgejo runner labels in Simit's user config before generating workflows:
 
 ```sh
 simit config init
@@ -265,42 +254,38 @@ simit config check
 
 The config lives at `$XDG_CONFIG_HOME/simit/config.toml`, or
 `~/.config/simit/config.toml` when `XDG_CONFIG_HOME` is unset. `init ci`
-selects Forgejo runners from `[ci.defaults.forgejo]`; if no matching default is
-configured, it fails instead of guessing a non-portable label. Use `--runner`
-only for a one-off explicit label override:
+selects Forgejo runners from `[ci.defaults.forgejo]` and fails without a match
+rather than guessing a non-portable label. Use `--runner` only for a one-off
+explicit label override:
 
 ```sh
 simit init ci --platform forgejo --runner custom-runner
 ```
 
-Use `--runtime nix` only for workflows that intentionally need flake outputs,
-such as cross-platform binary builds or release artifacts. Forgejo Nix
-workflows use the configured `nix` runner default and do not run on
-pull-request events:
+Use `--runtime nix` only for workflows that need flake outputs, such as
+cross-platform binaries or release artifacts. Forgejo Nix workflows use the
+configured `nix` runner default and skip pull-request events:
 
 ```sh
 simit init ci --platform forgejo --runtime nix
 ```
 
-Projects that expose a generated `.#site` can opt into a repository-local Pages
-workflow:
+With a generated `.#site`, opt into a repository-local Pages workflow:
 
 ```sh
 simit init ci --platform forgejo --runtime nix \
   --with-pages --pages-repo caniko/my-project
 ```
 
-This writes `.forgejo/workflows/pages.yaml`, reads
-`secrets.codeberg_token`, configures the `forgejo-actions` git identity, adds an
+Simit writes `.forgejo/workflows/pages.yaml`. The workflow reads
+`secrets.codeberg_token`, sets the `forgejo-actions` Git identity, adds an
 authenticated `pages-origin` remote for the same Codeberg repository, and runs
-`DEPLOY_REMOTE=pages-origin nix run .#deploy-pages`. The same settings can live
-in project config:
+`DEPLOY_REMOTE=pages-origin nix run .#deploy-pages`.
 
-On GitHub, use the same flag with `--platform github`. Simit writes
-`.github/workflows/pages.yaml`, builds the site, uploads it with the pinned
-`actions/upload-pages-artifact` action, and deploys it through the
-`github-pages` environment with
-`actions/deploy-pages` using `pages: write` and OIDC permissions.
+For GitHub, use the same Pages flag with `--platform github`. Simit writes
+`.github/workflows/pages.yaml` to build the site, upload via pinned
+`actions/upload-pages-artifact`, and deploy via the `github-pages` environment
+using `actions/deploy-pages` with `pages: write` and OIDC permissions.
 
 To move or check Pages without changing an existing Crow or Forgejo CI setup:
 
@@ -309,6 +294,8 @@ simit init ci --pages-only --platform github
 simit init ci --pages-only --platform github --check --diff
 ```
 
+You can also store Pages settings in project config:
+
 ```toml
 [ci.pages]
 repo = "caniko/my-project"
@@ -316,21 +303,20 @@ repo = "caniko/my-project"
 
 ### Omnix CI (`--with-om-ci`)
 
-Use `--with-om-ci` with `--runtime nix` to replace the generated Nix flake
-check and cargo dev-shell test steps with [Omnix `om ci`](https://omnix.page/om/ci.html):
+With `--runtime nix`, `--with-om-ci` replaces generated flake checks and Cargo
+dev-shell tests with [Omnix `om ci`](https://omnix.page/om/ci.html):
 
 ```sh
 simit init ci --platform forgejo --runtime nix --with-om-ci
 ```
 
-Replace mode is the default when `--with-om-ci` is set. It trusts the flake's
-`checks.*` to cover the project's test, clippy, fmt, and doc gates. Projects
-using simit's generated crane flake satisfy that contract. Custom flakes
-(`[flake].mode = "custom"`) must audit `[flake.expected_outputs].checks`
-before enabling replace mode; otherwise CI can go green while skipping work the
-legacy `nix develop -c cargo ...` steps used to run.
+`--with-om-ci` defaults to replace mode, which trusts `checks.*` to cover tests,
+clippy, fmt, and docs. Simit's generated crane flake meets that contract. Before
+enabling replace mode on a custom flake (`[flake].mode = "custom"`), audit
+`[flake.expected_outputs].checks` first; otherwise CI can pass while skipping
+work from `nix develop -c cargo ...`.
 
-For Forgejo, replace mode emits this CI workflow:
+Forgejo CI in replace mode:
 
 ```yaml
 name: CI
@@ -356,8 +342,8 @@ jobs:
         run: nix run "$OMNIX_REF" -- ci run
 ```
 
-Use `--om-ci-augment` when the flake checks are not yet complete. Augment mode
-runs `om ci` first, then keeps the legacy Nix-runtime cargo steps:
+For incomplete flake checks, `--om-ci-augment` runs `om ci` before legacy
+Nix-runtime Cargo steps:
 
 ```yaml
 name: CI
@@ -395,43 +381,40 @@ jobs:
         run: nix develop -c cargo package --allow-dirty
 ```
 
-Pin the Omnix flakeref with `--omnix-ref`, project config, or user config. The
-resolution order is CLI `--omnix-ref` > project `[ci].omnix_ref` > user
+Pin the Omnix flakeref via `--omnix-ref` or config.
+Precedence: CLI `--omnix-ref` > project `[ci].omnix_ref` > user
 `[ci.tools.omnix].ref` > simit's pinned default.
 
-Use `--check` in CI to make sure committed workflows still match `simit`'s
-generated output:
+Use `--check` in CI to compare committed workflows with `simit`'s output:
 
 ```sh
 simit init ci --platform forgejo --check
 ```
 
-When check mode reports drift, the error prints the effective regeneration
-command, including runtime, runner, workspace, and optional gate flags. For
-more migration rules and runner-debugging notes, see
+Drift errors print the regeneration command with runtime, runner, workspace,
+and optional gate flags. Migration and runner debugging:
 `docs/src/getting-started/ci-adoption.md`.
 
-When `[ci].extra_setup`, `[ci].extra_env`, or `[ci].required_secrets` are set
-in project config, simit renders them into every generated CI, publish, and
-artifact workflow. Extra setup runs after checkout/toolchain setup and before
-tests or builds; extra env is job-level environment; required secrets are
-documented as workflow comments but are not read locally.
+Simit renders project settings `[ci].extra_setup`, `[ci].extra_env`, and
+`[ci].required_secrets` into every generated CI, publish, and artifact workflow.
+Extra setup runs after checkout/toolchain setup and before tests or builds.
+Extra env is job-scoped. Simit lists required secrets in comments without
+reading them locally.
 Set `[ci].pypi_token_secret` to override the default `PYPI_TOKEN` secret name,
 or set `[ci].pypi_trusted_publishing = true` to use GitHub OIDC instead.
 
-Generic `init ci` runs render test, lint, and optional quality-gate workflows
-without crates.io publishing. Add `--publish-crates` for release projects that
-need a separate `publish-crate.yaml` workflow. That workflow runs only on exact
-semver tag pushes such as `0.9.0`, verifies that the tag matches the Cargo
-package version, verifies the signed tag against `keys/maintainers.gpg`, runs a
-publish dry run, and publishes with the `CRATES_IO_API_TOKEN` secret. Workspace
-members with `publish = false` keep test and clippy CI but do not get
-`cargo package` or `publish-crate` gates. On release-enabled generation,
-`init ci` discovers the release signing key from `[release.signing].key`,
-`git config user.signingkey`, or `--maintainer-key`, then writes the maintainer
-public keyring.
+Generic `init ci` generates test, lint, and optional quality gates without
+crates.io publishing. `--publish-crates` adds `publish-crate.yaml`, which runs
+only on exact semver tag pushes (e.g. `0.9.0`). It verifies that the tag equals
+the selected Cargo package's version, verifies its signature against
+`keys/maintainers.gpg`, runs a publish dry run, then publishes with
+`CRATES_IO_API_TOKEN`. Members with `publish = false` keep tests and clippy CI
+but skip `cargo package` and `publish-crate` gates. During release-enabled
+`init ci` generation, `init ci` finds the signing key via
+`[release.signing].key`, `git config user.signingkey`, or `--maintainer-key`
+and writes the maintainer public keyring.
 
-You can manage that trust root explicitly:
+Manage the trust root explicitly:
 
 ```sh
 simit release trust status
@@ -443,8 +426,8 @@ The default trust root is `keys/maintainers.gpg`; override it with
 `[release.signing].trust_root` or `--maintainers-gpg`.
 
 Release workflows that sign checksums need matching minisign secrets in the
-remote Actions secret store. `simit release secrets` verifies
-the key pair before upload and never prints secret values:
+remote Actions secret store. `simit release secrets` verifies the pair before
+upload and never prints secret values:
 
 ```sh
 simit release secrets init --repo owner/repo \
@@ -454,8 +437,8 @@ simit release secrets check --repo owner/repo \
   --assume-account-secret codeberg_token
 ```
 
-For GitHub, add `--platform github`; the command delegates secret encryption and
-listing to the local `gh` CLI and uses the Actions secret store:
+For GitHub, `--platform github` uses the Actions store and local `gh` CLI
+for secret encryption and listing:
 
 ```sh
 simit release secrets init --platform github --repo owner/repo \
@@ -467,7 +450,7 @@ Use `--rotate-minisign` only for a new release line: it generates a fresh
 encrypted minisign key pair, uploads `MINISIGN_SECRET_KEY` and
 `MINISIGN_PASSWORD`, and replaces `keys/minisign.pub`.
 
-Add optional CI jobs and checks when the project needs them:
+Add optional CI jobs and checks:
 
 ```sh
 simit init ci --platform github --with-nextest --with-msrv --with-docs
@@ -477,12 +460,12 @@ simit init ci --platform forgejo --check --diff
 
 `--with-msrv` requires `package.rust-version`.
 
-Cargo-runtime workflows include warm-cache steps by default: a `~/.cargo/bin`
-cache keyed by the generated workflow files, plus `Swatinem/rust-cache@v2` for
-Cargo registry and target state. Optional tool installs use `command -v ... ||
-cargo install ... --locked` so a cache hit skips the download while a cache miss
-still installs the required binary. Nix-runtime workflows skip these Cargo
-caches and rely on the runner's Nix store and binary cache behavior.
+Cargo-runtime workflows cache `~/.cargo/bin` by generated workflow files and use
+`Swatinem/rust-cache@v2` for registry and target state by default. Optional
+tools use `command -v ... ||
+cargo install ... --locked` to skip downloads on hits and install on misses.
+Nix-runtime workflows skip Cargo caches and rely on the runner's Nix store and
+configured binary-cache behavior.
 
 Forgejo or GitHub + Nix artifact workflows can also publish a Homebrew tap:
 
@@ -495,17 +478,15 @@ simit init ci --platform forgejo --runtime nix --with-artifacts --with-homebrew 
   --homebrew-binary demo
 ```
 
-`--with-homebrew` requires Nix and implies `--with-artifacts`. The
-project workflow must stage each enabled platform archive under
-`release/{name}-{version}-{arch}-{os}.tar.gz` before the Homebrew step runs;
-the generated step verifies those files exist but does not build project-shaped
-tarballs itself.
+`--with-homebrew` requires Nix and implies `--with-artifacts`. The project
+workflow must stage each enabled platform archive at
+`release/{name}-{version}-{arch}-{os}.tar.gz` before the Homebrew step, which
+checks for these tarballs but doesn't build them.
 
 ## Homebrew automation
 
-Homebrew tap publishing tends to grow a lot of release-CI boilerplate. `simit`
-keeps the tap metadata in project config, bootstraps the tap once, and
-generates the Forgejo release step from that same config.
+`simit` stores tap metadata in project config, bootstraps the Homebrew tap once,
+and generates the project's Forgejo release step from that same config.
 
 ```toml
 [homebrew]
@@ -522,7 +503,7 @@ archive_pattern = "foo-{version}-{arch}-{os}.tar.gz"
 # linux_arm = false
 ```
 
-Bootstrap the tap repo once with a placeholder formula:
+Bootstrap the tap with a placeholder formula:
 
 ```sh
 simit init homebrew-tap --target ../homebrew-foo
@@ -536,8 +517,7 @@ simit init ci --platform forgejo --runtime nix \
   --with-artifacts --with-homebrew
 ```
 
-For local inspection and iteration, render the formula or bump a checked-out
-tap using release archives:
+Locally, render the formula or bump a checked-out tap from release archives:
 
 ```sh
 simit dist homebrew render
@@ -551,15 +531,13 @@ simit dist homebrew bump \
   --push
 ```
 
-rs-modde is the worked example for this flow: its release CI publishes
-`modde` and `modde-ui` to `caniko/homebrew-modde` from the generated Homebrew
-step.
+rs-modde's generated Homebrew release step publishes `modde` and
+`modde-ui` to `caniko/homebrew-modde`.
 
 ## Windows packaging
 
-`simit` can render and publish Windows packages for Chocolatey and Scoop from
-the same project metadata used by release artifacts. Declare the package
-surface in project config:
+Declare Chocolatey or Scoop packaging in project config; `simit` can then render
+and publish them using the release-artifact metadata:
 
 ```toml
 [chocolatey]
@@ -604,14 +582,14 @@ simit init ci --platform forgejo --with-chocolatey --with-scoop
 ```
 
 `--with-chocolatey` and `--with-scoop` imply `--with-artifacts`. GitHub uses
-`windows-latest` by default. Forgejo uses `[ci.defaults.forgejo].windows` from
-the simit user config unless `--windows-runner` overrides it. Generated
-workflows read `secrets.chocolatey_api_key` for Chocolatey pushes,
+`windows-latest` by default. Forgejo uses user config `[ci.defaults.forgejo].windows`
+unless `--windows-runner` overrides it. Workflows read
+`secrets.chocolatey_api_key` for Chocolatey pushes,
 `secrets.homebrew_tap_token` for Homebrew tap pushes, and
 `secrets.SCOOP_BUCKET_TOKEN` for Scoop bucket pushes unless project config
 overrides those secret names.
 
-For local inspection and iteration:
+Render, bump, or publish locally:
 
 ```sh
 simit dist chocolatey render --output-dir packaging/chocolatey
@@ -636,9 +614,8 @@ simit dist windows publish \
 
 ## Distribution channels
 
-Linux distribution packaging is configured from `simit.toml`, Cargo metadata,
-or `outputs.simitConfig` and rendered deterministically. Bootstrap committed
-channel files with:
+Simit renders Linux packaging deterministically from `simit.toml`, Cargo
+metadata, or `outputs.simitConfig`. Bootstrap channel files for committing:
 
 ```sh
 simit init aur
@@ -651,32 +628,31 @@ simit init release
 Each command supports `--check`, `--diff`, and `--print`. `init aur` writes
 `dist/aur/<pkg>/PKGBUILD` for source, `-bin`, and `-git` flavors. `init copr`
 writes the RPM spec and `.copr/Makefile`. `init apt` writes
-`dist/apt/conf/distributions`. `init apt-repo` bootstraps a separate
-repository-backed Codeberg Pages site with `conf/distributions`, the public
-signing key, a generated Pages workflow, and a README. It requires
-`[apt].public_url` and `dist/apt/key.gpg.asc`; run it from the package project
-and push the target repository's configured Pages branch once. `init release` writes
-`.forgejo/workflows/release.yml` by default, or `.github/workflows/release.yml`
-with `--platform github`. It uploads artifacts to Codeberg when
-`[release.codeberg]` is present or to GitHub when `[release.github]` is present,
-then publishes every configured channel.
+`dist/apt/conf/distributions`. `init apt-repo` requires `[apt].public_url` and
+`dist/apt/key.gpg.asc`. It bootstraps a separate repository-backed Codeberg Pages
+site with `conf/distributions`, the public signing key, a Pages workflow, and a
+README. Run it from the package project, then push the target repo's configured
+Pages branch once. `init release` writes `.forgejo/workflows/release.yml` by
+default or `.github/workflows/release.yml` with `--platform github`. The workflow
+uploads artifacts to Codeberg with `[release.codeberg]` or GitHub with
+`[release.github]`, then publishes all configured channels.
 
-Cargo release artifacts, promotion, and republish use the runner's `git`,
-`sha256sum`, and, when needed, `curl`, `jq`, and `tar`. Signing uses
-checksum-pinned minisign and Cosign on Linux x86-64 or arm64; republish only
-needs minisign. Nix is set up only for jobs that use it, such as flake builds
-or publishers that still run in a Nix environment. If a custom command needs
-Nix, invoke it explicitly in the configured shell command (for example,
-`nix develop -c ./scripts/smoke`) so the generator can detect it.
+Cargo release artifacts, promotion, and republish use the runner's `git` and
+`sha256sum`, plus `curl`, `jq`, and `tar` as needed. Signing uses checksum-pinned
+minisign and Cosign on Linux x86-64 or arm64; of the signing tools, republish
+needs only minisign.
+Only jobs that need Nix set it up (e.g. flake builds and Nix-based publishers).
+If a custom shell command needs Nix, invoke it explicitly (e.g.
+`nix develop -c ./scripts/smoke`) so Simit detects it.
 
-Changelog candidates can be drafted independently with
+Draft changelog candidates separately with
 `simit changelog draft [--base-ref REF] [--dry-run]`. Set
 `[release.changelog] auto_draft = true` to run the same fail-closed drafting
-step before `simit release` promotes `[Unreleased]`. A project may add
-`.skills/release-changelog/SKILL.md` for project-specific guidance; Codex is
-kept read-only and Simit validates and inserts the returned entries.
+step before `simit release` promotes `[Unreleased]`. Optionally add project
+guidance in `.skills/release-changelog/SKILL.md`. Codex stays read-only; Simit
+validates and inserts its entries.
 
-For local inspection, render the same templates without writing files:
+Preview the same templates without writing files, or run APT steps locally:
 
 ```sh
 simit dist aur render
@@ -687,12 +663,12 @@ simit dist apt publish --version 0.3.1 --release-dir release --push
 simit dist apt verify --repo ../apt-foo --version 0.3.1
 ```
 
-Relevant project config sections are `[aur]`, `[copr]`, `[apt]`,
+Project config sections: `[aur]`, `[copr]`, `[apt]`,
 `[homebrew]`, `[chocolatey]`, `[scoop]`, `[flatpak]`, `[winget]`,
 `[release.codeberg]`, `[release.github]`, `[release.artifacts]`, `[release.attic]`,
 `[release.changelog]`, `[release.announce]`, `[release.windows_signing]`, and `[release.pypi]`
-(prebuilt `release/*.whl` to PyPI; see the distribution-channels guide). The publish workflow
-secret names are configurable with `[aur].ssh_key_secret`,
+(prebuilt `release/*.whl` to PyPI; see the distribution-channels guide).
+Override publish workflow secret names with `[aur].ssh_key_secret`,
 `[copr].login_secret`, `[copr].username_secret`, `[copr].token_secret`,
 `[apt].gpg_key_secret`, `[apt].gpg_key_id_secret`,
 `[apt].gpg_passphrase_secret`, `[apt].ssh_key_secret`,
@@ -704,8 +680,7 @@ secret names are configurable with `[aur].ssh_key_secret`,
 `[release.announce].*_secret`,
 `[release.windows_signing].*_secret` (including SignPath `api_token_secret`), and `[release.pypi].token_secret`.
 
-APT uses a repository-backed Pages branch rather than rebuilding a fresh
-repository tree on every release:
+APT reuses a repository-backed Pages branch across releases:
 
 ```toml
 [apt]
@@ -727,36 +702,31 @@ scoop = "required"
 homebrew = "staged"
 ```
 
-The release template builds `.deb` files with `simit dist apt build`, then
-uses `simit dist apt publish` to update the existing reprepro database and
-push its history-preserving commit. Scoop publication is likewise delegated
-to `simit dist scoop bump`; explicit channel policies allow a repository to
-make APT/Scoop required while keeping another channel staged during rollout.
+The template builds `.deb` files with `simit dist apt build`, then uses
+`simit dist apt publish` to update the existing reprepro database and push
+a commit that preserves history. It publishes Scoop with `simit dist scoop bump`.
+Channel policies can require APT/Scoop while another channel stays staged
+during rollout.
 
-For harbor-rs-compatible Nix projects, set
-`[release.artifacts].nix_bundle_attrs` to an explicit list of flake attributes
-whose outputs are flat release bundles. The configured bundle set must contain
-exactly one versioned `*-release-manifest.json`; Simit validates that manifest
-against the tag before checksums and hosted-release upload. Existing
-`build_commands` remain additive for installers and other project-specific
-formats.
+For harbor-rs-compatible Nix projects, list flake attributes producing flat
+release bundles in `[release.artifacts].nix_bundle_attrs`. Include exactly one
+versioned `*-release-manifest.json` across the bundles. Simit validates it against
+the tag before checksums and hosted-release upload. Existing `build_commands`
+still add installers and other project-specific formats.
 
-Projects using the conventional harbor-rs output can opt in with the shorter
-`[release.artifacts].prebuild_binaries = true`; this is equivalent to
-`nix_bundle_attrs = ["release-bundle"]` unless an explicit attribute list is
-provided.
+For the conventional harbor-rs output, `[release.artifacts].prebuild_binaries = true`
+means `nix_bundle_attrs = ["release-bundle"]` unless you provide an explicit list.
 
 When a bundle needs paths from a private substituter, set
 `[release.artifacts].netrc_secret` to the name of a GitHub Actions secret
-holding netrc content (for example `machine attic.example.com password
-<token>`). Every GitHub release and prebuild job that installs Nix with the
-`[release.artifacts]` substituters writes it to a mode-0600 file under
-`$RUNNER_TEMP` before installing Nix and points `netrc-file` at it.
-Same-repository pull-request prebuilds receive it too, so use a pull-only
-token; fork pull requests get an empty netrc and substitute anonymously. Other
-release backends reject the key.
+holding netrc content, e.g. `machine attic.example.com password
+<token>`. Every GitHub release and prebuild job that installs Nix with
+`[release.artifacts]` substituters first writes that content to a mode-0600 file
+under `$RUNNER_TEMP` and points `netrc-file` at it. Use a pull-only token:
+same-repository pull-request prebuilds get it too. Fork pull requests get an
+empty netrc and substitute anonymously. Other release backends reject this key.
 
-GitHub flake-input publication is additive to the primary CI provider. Point
+GitHub flake-input publication supplements the primary CI provider. Point
 `attic_app` at an app built with `rs-harbor.lib.mkAtticPush { flake = "."; }`:
 
 ```toml
@@ -771,31 +741,31 @@ attic_app = ".#push-flake-inputs"
 Simit invokes the app only on the repository's default branch or a trusted
 release call; pull requests and feature branches never receive the token.
 
-By default the prebuild realizes `[ci].nix_builds` and no separate
-`nix-builds.yaml` is generated. When the primary CI is GitHub Actions, setting
-`[prebuild].nix_builds` (the published subset, such as the packages) or
-configuring `[ci.nix_build]` (for example `groups` with `check_systems`) gives
-`[ci].nix_builds` their own qualification matrix alongside the prebuild;
-`simit init ci --prebuild-only` leaves that matrix in place. Forgejo, GitLab and
-Crow primaries get no such matrix, and `--prebuild-only` removes a stale one. `[ci.nix_build].only` remains incompatible with `[prebuild]`.
+By default, prebuild realizes `[ci].nix_builds` without a separate
+`nix-builds.yaml`. With GitHub Actions as primary CI, set `[prebuild].nix_builds`
+(the published subset, e.g. packages) or configure `[ci.nix_build]`
+(e.g. `groups` with `check_systems`) for a separate `[ci].nix_builds`
+qualification matrix. `simit init ci --prebuild-only` keeps that matrix. With
+Forgejo, GitLab, or Crow as primary CI, there is no separate `[ci].nix_builds`
+matrix and `--prebuild-only` removes a stale one. `[ci.nix_build].only` is
+incompatible with `[prebuild]`.
 
 ## Project config
 
-Projects may opt in to stable simit settings with exactly one project config
-source. Supported sources are:
+To persist project settings, choose exactly one config source:
 
 - `simit.toml` at the Cargo workspace root.
 - `[workspace.metadata.simit]` or `[package.metadata.simit]` in root
   `Cargo.toml`.
 - `outputs.simitConfig` in `flake.nix`.
 
-All sources use the same section names: `[flake]`, `[ci]`, `[homebrew]`,
+All sources share section names: `[flake]`, `[ci]`, `[homebrew]`,
 `[chocolatey]`, `[scoop]`, `[aur]`, `[copr]`, `[apt]`, `[flatpak]`,
 `[winget]`, and `[release.*]`.
 
-For each Homebrew setting, resolution order is: CLI flag, simit project config,
-Cargo package metadata, then an error. `tap_url` and `download_repo` have no
-Cargo metadata fallback, so they must be set by a flag or in project config.
+Homebrew precedence per setting: CLI flag, project config, Cargo package
+metadata, then an error. Supply `tap_url` and `download_repo` via flag or
+project config; neither falls back to Cargo metadata.
 
 ```toml
 [homebrew]
@@ -811,10 +781,10 @@ linux_arm = false  # Override: do not publish aarch64-linux.
 Chocolatey and Scoop use the same resolution order. Their `download_repo`
 fields must be `OWNER/REPO`, and Scoop also requires `bucket_url`.
 
-Projects with custom flakes can keep their own Nix inputs and outputs while
-letting simit manage formatter/pre-commit hooks. Set `[flake].mode = "custom"`
-to make `simit init flake --check` validate simit's required wiring
-semantically instead of comparing against the canonical flake template:
+With `[flake].mode = "custom"`, projects can keep their own Nix inputs and
+outputs while letting Simit manage formatter/pre-commit hook definitions;
+`simit init flake --check` validates Simit's required wiring semantically rather
+than against the canonical template:
 
 ```toml
 [flake]
@@ -829,8 +799,7 @@ checks = ["default", "formatting", "clippy", "fmt", "nextest", "doc", "audit", "
 top_level = ["hmModules"]
 ```
 
-Project CI can also declare stable workflow additions without hand-editing the
-generated YAML:
+Configure persistent CI additions without editing generated YAML:
 
 ```toml
 [ci]
@@ -845,8 +814,8 @@ required_secrets = ["SKILLNET_TEST_PG_URL", "CRATES_IO_API_TOKEN"]
 
 ## User config
 
-User config is intentionally separate from project config. It stores local
-infrastructure such as runner labels, while repositories stay portable.
+User config keeps local infrastructure, such as runner labels, out of project
+config so repositories stay portable.
 
 ```toml
 [ci.runners.atlas]
@@ -871,13 +840,12 @@ release = "atlas"
 windows = "windows_atlas"
 ```
 
-Each default names a runner from `[ci.runners]`. The selected runner must match
-the requested platform, operating system, and runtime before simit writes a
-workflow. GitHub keeps portable built-in fallbacks (`ubuntu-latest` and
-`windows-latest`) when user config does not override them.
+Each default names a runner from `[ci.runners]`. Simit writes a workflow only
+if the runner matches the platform, operating system, and runtime. GitHub
+falls back to built-in `ubuntu-latest` and `windows-latest` unless overridden
+in user config.
 
-Project config in Cargo metadata nests the same project schema under
-`metadata.simit`:
+In Cargo metadata, nest the project schema under `metadata.simit`:
 
 ```toml
 [workspace.metadata.simit.homebrew]
@@ -885,7 +853,7 @@ tap_url       = "https://codeberg.org/caniko/homebrew-mythos.git"
 download_repo = "caniko/mythos"
 ```
 
-Flake config exports the same schema as JSON-compatible Nix data:
+In a flake, export the same schema as JSON-compatible Nix data:
 
 ```nix
 {
@@ -912,24 +880,25 @@ Flake config exports the same schema as JSON-compatible Nix data:
 
 ## Flake and hook wiring
 
-Generate a canonical Rust crane flake plus formatter and pre-commit hook definitions:
+Generate the canonical Rust crane flake, formatter, and pre-commit hook
+definitions:
 
 ```sh
 simit init flake
 ```
 
-This writes `flake.nix`, `nix/treefmt.nix`, and `nix/pre-commit.nix`,
-detects Rust, Nix, uv-based Python, TOML, YAML, and Markdown files, and wires
-`treefmt-nix` and `cachix/git-hooks.nix`. Existing `flake.nix` files are
-patched only when simit can find safe anchors; otherwise, use `--print` and
-apply the generated wiring manually.
+Simit writes `flake.nix`, `nix/treefmt.nix`, and `nix/pre-commit.nix`, detects
+Rust, Nix, uv-based Python, TOML, YAML, and Markdown files, and wires
+`treefmt-nix` and `cachix/git-hooks.nix`. It patches an existing `flake.nix`
+only if it finds safe anchors; otherwise use `--print` and apply the wiring
+manually.
 
-In custom flake mode, `simit init flake` writes only `nix/treefmt.nix` and
-`nix/pre-commit.nix`; the repository-owned `flake.nix` is left intact. The
-check mode requires treefmt/git-hooks inputs, the `treefmtEval` and
-`pre-commit-check` bindings, formatter/check/dev-shell hook wiring, and any
-configured expected outputs. This supports flakes based on helpers such as
-`harbor-rs` without requiring simit to render every project-specific output.
+In `[flake].mode = "custom"`, `simit init flake` writes only `nix/treefmt.nix`
+and `nix/pre-commit.nix`, leaving `flake.nix` intact. `simit init flake --check`
+requires treefmt/git-hooks inputs, `treefmtEval` and `pre-commit-check`
+bindings, formatter/check/dev-shell hook wiring, and configured expected
+outputs. Helpers such as `harbor-rs` can supply project-specific outputs without
+Simit rendering them.
 
 Preview the generated files without writing them:
 
@@ -957,21 +926,19 @@ simit man
 
 ## Release checklist
 
-Before publishing a release, make sure `CHANGELOG.md` has the intended
-`## [Unreleased]` entries. You can validate them explicitly with
-`simit changelog check`, then run:
+Before publishing, confirm `CHANGELOG.md` has the intended `## [Unreleased]`
+entries. Optionally run `simit changelog check`, then release:
 
 ```sh
 simit release patch -m "release patch"
 ```
 
-The crates.io publish workflow runs when the release tag is pushed and requires
-`CRATES_IO_API_TOKEN`. It also requires `keys/maintainers.gpg`, which
-`simit init ci --publish-crates` and `simit release trust init` generate from
-the configured release signing key.
+Only an exact semver release tag push triggers the publish workflow, which
+requires `CRATES_IO_API_TOKEN` and `keys/maintainers.gpg`. `simit init ci --publish-crates`
+and `simit release trust init` generate the keyring from the configured release
+signing key.
 
-If that tag-triggered workflow fails after the tag has already been pushed,
-commit the fix and rerun the release pipeline with:
+If the pushed tag's workflow fails, commit the fix and rerun the release pipeline:
 
 ```sh
 simit release sync-up --push
@@ -979,4 +946,4 @@ simit release sync-up --push
 
 ## License
 
-`simit` is licensed under the MIT License. See `LICENSE`.
+`simit` uses the MIT License. See `LICENSE`.

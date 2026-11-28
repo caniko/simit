@@ -33,10 +33,10 @@ depends_on = ["core"]
 checks = [{ id = "test", run = "python3 -m unittest discover -s python/tests" }]
 ```
 
-Configuration can come from `simit.toml`, Cargo `[workspace.metadata.simit]` or
-`[package.metadata.simit]`, or flake `outputs.simitConfig`. Use one configuration
-source. Member invocations discover the root for each source, stopping at Git
-checkout boundaries.
+Configuration comes from `simit.toml`, Cargo `[workspace.metadata.simit]` or
+`[package.metadata.simit]`, or flake `outputs.simitConfig` (use one source).
+Member invocations discover the root per source, stopping at Git checkout
+boundaries.
 
 ## Qualification planning
 
@@ -47,31 +47,30 @@ simit monorepo plan --changed-path nix/core/default.nix --json
 ```
 
 The JSON contract has `schemaVersion`, `changedPaths`, `full`, `selected`, and
-`reasons`. Selection includes changed owners, their transitive dependents,
-then every selected component's prerequisites, in deterministic dependency
-order. Cargo metadata supplies member source directories and local dependency
-edges, including optional, build, development, and target-specific dependencies.
-All Cargo members must have exactly one component owner.
-For a package in the root `Cargo.toml`, declare its source paths explicitly
-(for example, `paths = ["src", "tests", "build.rs"]`, retaining only paths that
-exist). Simit adds `Cargo.toml` to that owner's paths without claiming nested
-workspace members.
+`reasons`. Selection includes changed owners, their transitive dependents, then
+every selected component's prerequisites in deterministic dependency order.
+Cargo metadata supplies member source directories and local dependency edges
+(including optional, build, dev, and target-specific dependencies); every Cargo
+member needs exactly one component owner. For a root `Cargo.toml` package,
+declare its existing source paths explicitly (for example
+`paths = ["src", "tests", "build.rs"]`); Simit adds `Cargo.toml` to that
+owner's paths without claiming nested workspace members.
 
-An unknown source path selects all components. The default shared paths are
+Unknown source paths select all components. Default shared paths are
 `simit.toml`, `flake.nix`, `flake.lock`, `Cargo.toml`, `Cargo.lock`,
-`rust-toolchain.toml`, `deny.toml`, and `.github`; `shared_paths` can replace
-that list. Changes under `ignore_paths` (for example `["README.md", "docs"]`)
-select nothing; an ignored path must not overlap owned or shared paths. Git
-selection includes committed, staged, unstaged, and untracked
-changes relative to the base. Renames retain both old and new paths; deletions
-retain their old owners. Missing or invalid base revisions fail locally.
+`rust-toolchain.toml`, `deny.toml`, and `.github` (replaceable via
+`shared_paths`). Changes under `ignore_paths` (e.g. `["README.md", "docs"]`)
+select nothing; configured ignored paths must not overlap owned or shared paths.
+Git selection includes committed, staged, unstaged, and untracked changes
+relative to the base; renames keep both old and new paths, deletions keep old
+owners, and missing/invalid base revisions fail locally.
 
-Paths must be normalized and root-relative. Overlapping component ownership,
-unknown dependencies, cycles, duplicate package ownership, and symlink traversal
-are rejected. A component may contain multiple paths and Cargo packages.
+Paths must be normalized and root-relative; overlapping ownership, unknown
+dependencies, cycles, duplicate package ownership, and symlink traversal are
+rejected. Components may own multiple paths and Cargo packages.
 
-A component may own a separate Cargo workspace (for example, a submodule with its
-own lockfile) that the root workspace excludes:
+A component may own a separate Cargo workspace (such as a submodule with its own
+lockfile) excluded from the root workspace:
 
 ```toml
 [[monorepo.components]]
@@ -81,51 +80,49 @@ cargo_manifest = "components/rust/Cargo.toml"
 cargo_packages = ["harbor-cache"]
 ```
 
-Its `cargo_packages` resolve from that workspace instead of the root. The manifest
-must be a workspace root (or standalone package) inside the component's paths,
-and its members must not also belong to the root workspace. Every member of every
-workspace needs an owner. Path dependencies between workspaces still add
-`depends_on` edges. Generated crate publication workflows and trusted publishers
-pass the manifest to Cargo (`--manifest-path` and `--cargo-manifest`). Local
-`release plan`, `verify` and `sync-up` use the component workspace. Version bumps
-belong to that workspace's own repository; `simit release <bump> --component`
-refuses them.
+Its `cargo_packages` resolve from that workspace. The manifest must be a
+workspace root or standalone package inside the component's paths with no member
+shared with the root workspace, and every member of every workspace needs an
+owner. Cross-workspace path dependencies still add `depends_on` edges. Generated
+crate publication workflows and trusted publishers pass that manifest to Cargo
+via `--manifest-path` and `--cargo-manifest`. Local `release plan`, `verify`,
+and `sync-up` target the component workspace, while version bumps belong to that
+workspace's repository (`simit release <bump> --component` refuses them).
 
 ## Generated qualification CI
 
-Monorepo workflows install Nix **2.35.2** explicitly, including their native
-prebuild and crate archive prerequisites. This release contains the upstream
+Monorepo workflows pin Nix **2.35.2** explicitly (including native prebuild and
+crate archive prerequisites) for the upstream
 [lost build-slot wakeup fix](https://github.com/NixOS/nix/commit/fba3f6e49bea5f6b7b5b75ab794e32afaabd5d26)
 for the `!awake.empty()` assertion abort observed with the install action's
-2.35.1 default. The installer remains pinned when regenerating workflows.
+2.35.1 default; both the version pin and installer action remain pinned when
+regenerating workflows.
 
-`simit init ci` and `simit init ci --check` operate on the complete root workflow
-set from both root and member directories. GitHub Actions runs the planner at the
-checked-out revision and qualifies the selected components. Missing push-base
-objects trigger full qualification. Every component requires explicit checks;
-failed or cancelled selected jobs fail the aggregate `qualified` gate.
-`[ci].push_branches` filters branch pushes while retaining pull-request and
-manual qualification; an empty list preserves all branch pushes.
+`simit init ci` and `simit init ci --check` operate on the full root workflow
+set from root or member directories. GitHub Actions runs the planner at the
+checked-out revision and qualifies the selected components (missing push-base
+objects force full qualification). Every component needs explicit checks; failed
+or cancelled selected jobs fail the aggregate `qualified` gate.
+`[ci].push_branches` filters branch pushes while keeping PR and manual
+qualification (empty list keeps all branch pushes).
 
-Static policy from `simit.toml` or Cargo metadata verifies generated workflows
-once in the prerequisite `plan` job, before component selection. Flake-evaluated
-`outputs.simitConfig` retains verification on each component worker. Native
-runner-system guards and component checks remain on their selected workers.
-Release qualification retains the same verification ownership.
+Static policy (`simit.toml` or Cargo metadata) verifies generated workflows once
+in the prerequisite `plan` job before selection; flake `outputs.simitConfig`
+keeps verification on each component worker. Native runner-system guards and
+component checks remain on their selected workers; release qualification
+retains the same static-versus-flake verification ownership.
 
-The root `devShells.<system>.ci` must supply Simit with this component support,
-Cargo, and the tools used by checks. Each command runs in that shell with its
-declared environment and timeout. A component check's `runtime` must be omitted
-or set to `"nix"`. `systems` can select native runners using
-`[ci.nix_system_runners]`. Handwritten supplementary workflows are retained.
+Root `devShells.<system>.ci` must supply Simit (with component support), Cargo,
+and check tools; commands run there with declared env and timeouts. Component
+check `runtime` must be omitted or `"nix"`. `systems` selects native runners
+via `[ci.nix_system_runners]`, and handwritten supplementary workflows are
+preserved.
 
-Each component gets its own `component-<id>` job by default. Components that
-set the same `job` share one `component-<job>` job instead: one checkout, Nix
-install, and store, with each member's checks running in dependency order and
-guarded by that member's selection. A dependent then substitutes what its
-prerequisite already built, instead of rebuilding it on another runner. Members
-of a job must declare the same `systems`, and their checks share the job's
-360-minute budget.
+By default each component gets `component-<id>`; components sharing `job` run in
+one `component-<job>` job using one checkout, Nix install, and store, with each
+member's checks running in dependency order and guarded by that member's
+selection so dependents reuse what prerequisites built. Shared-job members must
+declare identical `systems` and share the 360-minute budget.
 
 ```toml
 [[monorepo.components]]
@@ -137,41 +134,41 @@ id = "secret-manager"
 job = "libs"
 ```
 
-`[ci.cache]` substituters and trusted keys apply to the planner and component
-jobs, as in single-project CI. Publication workflows drop them.
+`[ci.cache]` substituters and trusted keys apply to planner and component jobs,
+as in single-project CI, and are omitted from publication workflows.
 
-`simit init flake` also resolves member invocations to the root. Optional
-`formatter_modules` are composed into the generated root treefmt module; custom
-flakes retain their existing ownership contract. Language and publication
-overrides must not be used to replace component qualification commands.
+`simit init flake` resolves member invocations to the root; optional
+`formatter_modules` compose into the root treefmt module while custom flakes
+keep their ownership contract. Do not use language or publication overrides to
+replace component qualification commands.
 
-Set `submodules = true` when components are Git submodules. Every generated
-GitHub `actions/checkout` step in qualification and source publication workflows
-then fetches them with `submodules: recursive`. Nix flakes copy submodule content
-only when `flake.nix` declares `inputs.self.submodules = true`.
+Set `submodules = true` when components are Git submodules so every generated
+GitHub `actions/checkout` step in qualification and source publication
+workflows uses `submodules: recursive` (flakes copy submodule content only when
+`flake.nix` sets `inputs.self.submodules = true`). Trusted publishers then pass
+`--source-submodules`, and signed-source package verification fetches
+submodules under this trust model:
 
-Trusted publishers then pass `--source-submodules`, and the signed-source
-checkout used for package verification also fetches submodules. The trust model:
+- The superproject's signed tag is the sole trust root, pinning every gitlink to
+  an exact commit ID (submodules need no signatures of their own).
+- `.gitmodules` is read from the signed tag's tree, never the working tree;
+  gitlinks and declarations must match 1:1 with only `path`, `url`, and
+  (ignored) `branch` keys.
+- URLs must be `https://github.com/<owner>/<repository>[.git]` under the
+  superproject's owner (relative, SSH, `git`, `file`, and other forms are
+  rejected).
+- The verifier fetches each submodule at its pinned commit, checks its `HEAD`
+  equals the gitlink, and rejects nested submodules without recursing.
+- Submodule trees follow superproject entry rules: regular files, executables,
+  and inert symlink blobs only.
 
-- The superproject's signed tag is the only root of trust. Its tree pins every
-  gitlink to an exact commit ID, so submodule content is pinned transitively;
-  submodules need no signatures of their own.
-- `.gitmodules` is read from the signed tag's tree, never the working tree.
-  Every gitlink must have exactly one declaration and every declaration a
-  gitlink. Only `path`, `url` and (ignored) `branch` keys are accepted.
-- URLs must be `https://github.com/<owner>/<repository>[.git]` for the
-  superproject's own owner. Relative, SSH, `git`, `file` and other forms are rejected.
-- Each submodule is fetched at exactly its pinned commit, and its checked-out
-  `HEAD` must equal the gitlink. Nested submodules are rejected, not recursed.
-- Submodule trees obey the same entry rules as the superproject: regular files,
-  executables and inert symlink blobs only.
-
-Without the setting, signed sources containing gitlinks are still rejected.
+Without `submodules = true`, signed sources containing gitlinks are still
+rejected.
 
 ### Components qualified by a superproject
 
-A component repository that the superproject qualifies keeps only its
-publication workflows. Declare the qualifier in the component's own `simit.toml`:
+A superproject-qualified component keeps only its publication workflows by
+declaring its qualifier in the component's own `simit.toml`:
 
 ```toml
 [ci]
@@ -181,20 +178,18 @@ qualified_by = "caniko/fleet"   # GitHub owner/repo of the superproject
 repo = "caniko/component"
 ```
 
-With `qualified_by` set, `simit init ci` generates only the Pages workflow
-(what `--pages-only` generates), and `simit init ci --check` reports any
-simit-generated qualification workflow (`ci.yaml`, `ci-<crate>.yaml`,
-`build*`, `nix-builds*`, `prebuild*`, `qualify*`) as obsolete drift; a plain
-`simit init ci` deletes them. Handwritten workflows are never touched.
-`simit upgrade` links the README CI badge to
-`https://github.com/<qualified_by>/actions`. The platform defaults to GitHub.
+With `qualified_by`, `simit init ci` emits only the Pages workflow (like
+`--pages-only`); `--check` flags simit-generated qualification workflows
+(`ci.yaml`, `ci-<crate>.yaml`, `build*`, `nix-builds*`, `prebuild*`, `qualify*`)
+as obsolete drift, and `simit init ci` deletes them while preserving handwritten
+workflows. `simit upgrade` points the README CI badge at
+`https://github.com/<qualified_by>/actions`, and platform defaults to GitHub.
 
-The slug must be exactly `owner/repo`. Crate publication workflows are keyed on
-the qualification workflows, so `qualified_by` is rejected together with
-`[monorepo]`, `[ci].nix_builds`, `[[ci.required_gates]]`, `[ci].publish_crates`,
-a non-GitHub platform or provider, and `--primary-only`, `--plan-json` or
-`--publish-crates` on the command line. `--review-only` and `--prebuild-only`
-still run their own generators unchanged.
+The slug must be `owner/repo`. Because crate publishers key on qualification
+workflows, `qualified_by` rejects `[monorepo]`, `[ci].nix_builds`,
+`[[ci.required_gates]]`, `[ci].publish_crates`, non-GitHub platforms/providers,
+and CLI `--primary-only`, `--plan-json`, or `--publish-crates`. `--review-only`
+and `--prebuild-only` still run their own generators unchanged.
 
 ### Running a declared check
 
@@ -202,82 +197,67 @@ still run their own generators unchanged.
 simit monorepo check --component core --check evaluate --nix-diagnostics
 ```
 
-Local checks use configured environment literals even when the calling shell
-already defines those variables. Provider expressions (`${{ ... }}`) cannot be
-evaluated locally and are rejected before execution without printing their values.
-Generated Actions callers use `--gate-env provider-staged`: every configured
-gate variable must be present under its inert evaluated step alias (an empty value
-is valid), and its bytes are passed directly to the gate without shell expansion.
-Direct `--gate-env provider-resolved` invocations read the declared variable names.
-Checks run once from the project root with Bash `-euo pipefail`; failure diagnostics
-never retry the check or replace its failure status.
+Local checks apply configured env literals even if the calling shell defines
+them, and reject provider expressions (`${{ ... }}`) before running without
+printing values. Generated Actions callers use `--gate-env provider-staged`
+(every gate variable must exist under its inert step alias, empty allowed, and
+passes verbatim without shell expansion); direct `--gate-env provider-resolved`
+reads declared names. Checks run once from project root with Bash `-euo pipefail`;
+failure diagnostics never retry or mask failure.
 
-The native runner resolves the root configuration, validates the component and
-check, and executes its project-owned command with `bash -euo pipefail` and the declared
-environment. Unknown checks fail before execution. Generated qualification uses
-this runner inside the project's `ci` shell. Both local and generated checks enforce
-the declared timeout; on expiry the runner stops the gate process group before
-collecting diagnostics. Evaluated step values are passed through the Nix shell
-even if its devShell defines the same variable. Local release qualification rejects
-unresolved provider expressions before running any selected gate.
+The native runner resolves root config, validates the component/check (unknown
+checks fail before running), and executes the project-owned command with
+`bash -euo pipefail` and declared env. Generated qualification invokes this
+runner inside the project's `ci` shell. Both local and generated checks enforce
+timeouts, stopping the gate process group before diagnostics. Evaluated step
+values override devShell variables; local release qualification rejects
+unresolved provider expressions before running any gate.
 
-Generated checks reserve two minutes for bounded diagnostics after the gate's
-deadline. The deadline is captured before `nix develop`, so provisioning counts
-toward the step budget, and is capped by a job deadline captured before checkout
-and installation. GitHub steps and jobs retain their 360-minute maximum; a gate
-at that maximum receives up to 358 minutes in CI. Local invocations without the
-generated `--deadline` retain the full configured timeout. An expired CI budget
-collects diagnostics without starting the gate.
+Generated checks reserve two minutes for diagnostics after the gate deadline,
+captured before `nix develop` (so provisioning counts) and capped by a job
+deadline captured before checkout/install. GitHub steps/jobs cap at 360 minutes
+(a 360-minute gate gets up to 358 minutes in CI; local runs without `--deadline`
+keep the full timeout). Expired CI budgets collect diagnostics without starting
+the gate.
 
-Successful setup gates may retain background services for later gates. Failed,
-timed-out or cancelled gates stop their process group before diagnostics; the
-local CLI handles SIGINT, SIGTERM and SIGHUP. During synchronous local process
-creation, those signals retain their default termination behavior until a child
-exists and native cleanup can run. Generated callers supervise that startup
-window with their outer deadline. If Nix provisioning fails before
-the native runner starts, the caller collects the same bounded diagnostics and
-returns the provisioning status. Separate private startup and diagnostic-completion
-markers allow fallback evidence after abrupt native termination while avoiding
-duplicate completed captures. If their private directory cannot
-be created, the caller stops before provisioning or installing cleanup traps.
+Passing setup gates may keep background services for later gates; failed,
+timed-out, or cancelled gates stop their process group before diagnostics. The
+local CLI handles SIGINT, SIGTERM, and SIGHUP (during synchronous process spawn,
+signals keep default termination until a child exists; generated callers
+supervise startup with their outer deadline). If Nix provisioning fails before
+native startup, the caller collects the same bounded diagnostics and returns
+the provisioning status. Separate private startup and diagnostic-completion
+markers allow fallback capture after abrupt termination without repeating a
+completed capture; if their private directory cannot be created, the caller
+stops before provisioning or traps.
 
-Generated checks stage provider values under inert environment names before
-Bash starts and use `--gate-env provider-staged` to pass them through native
-initialization. Consumed staging aliases are removed from the gate environment.
-The native runner assigns declared data after gate Bash startup,
-preserving values such as `IFS` and `PWD` that Bash normally rewrites. A gate's
-`PATH` applies only to the gate, preserving the tool paths needed to start Simit
-and Bash even in Nix sandboxes without `/bin/bash`.
-Read-only and dynamically managed Bash names are rejected during graph validation,
-before execution or writes. This includes integer/computed names such as `RANDOM`,
-`SRANDOM`, `OPTIND`, `HISTCMD`, `SECONDS`, `LINENO` and `BASH_ARGV0`, as well as
-Bash's internal arrays: they cannot preserve arbitrary scalar environment data.
-Startup-sensitive `BASH_ENV` is also rejected: gates must source setup files
-explicitly in their declared command. Mutable scalar
-names such as `IFS` and `PWD` remain supported. See the
-[Bash variable reference](https://www.gnu.org/software/bash/manual/html_node/Bash-Variables.html).
-The existing job Bash supervises asynchronous provisioning in an isolated process
-group, including executable lookup and startup, on hosted and custom Nix runners.
-It enforces the remaining deadline during
-Nix provisioning, native initialization (including Cargo metadata) and gate
-process creation, stops its process group on timeout, and leaves the reserved time
-for diagnostics. Only after validation, environment capture, timer creation, cancellation setup and
-completion of the spawn attempt does native Simit mark its ownership of the gate
-deadline and cleanup.
-Spawn failures still attempt diagnostics after that handoff. The separate
-completion marker is written only after the diagnostic script returns success.
-Failed gates return
-their original exit code (or `128 + signal` for signal termination) through the
-CLI and generated supervisor, independently of diagnostic success.
+Generated checks stage provider values under inert names before Bash starts,
+passing them via `--gate-env provider-staged` and removing consumed staging
+aliases from the gate environment. The native runner assigns declared data
+after gate Bash starts, preserving `IFS` and `PWD` while scoping gate `PATH` so
+Simit/Bash tool paths survive Nix sandboxes without `/bin/bash`. Graph
+validation rejects read-only and dynamically managed Bash names before
+execution or writes—including integer/computed names (`RANDOM`, `SRANDOM`,
+`OPTIND`, `HISTCMD`, `SECONDS`, `LINENO`, `BASH_ARGV0`) and internal arrays—plus
+`BASH_ENV` (gates must source setup files explicitly in their declared
+command); mutable scalars like `IFS` and `PWD` remain supported (see
+[Bash variable reference](https://www.gnu.org/software/bash/manual/html_node/Bash-Variables.html)).
+Job Bash supervises asynchronous provisioning (including lookup/startup) in an
+isolated process group on hosted and custom Nix runners, enforcing the remaining
+deadline across Nix provisioning, native init (including Cargo metadata), and
+gate spawn, stopping the group on timeout and reserving diagnostic time. Native
+Simit claims deadline/cleanup ownership only after validation, env capture,
+timer/cancellation setup, and spawn attempt; after that handoff, even spawn
+failures attempt diagnostics, and the completion marker writes only if the
+diagnostic script succeeds. Failed gates return their original exit code (or
+`128 + signal`) through CLI and supervisor regardless of diagnostic outcome.
 
-On Linux, `--nix-diagnostics` captures `/proc/meminfo`, memory pressure, Nix
-daemon status, and bounded daemon/kernel journals after a failed check. Journal
-queries start at the check's start time, retain at most 150 entries each, and
-use non-interactive sudo with a 15-second timeout and five-second termination
-grace per command. Missing tools or
-permissions are reported without changing the failed result. The runner does
-not retry the gate or restart the daemon, and does not dump its environment.
-These diagnostics are written to stderr and retained in the provider job log.
+On Linux, `--nix-diagnostics` writes `/proc/meminfo`, memory pressure, Nix
+daemon status, and bounded daemon/kernel journals (from check start, up to 150
+entries each, non-interactive sudo with 15-second timeout and five-second
+termination grace per command) to stderr, retained in the provider job log,
+after a failed check without retrying, restarting the daemon, or dumping env;
+missing tools or permissions are reported without altering the failed status.
 
 ## Independent Cargo releases
 
@@ -286,41 +266,40 @@ simit release plan --component rust --json
 simit release patch --component rust --package engine -m 'release engine'
 ```
 
-Component release plans contain dependency-ordered publishable packages and
-their owning components, versions, and package-qualified tags. `publish = false`
-members remain non-publishable. A bump selects exactly one owned package and
-creates a signed tag such as `engine/v0.2.1`; package versions stay plain SemVer.
-The package's adjacent `CHANGELOG.md` is used. Workspace-inherited versions are
-rejected for independent bumps. With `[release.changelog].auto_draft = true`,
-drafting uses only component-owned paths since the latest reachable package tag.
-Changelog compare links use the same package namespace. Component release mutation
-requires a clean checkout.
+Component release plans list dependency-ordered publishable packages with their
+components, versions, and package-qualified tags (`publish = false` members stay
+non-publishable). Bumps target one owned package and create a signed tag like
+`engine/v0.2.1` (versions stay plain SemVer, using the package's adjacent
+`CHANGELOG.md`; workspace-inherited versions reject for independent bumps). With
+`[release.changelog].auto_draft = true`, drafting scans only component-owned
+paths since the latest reachable package tag. Changelog compare links use the
+same package namespace. Mutations require a clean checkout.
 
-Set `[ci].publish_crates = true` to generate one independently tagged publication
-workflow per publishable Cargo member. Each `<package>/v<version>` release first
-qualifies the entire component graph on its declared native runners, verifies the
-signed tag against `keys/maintainers.gpg`, and checks its exact checkout and package
-version. It publishes only the tagged package, retains the package/archive checksum
-and registry propagation checks, and requires local dependencies to be published
-already. Each credential-free, tag-only builder has a separate default-branch
-publisher enrolled through `SIMIT_PUBLISHER_REVISION`. The trusted publisher binds
-the complete native tag, package namespace, original provider run and archive
-checksum before upload. Registry credentials come only from the protected
-`simit-crates-io` environment, restricted to the exact default branch.
+`[ci].publish_crates = true` emits one independently tagged workflow per
+publishable Cargo member. Each `<package>/v<version>` release qualifies the
+whole component graph on declared native runners, verifies the signed tag
+against `keys/maintainers.gpg`, checks its exact checkout and package version,
+publishes only the tagged package (requiring local deps already published), and
+runs package/archive checksum and registry propagation checks. Each
+credential-free, tag-only builder has a separate default-branch publisher
+enrolled via `SIMIT_PUBLISHER_REVISION` that binds the complete native tag,
+package namespace, original provider run, and archive checksum before upload;
+registry credentials come only from the protected `simit-crates-io` environment
+restricted to the exact default branch.
 
-`simit release verify --component <id> --package <name>` checks the package's
-adjacent changelog and namespaced tag. `simit release sync-up` accepts the same
-selection and preserves its existing clean-checkout and lease-protected tag push
-contracts. Shared tag verification and sync-up require explicit component
-selection in monorepositories. With `[release.notes].source = "git"`, verification
-uses commits touching component-owned paths between the previous package tag and
-the exact release tag; unrelated components and later commits are excluded. Trust
-and secrets stay repository-scoped.
+`simit release verify --component <id> --package <name>` checks the adjacent
+changelog and namespaced tag; `simit release sync-up` takes the same selector
+and keeps clean-checkout and lease-protected tag push guarantees. Shared tag
+verification and sync-up require explicit component selection in
+monorepositories. With `[release.notes].source = "git"`, verification scans
+commits touching component-owned paths between the previous package tag and the
+exact release tag (excluding unrelated components and later commits). Trust and
+secrets remain repository-scoped.
 
 ## Independent Python and npm versions
 
-Declare each static version owner explicitly; template and test-fixture manifests
-are never inferred as release packages:
+Declare each static version owner explicitly (template and test-fixture
+manifests are never inferred as release packages):
 
 ```toml
 [[monorepo.components]]
@@ -332,109 +311,97 @@ releases = [
 checks = [{ id = "test", run = "uv run --project components/python pytest" }]
 ```
 
-The same `release plan`, `patch`, `minor`, `major`, `verify`, and `sync-up`
-commands accept these owners. Select `--package` explicitly for components with
-multiple release packages, including mixed Cargo/Python components. An explicit
-namespace supports npm package names such as `@example/engine` while retaining
-safe package-qualified tags. Versions must be static SemVer; dynamic Python
-version providers are rejected.
+`release plan`, `patch`, `minor`, `major`, `verify`, and `sync-up` all support
+these owners. Pass `--package` for multi-package components (including mixed
+Cargo/Python). Explicit namespaces support scoped npm names like
+`@example/engine` with safe tags; versions must be static SemVer (dynamic Python
+versions reject).
 
-Package names are unique within their native registry, so Python and npm may
-both retain a package named `shared`. Release namespaces remain globally unique.
-Python names use the registry's case and `-`/`_`/`.` normalization for uniqueness.
-`--package` first selects an exact release namespace; a native package name is
-accepted only when it identifies one owner in the selected component. Use
-distinct namespaces such as `shared-python` and `shared-node` to choose between
-matching registry names. Ambiguous name-only selections fail before mutation.
+Package names are unique per registry (so Python and npm may both have
+`shared`), while release namespaces are globally unique and Python names follow
+registry case/`-`/`_`/`.` normalization for uniqueness. `--package` matches
+exact release namespaces first, falling back to a native package name only when
+unambiguous in that component (use distinct namespaces like `shared-python` and
+`shared-node`; ambiguous selections fail before mutation).
 
-Python bumps preserve TOML comments and update the local package record in the
-nearest `uv.lock`. npm bumps preserve package metadata, dependencies and `private`,
-and update adjacent `package-lock.json`/`npm-shrinkwrap.json` root records. Stale
+Python bumps preserve TOML comments and update the local package in the nearest
+`uv.lock`; npm bumps preserve metadata, dependencies, and `private` while
+updating adjacent `package-lock.json`/`npm-shrinkwrap.json` root records. Stale
 lock identities fail before source mutation. Release checks run the affected
-component graph in dependency order with their configured timeouts; the execution
-environment must supply Bash and GNU `timeout`. Changelogs remain adjacent to
-their manifests. A dirty checkout or a failing prerequisite check prevents the
-version commit and tag.
+component graph in dependency order with configured timeouts (requiring Bash and
+GNU `timeout`). Changelogs stay adjacent to manifests; dirty checkouts or
+failing prerequisites block the version commit and tag.
 
-`publish` records registry eligibility (npm `private = true` always disables it).
-Eligible owners generate credential-free `publish-python-<namespace>.yaml` or
-`publish-npm-<namespace>.yaml` source workflows and a corresponding
-`trusted-publish-<registry>-<namespace>.yaml` default-branch publisher.
-Each package-qualified signed tag
-qualifies the complete graph on every declared native runner, then validates
-the tag/event/HEAD identity on a fixed GitHub-hosted `ubuntu-24.04` builder,
-builds just that owner's wheel plus sdist or npm
-tarball, and retains a source-bound checksum receipt in an attempt-qualified,
-immutable provider artifact. The publisher always runs on `ubuntu-24.04`,
-independently of the configured qualification capacity. Its engine, keyring and
-package/namespace enrollment come from its protected workflow revision. Before
-upload it re-admits the full signed tag, source SHA, native provider workflow ID,
-original run/attempt and archive ID/digest. The publisher rejects metadata/checksum
-conflicts and non-hosted archive-builder enrollment, uploads only missing exact
-artifacts, and waits at most twenty
-registry reads separated by thirty-second waits for checksum-matching
-propagation. Failed uploads are accepted only if exact artifacts already exist.
-Credentials (`PYPI_API_TOKEN` or `NPM_TOKEN`) belong only to the protected
-`simit-pypi` or `simit-npm` environment, restricted to the default branch.
-The protected helper uploads the admitted bytes directly to the fixed registry
-endpoint. It never runs candidate Nix expressions, scripts, package hooks or
-package configuration with those credentials. Recovery reruns the original
-signed-tag run and reuses its first retained archive, including partial uploads;
-only archives from successful original attempts with a successful hosted
-`validate` builder job are eligible. Failed attempts cannot contribute retry
-bytes, and duplicate attempt artifact names are rejected. It does not rebuild
-a replacement archive in the publisher. Native build steps use
-the project's root `ci` shell, which must provide Python 3.11+, GnuPG and `uv`
-or npm. Prepared npm files must already be present after component qualification;
-`publishConfig` access and distribution-tag settings are retained, while custom
-registries require a separate backend. npm prereleases require an explicit
-`publishConfig.tag`. npm `publishConfig.provenance = true` grants OIDC permission
-only to the protected publisher. An engine-owned signer uses the hosted worker's
-global npm Sigstore library to attest the admitted tarball digest, signed source
-and protected publisher revision. Its child environment receives OIDC access,
-but no registry token or candidate Node/npm configuration. Python
-owners retain SemVer in source/tags; public Python releases
-support stable versions and `alpha`, `beta`, `rc`, or `dev` numeric prereleases,
-mapped to PyPI's normalized metadata version. SemVer build metadata is unsupported
-for public native releases. All native publication requires `keys/maintainers.gpg`.
-Native namespaces are limited to 64 ASCII bytes at configuration admission.
-Registry metadata retains npm lifecycle scripts for consumers; the protected
-publisher never executes those scripts.
-Public Python verification requires the complete unyanked wheel/sdist pair with
-valid SHA-256 entries. npm provenance policy must be boolean or unset during
-enrollment and credential-free packing.
-Public npm name admission follows npm's legacy-compatible publish validation.
-Recovery of an already-published exact npm archive also verifies its signed
-distribution tag and repairs that mapping without rebuilding the archive.
-Undecodable Git byte paths force full component qualification; known UTF-8 paths
-remain in the plan. Cargo metadata paths are normalized to repository-style `/`
-separators on Windows before ownership matching.
-Independent crates.io workflow generation honors Cargo's registry allowlist:
-unpublished and alternate-only members remain qualified but receive no crates.io
-builder or protected publisher. Unrestricted members and allowlists containing
-`crates-io` retain both workflows.
-Native archive retries require the original hosted upload step's artifact ID and
-digest from GitHub's attempt-specific step logs. A later same-name replacement
-does not inherit the original attempt's success. Missing or ambiguous upload
-logs fail admission. The protected Python uploader consumes the engine's
-already-normalized registry version, including prereleases. Public Python names
-follow the Core Metadata grammar; npm `private` must be absent or boolean.
+`publish` controls registry eligibility (npm `private = true` always disables
+it). Eligible owners get credential-free `publish-python-<namespace>.yaml` or
+`publish-npm-<namespace>.yaml` plus a separate default-branch
+`trusted-publish-<registry>-<namespace>.yaml`. Each package-qualified signed
+tag qualifies the full graph on declared native runners, validates
+tag/event/HEAD on fixed GitHub-hosted `ubuntu-24.04`, builds just that owner's
+wheel+sdist or npm tarball, and stores a source-bound checksum receipt in an
+attempt-qualified immutable artifact. The publisher always runs on
+`ubuntu-24.04`, taking its engine, keyring, and package/namespace enrollment
+from its protected revision. Before upload it re-admits the full signed tag,
+source SHA, native provider workflow ID, original run/attempt, and archive
+ID/digest, rejecting metadata/checksum conflicts and non-hosted archive-builder
+enrollment, uploading only missing exact artifacts, and polling up to twenty
+registry reads (thirty-second intervals) for checksum-matched propagation
+(failed uploads pass only if exact artifacts already exist). `PYPI_API_TOKEN`
+and `NPM_TOKEN` belong only to the protected `simit-pypi`/`simit-npm`
+environments restricted to the default branch; the helper uploads admitted
+bytes directly to the fixed registry endpoint without running candidate Nix,
+scripts, hooks, or config.
 
-Configured VS Code and JetBrains extension publishers remain independently
-managed. Full monorepo CI generation rejects those sections before reconciling
-workflows; use `simit init ci --primary-only` to regenerate qualification while
-preserving existing extension publishers.
+Recovery reruns the original signed-tag run and reuses its first retained
+archive (including partial uploads); only archives from passing original
+attempts with a passing hosted `validate` builder job qualify (failed attempts
+and duplicate attempt artifact names reject, and the publisher never rebuilds).
+Native builds use root `ci` shell (Python 3.11+, GnuPG, `uv`/npm). Prepared npm
+files must exist after qualification; `publishConfig` access/dist-tag settings
+carry through (custom registries need a separate backend), prereleases require
+`publishConfig.tag`, and `publishConfig.provenance = true` grants OIDC only to
+the protected publisher, where an engine-owned signer uses the worker's global
+npm Sigstore library to attest the admitted tarball digest, signed source, and
+protected publisher revision (its child environment receives OIDC access, with
+no registry token or candidate Node/npm config). Python keeps SemVer in
+source/tags, mapping stable and `alpha`/`beta`/`rc`/`dev` numeric prereleases
+to PyPI normalized versions; SemVer build metadata is unsupported for public
+native releases. All native publication requires `keys/maintainers.gpg`,
+namespaces are limited to 64 ASCII bytes at configuration admission, and npm
+lifecycle scripts stay in registry metadata without ever running in the
+publisher.
 
-Component gates use the same `bash -euo pipefail -c` command semantics locally
-and in generated CI, including quoted commands, environment and timeouts. The
-packaged test suite needs Python's standard library and `actionlint`; these are
-declared in `nix/review-tools.nix`, independently of development-shell tools.
+Public Python verification requires a complete unyanked wheel/sdist pair with
+valid SHA-256 entries; npm provenance policy must be boolean or unset during
+enrollment and credential-free packing, and public npm name admission follows
+npm's legacy-compatible publish validation. Recovery of an already-published
+exact npm archive also verifies its signed distribution tag and repairs that
+registry mapping without rebuilding. Undecodable Git byte paths force full
+qualification while known UTF-8 paths stay in the plan, and Cargo metadata
+paths normalize to `/` on Windows before matching. Independent crates.io
+workflows honor Cargo's registry allowlist (unpublished and alternate-only
+members stay qualified without crates.io workflows; unrestricted members and
+allowlists containing `crates-io` keep both). Native retries verify the
+original hosted upload step's artifact ID and digest from GitHub's
+attempt-specific step logs (same-name replacements do not inherit original
+success; missing/ambiguous logs reject). The Python uploader consumes the
+engine's already-normalized registry version (including prereleases), public
+Python names follow Core Metadata grammar, and npm `private` must be absent or
+boolean.
 
-`release verify` checks eligible packages against the public native registry:
-PyPI's exact release metadata must contain a non-yanked file with a SHA-256 digest,
-and npm's abbreviated metadata must contain the matching package/version and
-distribution integrity. A missing, mismatched, or yanked release fails; transport,
-HTTP and malformed-metadata errors are reported as blocked. Private packages make
-no registry request. These read-only queries use a ten-second request deadline
-and a 4 MiB metadata limit. Cargo publication remains managed by
-`[ci].publish_crates`.
+VS Code and JetBrains extension publishers stay independently managed: full
+monorepo CI generation rejects those configuration sections before reconciling
+workflows, so use `simit init ci --primary-only` to regenerate qualification
+while keeping extension publishers.
+
+Component gates share `bash -euo pipefail -c` semantics (quoting, env, timeouts)
+locally and in CI. The packaged test suite's Python stdlib and `actionlint`
+dependencies live in `nix/review-tools.nix`, independent of devShell tools.
+
+`release verify` checks eligible packages against public registries using
+read-only queries (each request has a ten-second deadline and a 4 MiB metadata
+limit): PyPI exact release metadata must include a non-yanked file with a
+SHA-256 digest, and npm abbreviated metadata must match package/version and
+integrity. Missing, mismatched, or yanked releases fail; transport, HTTP, and
+malformed-metadata errors report blocked; private packages make no registry
+request. Cargo publication stays governed by `[ci].publish_crates`.
