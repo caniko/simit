@@ -6,7 +6,7 @@ Create a patch release commit and signed release tag:
 simit commit patch -m "fix admission edge case"
 ```
 
-Create a release commit without creating a tag:
+Create a release commit without tagging:
 
 ```sh
 simit commit --no-tag patch -m "prepare unreleased patch"
@@ -18,7 +18,7 @@ Preview a release commit without modifying the worktree:
 simit commit --dry-run patch -m "preview patch release"
 ```
 
-Run the local release flow with checks and changelog promotion:
+Run checks and promote the changelog in a local release:
 
 ```sh
 simit release patch -m "release patch"
@@ -35,10 +35,9 @@ simit init gitignore --check
 simit init gitignore --print
 ```
 
-The generated entries cover local build, cache, editor, environment, and
-documentation outputs. Rust and uv/Python-specific entries are added when
-those project types are detected. Review project-specific rules before
-replacing an existing `.gitignore`.
+Entries cover local build, cache, editor, environment, and documentation
+outputs. Simit adds Rust and uv/Python-specific entries when it detects those
+project types. Review project-specific rules before replacing `.gitignore`.
 
 Generate CI workflows for a single-package project:
 
@@ -46,36 +45,36 @@ Generate CI workflows for a single-package project:
 simit init ci --platform forgejo
 ```
 
-Generic Rust CI writes test, lint, and optional quality-gate workflows only. It
-does not create crates.io publish workflows unless release publishing is
-explicitly enabled:
+Generic Rust CI generates only test, lint, and optional quality-gate workflows;
+it does not create crates.io publish workflows unless you opt in:
 
 ```sh
 simit init ci --platform forgejo --publish-crates
 ```
 
-For Cargo workspaces, select the generated workflow set explicitly:
+Select the workflow set explicitly for Cargo workspaces:
 
 ```sh
 simit init ci --platform forgejo --workspace
 simit init ci --platform forgejo --package my-crate
 ```
 
-Workspace CI is rendered per package as `ci-<crate>.yaml`; single-package
-projects keep the stable `ci.yaml` path. With `--publish-crates`, publishable
-workspace members also get `publish-crate-<crate>.yaml`; single-package release
-projects get `publish-crate.yaml`.
+Workspace CI uses `ci-<crate>.yaml` per package; single-package projects keep
+`ci.yaml`. With `--publish-crates`, publishable workspace members get
+`publish-crate-<crate>.yaml`; single-package release projects get
+`publish-crate.yaml`.
 
-For one aggregate GitHub workflow that runs workspace gates once, use:
+Run workspace gates once in an aggregate GitHub workflow:
 
 ```sh
 simit init ci --platform github --runtime nix --workspace --workspace-strategy aggregate
 ```
 
-Aggregate mode is for workspace CI only. By default crate publishing remains
-member-scoped (`publish-crate-<crate>.yaml`, no cross-crate ordering).
+Aggregate mode applies only to workspace CI. With `--publish-crates`, Simit
+generates member-scoped publish workflows (`publish-crate-<crate>.yaml`) by
+default; it adds no cross-crate ordering.
 
-For dependency-ordered workspace publication (opt-in, GitHub only), use:
+Opt in to dependency-ordered workspace publishing on GitHub only:
 
 ```sh
 simit init ci --platform github --runtime nix --workspace --workspace-strategy aggregate --publish-crates --coordinated-publish

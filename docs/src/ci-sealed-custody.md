@@ -1,10 +1,10 @@
 # Sealed original custody (`sealed-v2`)
 
-`sealed-v2` is a prospective acceptance contract. It captures each completed
-original before waiting for siblings, verifies complete evidence, and uses
-immutable artifacts for later custody. A new protocol never repairs or accepts a
-failed historical `strict-v1` ZIP comparison. Native test/build gates and
-consumer-owned execution acceptance remain authoritative.
+`sealed-v2` is a prospective acceptance contract: it captures completed
+originals before waiting for siblings, verifies complete evidence, and retains
+it in immutable artifacts for later custody. Changing protocols never repairs
+or accepts a failed historical `strict-v1` ZIP comparison. Native test/build
+gates and consumer-owned execution acceptance remain authoritative.
 
 ## Select the contract
 
@@ -20,70 +20,69 @@ workflow = ".github/workflows/ci.yaml"
 jobs = ["test"]
 ```
 
-Omitting `protocol` retains the existing generated observer and v1 receipts.
-`strict-v1` explicitly selects that default. Unknown protocol values reject
-before writes. Neither a legacy receipt nor fresh downloads of a producer's
-ephemeral logs can fill a v2 capsule. Installation, live drills, and collector
-retirement still require their own owner acceptance.
+Omit `protocol` or set `strict-v1` to keep the existing generated observer and v1
+receipts. Unknown values fail before writes. Legacy receipts and fresh downloads
+of ephemeral producer logs cannot fill a v2 capsule. Installation, live drills,
+and collector retirement each still require owner acceptance.
 
 The generated workflow has three hosted jobs:
 
 1. **identity** establishes the stable target, with contents-read permissions
    and no token environment. Positively unenrolled paths exit before side effects.
-2. **seal** captures only the completed trigger original. Its concurrency key
-   includes the target and producer run ID, so an aggregate queue cannot delay
-   another original's capture. Contents/actions/checks are read-only. The job
-   uploads its admitted capsule, or nonaccepting failure diagnostics, using the
-   pinned artifact action. It has a 15-minute timeout and a five-minute upload.
+2. **seal** captures only the completed original that triggered it. Concurrency
+   keys on target and producer run ID, so aggregate queues cannot delay another
+   original's capture. Contents/actions/checks are read-only. The pinned artifact
+   action uploads the admitted capsule or nonaccepting failure diagnostics. The
+   job has a 15-minute timeout and a five-minute upload.
 3. **aggregate** independently downloads and verifies exact sealed capsules,
    uploads a receipt naming their immutable IDs/digests, then freshly revalidates
    before posting status on the producer source head. It has contents/actions/
    checks read and statuses write, target-scoped concurrency, and a 25-minute
    timeout. Upload and report run after failures.
 
-Every inline program is the legacy `custody.py` definitions without its entry
-point, followed by `custody_sealed.py`. All four rendered copies must match that
-composition. The entire UTF-8 workflow, including three policy copies and YAML
-escaping, must fit the unchanged 500,000-byte admission limit before any write.
+All four rendered programs must match the legacy `custody.py` definitions
+without the entry point, followed by `custody_sealed.py`. Before any write,
+the full UTF-8 workflow, including three policy copies and YAML escaping, must
+fit the unchanged 500,000-byte limit.
 
-For static qualification, actionlint 1.7.12's
+In actionlint 1.7.12, the
 [external-command runner](https://github.com/rhysd/actionlint/blob/914e7df21a07ef503a81201c76d2b11c789d3fca/process.go)
-writes the entire script to a pipe before starting Pyflakes. Scripts exceeding
-the pipe's capacity can hang that combined invocation. Retain that failed gate;
+writes the entire script to a pipe before starting Pyflakes. Scripts larger
+than the pipe buffer can hang the combined check. Retain that failed gate;
 run `actionlint -pyflakes '' WORKFLOW` for workflow/expression/shell checks and
 `pyflakes EXACT_RENDERED_PROGRAM.py` separately for every distinct inline program.
 The generated v2 copies are identical and must first pass source-byte parity.
 
 ## Capsule completeness
 
-Each capsule binds the full policy, source head/tree, repository numeric identity,
+Each capsule binds the full policy, source head/tree, numeric repository ID,
 exact branch/event/PR/base snapshot, original run ID/attempt, and observer
-installation SHA. Its name hashes all of those inputs. The receipt schema is
-`simit.producer-capsule.v2`; `manifest.json` hashes every retained file except
-itself. The provider's artifact ID and SHA-256 digest seal the entire archive.
+installation SHA. The name hashes these inputs. The receipt uses
+`simit.producer-capsule.v2`; `manifest.json` hashes every other retained file.
+The provider's artifact ID and SHA-256 digest seal the archive.
 
 Capture retains the terminal native run, complete job and artifact inventories,
 direct required-job logs, raw provider log ZIP and member hashes, required artifact
-ZIPs, and native historical executed-workflow proof/commit/blob/bytes. It also
-retains the source-head commit separately from the executed workflow revision.
-The immutable native `WorkflowRun.file` definition remains required; checkout
-logs, today's merge ref, or the producer head cannot substitute for it.
+ZIPs, and native historical executed-workflow proof/commit/blob/bytes. It keeps
+the source-head commit separate from the workflow revision. Custody requires the
+immutable native `WorkflowRun.file` definition, not checkout logs, today's merge
+ref, or the producer head.
 
-A successful provider ZIP being nonempty is insufficient. Every non-skipped
-native terminal job must have a nonempty, unambiguous step inventory. Every
-non-skipped completed step, including setup and post-job cleanup, must have a
-nonempty exact member `<job-name>/<step-number>_<step-name>.txt`. Job names and
-step numbers must be unique. Whole-job rollups cannot replace step members.
-Missing steps, empty members, unsupported filename transformations, or ambiguous
-job names fail closed. Slashes/backslashes in job or step names are unsupported
-by this version of completeness admission. Skipped required jobs still cannot
-qualify. Native job/artifact inventories are fenced again before sealing.
+A nonempty successful provider ZIP is not enough. Every non-skipped native
+terminal job needs a nonempty, unambiguous step inventory. Every non-skipped
+completed step, including setup and post-job cleanup, needs a nonempty exact
+member `<job-name>/<step-number>_<step-name>.txt`. Job names and step numbers
+must be unique. Whole-job rollups cannot substitute. Missing steps, empty
+members, unsupported filename transformations, and ambiguous job names fail
+closed. Slashes/backslashes in job or step names are unsupported by this version of
+completeness admission. Skipped required jobs cannot qualify.
+Seal fences native job/artifact inventories again before sealing.
 
-The existing wire, retention, expansion, inventory, request and six-minute
-budgets remain in force. Each capsule admits at most 100 native jobs; sealed JSON
-records are limited to 1 MiB. Nested ZIPs count toward the same expansion/member
-budget during verification. Archives are hashed and read in memory under those
-bounds, never extracted or executed.
+Existing wire, retention, expansion, inventory, request and six-minute budgets
+still apply. Capsules admit at most 100 native jobs; sealed JSON records cap at
+1 MiB. Verification counts nested ZIPs toward the same expansion/member budget.
+Archives are hashed and read in memory under those bounds, never extracted or
+executed.
 
 ## Independent aggregation and revocation
 
@@ -93,14 +92,14 @@ head/ref/PR alias checks. Duplicate runs, wrong names/qualifiers, reruns, ambigu
 PR associations and snapshot drift reject. Missing or running originals and
 not-yet-uploaded sibling capsules remain waiting on the first observation.
 
-Capsule reuse requires exactly one exact-named artifact. The verifier checks its
+Capsule reuse requires exactly one artifact with the exact name. Verify its
 native owner run, repository, default branch, observer workflow path/name,
 original attempt, installation head, and native executed-file revision. The
-native **seal job must have completed successfully**. A prior observer must be
-terminal, but its aggregate may have failed or been cancelled: Actions can replace
-a pending aggregate even with `cancel-in-progress: false`. This preserves the
-successful seal without changing that observer's failed/cancelled result into a
-successful observation. A collector rerun invalidates reuse.
+native **seal job must have completed successfully**, and for reuse from a
+prior observer, that prior observer must be terminal. Actions can replace
+pending aggregates even with `cancel-in-progress: false`; a failed/cancelled
+aggregate still permits seal reuse without making the observation successful. A
+collector rerun invalidates reuse.
 
 Verification recomputes the outer digest and every manifest/member checksum,
 rechecks nested archive inventories and log completeness, verifies the native
@@ -109,13 +108,12 @@ and artifacts. Different policies/installations/snapshots never share capsules.
 The current upload's action ID/digest must match native metadata. No producer-owned
 artifact, legacy receipt, name-only lookup, or overwrite replacement is proof.
 
-Reporting independently verifies the uploaded aggregate bytes against the local
-receipt and re-verifies its exact capsule IDs/digests. It freshly rediscovers the
-originals, checks native execution definitions, job/artifact inventories and
-collector seal provenance, then publishes with the existing bounded status
-semantics. Native checks and status lookup share one six-minute report budget;
-the independent failure POST retains its own 90-second reserve after budget
-exhaustion. Reporting never starts another six-minute lookup cycle.
+Reporting independently checks uploaded aggregate bytes against the local receipt
+and re-verifies exact capsule IDs/digests. It freshly rediscovers the originals
+and checks native execution definitions, job/artifact inventories and collector
+seal provenance before publishing with the existing bounded status semantics. Native checks and status
+lookup share one six-minute budget, with no second lookup cycle. The independent
+failure POST keeps its own 90-second reserve after exhaustion.
 Success requires every original and required job to succeed and both capsule and
 aggregate uploads to be independently verified. Missing uploaded current evidence,
 deletion, expiry, overwrite, duplicates, changed digests, native drift, lookup
@@ -123,13 +121,13 @@ failure or upload failure publishes failure at the safely admitted source contex
 A waiting receipt cannot downgrade an earlier successful context to harmless
 pending when its accepted capsule set is now missing.
 
-Fresh **producer** ZIP equality is not a v2 acceptance gate: later provider log
-pruning cannot alter already verified sealed bytes. Fresh native revocation and
-exact artifact availability are still mandatory. Artifacts are ID-specific;
-overwrite creates a new ID, and deletion/expiry invalidates future verification.
-The configured 32-day retention does not promise custody beyond provider expiry.
-Post-upload failures are also recorded in report logs and `report-failure.json`;
-that diagnostic is produced after upload and is not part of the uploaded receipt.
+v2 does not require fresh **producer** ZIP equality: later log pruning cannot
+change verified sealed bytes. Fresh native revocation and exact artifact
+availability remain mandatory. Overwrite creates a new artifact ID;
+deletion/expiry invalidates future verification. The configured 32-day retention
+does not guarantee custody beyond provider expiry. Report logs and
+`report-failure.json` record post-upload failures. The diagnostic comes after
+upload and is not part of the uploaded receipt.
 
 ## Installed acceptance
 

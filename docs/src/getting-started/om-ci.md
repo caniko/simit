@@ -1,18 +1,16 @@
 # Omnix CI
 
-`simit init ci --runtime nix --with-om-ci` wires generated Nix CI through
-[Omnix `om ci`](https://omnix.page/om/ci.html). Use it when the project has a
-flake and `checks.*` already covers test, clippy, formatting, and documentation
-work that CI must enforce.
+`simit init ci --runtime nix --with-om-ci` generates Nix CI that uses
+[Omnix `om ci`](https://omnix.page/om/ci.html). Use it when the flake's
+`checks.*` covers the tests, Clippy, formatting, and docs that CI must enforce.
 
-Replace mode is the default. It trades the legacy generated sequence of `nix
-flake check` plus `nix develop -c cargo ...` steps for one `om ci run` step.
-That is fast for projects using simit's generated crane flake because the flake
-checks are the CI contract.
+`--with-om-ci` defaults to replace mode: one `om ci run` step replaces `nix
+flake check` plus `nix develop -c cargo ...`. This is fast with simit's
+generated crane flake, whose checks define the CI contract.
 
-Do not enable replace mode for a custom flake until its checks are audited. If
-the project relies on the cargo dev-shell steps to exercise behavior that is
-not represented in `checks.*`, use augment mode or keep the legacy Nix runtime
+Replace mode assumes `checks.*` covers every required gate. Audit custom flake
+checks before enabling replace mode; if the project relies on a cargo dev-shell
+step outside `checks.*`, use augment mode or keep the legacy Nix runtime
 workflow.
 
 ## Enable Replace Mode
@@ -47,8 +45,7 @@ jobs:
         run: nix run "$OMNIX_REF" -- ci run
 ```
 
-Forgejo + Nix workflows keep the existing trigger rule: they run on branch
-pushes and skip `pull_request` events.
+Forgejo + Nix workflows run on branch pushes and skip `pull_request` events.
 
 ## Enable Augment Mode
 
@@ -123,10 +120,9 @@ ref = "github:juspay/omnix/v1.3.2"
 
 `--with-om-ci` requires `--runtime nix`.
 
-Replace mode assumes the flake checks are complete. For custom flakes, audit
-`[flake.expected_outputs].checks` before replacing the generated cargo
+Replace mode assumes `checks.*` covers every required gate. For custom flakes,
+audit `[flake.expected_outputs].checks` before replacing the generated cargo
 dev-shell steps.
 
-`cargo-audit` and `cargo-deny` still render as discrete generated steps when
-requested, even under replace mode. Projects that also run those tools from
-`checks.*` will run them twice.
+Requested `cargo-audit` and `cargo-deny` steps stay separate, including in
+replace mode. If `checks.*` also runs those tools, they run twice.

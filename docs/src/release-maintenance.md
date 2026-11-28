@@ -1,14 +1,14 @@
 # Release Maintenance
 
-The `pinned-tools` compatibility job builds the exact packaged review engine,
-exports the conventional fixture's closure, then explicitly runs both CI-only
-`review_retrieval` tests. Acceptance requires the empty-cache miss, rejection of
+The `pinned-tools` compatibility job builds the exact packaged review engine
+and exports the conventional fixture's closure before explicitly running both
+CI-only `review_retrieval` tests. They require an empty-cache miss, rejection of
 unsigned and wrong-key copies even with consumer signature checks disabled, and
-an exact closure comparison after a correctly signed restore into a new store.
-The job retains the sealed fixture and actual retrieval-test log with its
-source-bound engine evidence; ordinary Cargo tests leave these tests ignored.
+exact closure equality after a correctly signed restore into a new store. The
+job retains the sealed fixture and actual test log with its source-bound engine
+evidence. Ordinary Cargo tests skip both.
 
-Before publishing a release, add intended changes under `## [Unreleased]` in
+Before publishing, add intended changes under `## [Unreleased]` in
 `CHANGELOG.md` and validate the changelog:
 
 ```sh
@@ -21,17 +21,17 @@ Run the local release flow:
 simit release patch -m "release patch"
 ```
 
-The GitHub archive-builder workflow runs when an exact signed semver tag is
-pushed. It verifies the tag against `keys/maintainers.gpg`, checks the package
-version and retains credential-free package archives. The independent publisher
-runs from the default branch on fresh hosted workers, verifies source, signer,
-tag, run, attempt and archive custody, then admits the exact archives to upload.
-Only its upload job enters `simit-crates-io` and receives `CRATES_IO_API_TOKEN`.
+Pushing an exact signed semver tag triggers GitHub's archive builder. It verifies
+the tag against `keys/maintainers.gpg`, checks the package version and retains
+credential-free archives. On fresh hosted workers, the independent default-branch
+publisher verifies source, signer, tag, run, attempt and archive custody before
+admitting those exact archives. Only its upload job enters `simit-crates-io` and
+receives `CRATES_IO_API_TOKEN`.
 
-Enroll that environment with deployment restricted to the literal default branch,
-and set the repository variable `SIMIT_PUBLISHER_REVISION` to an independently
-qualified immutable Simit revision. Keep repository-level publisher token copies
-absent. See [CI adoption](getting-started/ci-adoption.md) for the enrollment and
+Enroll the environment with deployment restricted to the literal default branch.
+Set repository variable `SIMIT_PUBLISHER_REVISION` to an independently qualified
+immutable Simit revision. Don't store repository-level publisher token copies.
+See [CI adoption](getting-started/ci-adoption.md) for enrollment and the
 independent-engine contract.
 
 Generate or refresh crates.io publish workflows explicitly:
@@ -40,47 +40,45 @@ Generate or refresh crates.io publish workflows explicitly:
 simit init ci --platform github --ci-provider actions --runtime nix --publish-crates
 ```
 
-For workspace repositories, each generated `publish-crate-<crate>.yaml`
-validates the version of the package it publishes rather than comparing the tag
-to the first version returned by workspace-wide metadata.
+In workspaces, each generated `publish-crate-<crate>.yaml` checks the tag against
+its own package version, not the first version in workspace-wide metadata.
 
-Release-enabled `simit init ci` runs and `simit release trust init` generate
+Release-enabled `simit init ci` and `simit release trust init` generate
 `keys/maintainers.gpg` from `[release.signing].key`, `git config
 user.signingkey`, or an explicit `--key`/`--maintainer-key` override. Generic
-CI-only runs do not require this trust root. Run `simit release trust check`
-before publishing if you want to validate the committed trust root separately
-from workflow generation.
+CI-only runs don't need this trust root. To validate the committed root
+separately from generation, run `simit release trust check` before publishing.
 
-If a release workflow fails after its tag is pushed, retain the failed candidate
-and diagnose that exact original run. A transient native signed-tag failure may
-retry its original run after source and signature verification. An uncertain
-upload first reconciles the exact unyanked registry name, version and archive
-checksum; it never blindly reuploads. Source fixes need a fresh version and
-signed tag with new qualification. Never move a published release tag.
+If a release workflow fails after its tag is pushed, retain the candidate and
+diagnose the exact original run. Retry a transient native signed-tag failure on
+that run only after verifying source and signature. For an uncertain upload,
+reconcile the exact unyanked registry name, version and archive checksum first;
+never blindly reupload. Source fixes require a fresh version, a new signed tag,
+and fresh qualification. Never move a published release tag.
 
-Projects that publish Windows packages can add Chocolatey and Scoop jobs to
-the release artifact workflow. See
+Windows package publishers can add Chocolatey and Scoop jobs to the release
+artifact workflow. See
 [Windows Packaging](getting-started/windows-packaging.md) for the required
 simit project config sections, CI flags, and secrets.
 
-Projects that publish release artifacts must also commit the artifact signing
-trust roots and configure signing secrets. See
+To publish release artifacts, commit the signing trust roots and configure
+signing secrets. See
 [Release Integrity](getting-started/release-integrity.md) for the
 `keys/minisign.pub`, minisign, cosign, and SLSA requirements generated by
 `simit init ci --with-artifacts`.
 
-For Nix projects using harbor-rs, configure an explicit
-`[release.artifacts].nix_bundle_attrs` list. Each configured output must be a
-flat bundle, and the complete configured set must produce exactly one
-versioned `*-release-manifest.json`; Simit validates its schema and release
+For harbor-rs Nix projects, set an explicit `[release.artifacts].nix_bundle_attrs`
+list. Each output must be a flat bundle; together they must produce exactly one
+versioned `*-release-manifest.json`. Simit validates its schema and release
 version before checksums and hosted-release upload. Project-specific
-`build_commands` remain additive for formats outside this contract.
+`build_commands` remain additive and supplement the configured bundles for
+formats outside this contract.
 
 ### Building release archives with Cargo
 
-Use `[[release.artifacts.cargo]]` to build directly on GitHub or Forgejo
-Actions runners, without Nix or a flake in the build job. The local
-`simit release verify` command still requires a Simit-managed flake. For example:
+Use `[[release.artifacts.cargo]]` to build on GitHub or Forgejo Actions without
+Nix or a flake in the build job. Local `simit release verify` still requires a
+Simit-managed flake. Example Cargo archive build:
 
 ```toml
 [[release.artifacts.cargo]]
@@ -94,40 +92,38 @@ archive = "modde-{version}-x86_64-linux.tar.gz"
 setup = "sudo apt-get update && sudo apt-get install -y libwayland-dev libxkbcommon-dev"
 ```
 
-For Linux arm64, add a second entry with its own ID and archive name,
+For Linux arm64, add a second entry with a distinct ID and archive name,
 `runner = "ubuntu-24.04-arm"`, and `target = "aarch64-unknown-linux-gnu"`.
-Use matching runner and Rust host triples on macOS and Windows as well
+Match runner and Rust host triples on macOS and Windows too
 (for example, `macos-15` with `aarch64-apple-darwin`, or `windows-2022`
-with `x86_64-pc-windows-msvc`). The runner needs Bash and rustup; `setup`
-is optional Bash run before the build. Pin `toolchain` to an exact Rust
+with `x86_64-pc-windows-msvc`). Runners need Bash and rustup. Optional `setup`
+runs Bash before the build. Pin `toolchain` to an exact Rust
 release or dated nightly. The job runs `cargo build --release --locked`
 with the listed `binaries` and optional `packages`, `features`, and
 `default_features = false`. Windows appends `.exe` to the binary names.
-Linux requires `readelf` and rejects binaries whose interpreter, needed library
-(`DT_NEEDED`), RPATH or RUNPATH points into `/nix/store`. The runner image
-sets the glibc baseline; this check does not establish compatibility with
-older distributions.
+Linux jobs need `readelf` and reject binaries whose interpreter, needed library
+(`DT_NEEDED`), RPATH or RUNPATH points into `/nix/store`. The runner image sets the glibc
+baseline; this check doesn't prove compatibility with older distributions.
 
-Archives are flat unless you set a single directory `prefix`. `archive` must
+Archives are flat unless you set one directory `prefix`. `archive` must
 be a distinct `.tar.gz` or `.zip` filename; `archive` and `prefix` accept
 `{version}` without the leading `v`. ZIP creation uses `zip` on Linux and
 macOS and the system `tar.exe` on Windows. Simit collects the archives after
 other build commands and Windows PFX repacking, before SignPath, checksums and
-hosted upload. They can replace or coexist with Nix bundles; do not reuse the
-same asset name. The Cargo build jobs never install Nix. The separate tag
-validation job is native by default, including when it precedes Nix builds.
+hosted upload. They can replace or coexist with Nix bundles under distinct asset
+names. Cargo build jobs never install Nix. The separate tag validation job
+defaults to native execution, even before Nix builds.
 It sets up Nix for `version_attr` or a required gate whose command starts with
 `nix`. Set `validation_nix = true` under `[release.artifacts]` if a wrapper
 script needs Nix, or `false` if the gates provide their own Nix. A configured
-`version_attr` always requires Nix. The publishing job still uses the
-existing Nix-backed tools.
+`version_attr` always requires Nix. Publishing still uses Nix-backed tools.
 `simit binstall sync` still reads a Nix bundle, not these Cargo entries.
 
 ### Promoting archive members to release assets
 
-`[[release.artifacts.extract]]` copies one member of a release archive into
-`release/` as its own asset, for example the lone `sorrel.exe` inside a Windows
-zip. Package managers keep consuming the archive.
+`[[release.artifacts.extract]]` copies one archive member into `release/` as a
+separate asset, such as `sorrel.exe` from a Windows zip. Package managers still
+consume the archive.
 
 ```toml
 [[release.artifacts.extract]]
@@ -136,12 +132,12 @@ member  = "sorrel.exe"
 asset   = "sorrel-{version}-x86_64-windows.exe"
 ```
 
-The generated "Promote archive members to release assets" step runs after
-`release/` is populated (Nix bundles, prebuilt native archives, Windows
-signing) and before checksums. It fails when the archive or member is missing
-or `release/<asset>` already exists, and keeps the member's mode. Promoted
-assets are always added to `SHA256SUMS.txt`, cosign and provenance signing and
-the GitHub/Forgejo upload, even when `checksum_globs` is restrictive.
+"Promote archive members to release assets" runs after populating `release/`
+(Nix bundles, prebuilt native archives, Windows signing) and before checksums.
+It keeps the member's mode and fails if the archive or member is missing or
+`release/<asset>` exists. Promoted assets always go into `SHA256SUMS.txt`,
+cosign and provenance signing, and GitHub/Forgejo uploads, even with restrictive
+`checksum_globs`.
 
 `{version}` is the only placeholder. `archive` and `asset` are bare file names,
 `member` is a relative path without `..`, and archives end in `.zip`, `.tar.gz`

@@ -1,14 +1,13 @@
 # Release Plan
 
-`simit release plan` prints the publish order for the current workspace by
-reading `cargo metadata --no-deps` and sorting local path dependencies before
-their dependents. Only publish-ordering kinds create edges: normal, build,
-optional, and target-specific path dependencies. Dev-dependencies are ignored
-by `cargo publish` and by the plan, so a publishable crate may dev-depend on a
-`publish = false` helper (e.g. `xtask`) and still publish. Workspace-inherited
-versions, renamed dependencies (`package = "real"`), optional, and
-target-specific dependencies are resolved through directory mapping to real
-package names; ties between independent crates break alphabetically.
+`simit release plan` reads `cargo metadata --no-deps` and prints the current
+workspace's publish order: local path dependencies before dependents. Only
+normal, build, optional, and target-specific path dependencies create edges.
+The plan and `cargo publish` ignore dev-dependencies for ordering, so crates
+can dev-depend on a `publish = false` helper like `xtask` without blocking
+publication of the dependent. The plan maps
+directories to real package names for workspace-inherited versions, renamed
+dependencies (`package = "real"`), and optional and target-specific dependencies.
 
 ```sh
 simit release plan
@@ -17,8 +16,8 @@ simit release plan --dry-run-package
 simit release plan --package sorrel-ui
 ```
 
-The default text output is stable across runs. Ties between independent crates
-are broken alphabetically by package name.
+The plan is stable across runs and breaks ties between independent crates
+alphabetically by package name. Default text output looks like:
 
 ```text
 publish order (3 crates):
@@ -28,18 +27,17 @@ publish order (3 crates):
 non-publishable members skipped: xtask
 ```
 
-Non-publishable workspace members (`publish = false`) are never emitted in the
-publish order. They are listed separately in text output so the chaperone can
-see exactly what was skipped.
+The publish order excludes non-publishable workspace members (`publish = false`).
+Text output lists them separately.
 
 ## Package Selection
 
-Without `--package`, simit plans every publishable workspace member. When
-`--package <name>` is present, simit treats the named crate as a publish root
-and includes any publishable local path dependencies needed to reach it.
+Without `--package`, simit plans every publishable workspace member.
+`--package <name>` selects the named crate as the publish root and includes its
+transitive publishable local path dependencies.
 
-If a selected publishable crate depends on a non-publishable workspace member,
-the command fails instead of silently omitting the dependency.
+The command fails if that dependency closure requires a non-publishable
+workspace member; dev-dependencies do not create edges.
 
 ## Dry-Run Packaging
 
@@ -49,13 +47,12 @@ the command fails instead of silently omitting the dependency.
 cargo package -p <crate> --allow-dirty --no-verify
 ```
 
-for each crate in publish order. This is archive construction only
-(`--no-verify`): it proves the `.crate` file builds, not that packaged
-contents verify, not a registry dry-run, and not publication. Current Cargo
-does not accept `cargo package --dry-run`; simit never introduces it.
-simit stops on the first packaging failure and returns exit code `1`.
+for each crate in publish order. `--no-verify` tests only `.crate` creation:
+no verification build, registry dry-run, or publication. Current Cargo does not
+accept `cargo package --dry-run`, so simit never calls it. The first packaging
+failure stops the command with exit code `1`.
 
-Four stages, honestly separated:
+Four separate stages:
 
 1. Archive construction: `cargo package --allow-dirty --no-verify`.
 2. Verification build from packaged contents: `cargo package --allow-dirty`
@@ -65,18 +62,17 @@ Four stages, honestly separated:
 4. Actual publication: `cargo publish`, prerequisites before dependents with
    bounded propagation waits.
 
-For a new workspace whose internal versions are not yet on crates.io, stage 2
-initially fails for dependents (sibling source paths do not prove published
-crates will build). Use staged verification: publish prerequisites first in
-plan order (or to a disposable registry for pre-publish checks with a temp
-`source` replacement that is never committed), then re-run stage 2 for
-dependents. Never commit local registry overrides or path patches into
-publishable manifests. See `docs/integrations/chaosbox-v1.md` for the tested
-procedure.
+For a new workspace with internal versions not yet on crates.io, stage 2
+fails for dependents: sibling source paths don't prove published crates build.
+Publish prerequisites in plan order to crates.io (or to a disposable registry
+with a temporary, uncommitted `source` replacement for pre-publication checks),
+then rerun stage 2 for dependents. Never commit local registry overrides or path
+patches to publishable manifests. See `docs/integrations/chaosbox-v1.md` for the
+tested procedure.
 
 ## JSON Schema
 
-`--json` prints one ordered array. Each item has this shape:
+`--json` prints one array in publish order:
 
 ```json
 [
@@ -90,8 +86,8 @@ procedure.
 ]
 ```
 
-The array order is the publish order. `depends_on` lists only local publishable
-workspace dependencies that must be published first.
+`depends_on` lists only local publishable workspace dependencies that must
+publish first.
 
-`--json` and `--dry-run-package` are mutually exclusive so the JSON stream stays
+`--json` and `--dry-run-package` are mutually exclusive to keep JSON
 machine-readable.

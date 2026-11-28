@@ -2,72 +2,73 @@
 
 **Status: procedure prepared; installed-observer acceptance is not established.**
 Candidate tests, generator parity, a successful inert producer, and PR workflow
-checks qualify the candidate only. Replacement of a waiting collector requires
-the live evidence below from an independently authorized trusted default-branch
-installation. Keep the collector and existing required test/build/receipt gates
-until the consumer owner accepts that evidence.
+checks qualify only the candidate. Keep the waiting collector and required
+test/build/receipt gates until the consumer owner accepts the live evidence
+specified below from an independently authorized trusted default-branch
+installation.
 
-This procedure describes the default `strict-v1` installation. The explicit
-`sealed-v2` successor has an additional [sealed-custody contract and acceptance
-matrix](ci-sealed-custody.md). Changing that protocol is prospective; it does not
-reclassify historical failed ZIP checks or establish installed-runtime acceptance.
+This procedure covers the default `strict-v1` installation. Explicitly selecting
+`sealed-v2` adds the [sealed-custody contract and acceptance matrix](ci-sealed-custody.md).
+The change applies prospectively: it neither reclassifies historical failed ZIP
+checks nor establishes installed-runtime acceptance.
 
 ## Freeze the installation and authority
 
 The repository owner chooses a same-repository acceptance environment and
-authorizes its default-branch installation separately. Record repository name
+separately authorizes its default-branch installation. Record repository name
 and numeric ID, default branch, installation commit/tree, Simit source commit,
 generator binary checksum, policy, generated workflow checksum, and the existing
-branch-protection/ruleset configuration. Never use a candidate PR as authority to
-install a privileged observer. Recheck these identities before each drill.
+branch-protection/ruleset configuration. A candidate PR never authorizes
+privileged observer installation. Recheck these identities before each drill.
 
 Generate `.github/workflows/producer-custody.yaml` with the exact qualified Simit
-binary using `simit init ci`, then `simit init ci --check --diff`. Extract each of
-the three inline Python programs from the generated YAML and compare its bytes
-with `src/render/ci/custody.py`. Inspect the installed workflow: hosted runners,
+binary: run `simit init ci`, then `simit init ci --check --diff`. Extract all three
+inline Python programs from the YAML and compare their bytes with
+`src/render/ci/custody.py`. Check the installed workflow for hosted runners,
 collect-scoped contents/actions/checks read and statuses write, contents-read
 identity job with an eligibility gate for unenrolled paths, no checkout,
 no producer code execution, no archive extraction, upload before reporting,
 `always()` upload/report, 25-minute collection and five-minute upload timeout.
 Record all immutable action references. Retain the installation PR and approval.
 
-Candidate publication is outside this procedure. In Simit's current stack,
-#48 owns primary-only regeneration/publication preservation, #58 owns the
-independent publisher, #54 owns grouping/lanes, and #56 owns dependency transport.
-Qualification of their combined generation must preserve each policy and output;
-completion custody neither publishes packages nor replaces those owners' gates.
+Candidate publication is out of scope. In Simit's current stack, #48 owns
+primary-only regeneration/publication preservation, #58 the independent publisher,
+#54 grouping/lanes, and #56 dependency transport. Combined qualification must
+preserve each policy and output. Custody neither publishes packages nor replaces
+those gates.
 
 ## Reproducible producers
 
-Use two small, same-repository producers named `Custody acceptance A` and
-`Custody acceptance B`, with exact workflow paths `custody-acceptance-a.yaml`
-and `custody-acceptance-b.yaml` beneath `.github/workflows/`. Each has one hosted
-job named `fixture`, only contents-read permissions, and triggers on branch
-`push` and `pull_request`. Do not use `workflow_dispatch`: it is not an admitted
-producer event. Do not give these producers shared concurrency groups; preserve
-both events and case-distinct branches. Their only artifact is `custody-fixture`.
+Use two small same-repository producers: `Custody acceptance A` and
+`Custody acceptance B`, at `custody-acceptance-a.yaml` and
+`custody-acceptance-b.yaml` under `.github/workflows/`. Each has one hosted
+`fixture` job, contents-read only, and triggers on branch `push` and
+`pull_request`. `workflow_dispatch` is not admitted. Do not give these producers a shared
+concurrency group, so both events and case-distinct branches are preserved. The
+only artifact is `custody-fixture`.
 
 Enroll these names/paths/jobs/artifacts in the acceptance repository's custody
-policy, with `producer_attempt = 1` and a prefix of at most 22 UTF-8 bytes. Create
-the producers as project-owned workflow templates and generate them through
-Simit's `ci.workflow_templates`. Use the immutable upload-artifact action from
-the qualified generator. Each producer's Python step reads its own delay from
-`vars.CUSTODY_A_DELAY` or `vars.CUSTODY_B_DELAY` (default zero, reject values
-outside 0–600 seconds), sleeps, and writes these inert files to runner temp:
+policy with `producer_attempt = 1` and a prefix of at most 22 UTF-8 bytes.
+Create the producers as project-owned workflow templates and generate the
+producer workflows through Simit's `ci.workflow_templates`. Use the qualified
+generator's immutable upload-artifact action. Each producer's Python step reads
+its delay from `vars.CUSTODY_A_DELAY` or `vars.CUSTODY_B_DELAY` (default zero,
+reject values outside 0–600 seconds), sleeps, and writes these inert files to
+runner temp:
 
 - `inert-producer-data.py`: `raise RuntimeError("must remain inert")`;
 - `source.json`: repository, event, source head, branch, run ID, attempt and
   SHA-256 of the inert bytes. For PRs take head/ref from the event's
   `pull_request.head`, not `GITHUB_SHA` (which can be a merge SHA).
 
-Upload that directory as `custody-fixture`, failing if no files exist. These
-fixtures need no checkout. Retain their exact template bytes at the source head.
-Give jobs enough timeout for the delay and upload. Ordinary workflows may run
-alongside them; their checks remain authoritative.
+Upload the directory as `custody-fixture`; fail if empty. No checkout is needed.
+Retain exact template bytes at the source head. Set each job timeout to cover
+delay and upload. Ordinary workflows may run alongside the fixtures and their
+checks remain authoritative.
 
-Use this template for A; for B replace the workflow name and `CUSTODY_A_DELAY`
-with B's equivalents. The upload pin must equal the qualified installation's
-pin (the example is the current GitHub-hosted pin).
+For B, replace A's workflow name and `CUSTODY_A_DELAY` with B's equivalents.
+Use the qualified installation's upload pin; the example shows the current
+GitHub-hosted pin.
 
 ```yaml
 name: Custody acceptance A
@@ -117,8 +118,8 @@ jobs:
           path: ${{ runner.temp }}/custody-fixture
 ```
 
-In the acceptance repository's `simit.toml`, configure the two template mappings
-and this enrollment before generating and reviewing the installation:
+Set both template mappings and enrollment in the acceptance repository's
+`simit.toml` before generating and reviewing the installation:
 
 ```toml
 [ci.workflow_templates]
@@ -140,8 +141,8 @@ artifacts = ["custody-fixture"]
 ```
 
 The following examples use **Bash** and `gh` from an independently authorized
-operator checkout. Set `REPO`, `BASE`, `HEAD`, `BRANCH`, producer run IDs and
-observer run IDs to recorded real values; never copy an example SHA into evidence.
+operator checkout. Set `REPO`, `BASE`, `HEAD`, `BRANCH`, and producer and
+observer run IDs to recorded values. Never copy an example SHA into evidence.
 
 ```bash
 gh variable set CUSTODY_A_DELAY --repo "$REPO" --body 0
@@ -153,12 +154,13 @@ gh run list --repo "$REPO" --commit "$HEAD" --limit 100 \
   --json databaseId,workflowName,event,headSha,status,conclusion,attempt
 ```
 
-Wait until A's observer has uploaded a waiting receipt and published pending
-before B completes. If 300 seconds is insufficient, choose up to 600 and start
-with a **new source commit**, retaining the incomplete drill as nonacceptance.
-Do not rerun a producer to repair a positive drill. Reverse the variables (A=300,
-B=0), push another new commit and repeat. Record variables and actual completion
-timestamps; delays alone do not prove completion order.
+Confirm from receipt, status, and completion timestamps that A's observer
+uploaded a waiting receipt and published pending before B completed. If
+300 seconds is too short, retain the incomplete drill as nonacceptance and
+restart with up to 600 and a **new source commit**. Never rerun a producer to
+repair a positive drill. Reverse the variables (A=300, B=0), push another new
+commit and repeat. Record variables and completion timestamps: delays alone
+do not prove order.
 
 ## Required live matrix
 
@@ -177,21 +179,20 @@ timestamps; delays alone do not prove completion order.
 | Snapshot drift              | Pause after capture in that trusted test installation, then advance the PR base without changing its ref                                | Real run-details responses must show a changed observed base SHA. Report rejects the snapshot and revokes the same stable context. If GitHub does not expose the change, mark this live drill unproven; a synthetic contract is not live evidence.                                                          |
 | Failure publication reserve | Trusted test installation induces slow/failed report lookups within the declared budget, after an earlier success                       | Lookup exhaustion still reaches the independent bounded failure POST before job timeout. Retain timestamps, failed lookup and final status.                                                                                                                                                                 |
 
-Fault injection belongs to an independently reviewed, immutable **trusted test
-installation**, not producer-controlled code, archives, environment values or
-candidate-selected scripts. Preserve the installed program's admission and
-report logic; record the exact orchestration-only patch (for example a failing
-upload action or a bounded pause immediately before report). Repeat positive
-drills on the unmodified qualified installation after restoring it. Testing a
-modified installation alone does not qualify the production installation.
+Inject faults only in an independently reviewed, immutable **trusted test
+installation**, never via producer-controlled code, archives, environment values
+or candidate-selected scripts. Preserve admission and report logic and record
+the exact orchestration-only patch (e.g., a failing upload action or a bounded
+pause just before report). Restore the unmodified qualified installation and
+repeat positive drills; testing the modified installation alone cannot qualify
+production.
 
-For post-upload drills, the operator first records a real successful upload ID
-and time, then mutates the real producer/base during the bounded report pause.
-Retain the receipt snapshot and subsequent native API responses. Do not edit a
-receipt to manufacture snapshot drift. A race missed by the operator is not a
-pass. Malformed/missing PR associations have no safely established reporting
-target; rejection before receipt is expected, and does not prove revocation of
-an arbitrary old target.
+For post-upload drills, record the successful upload's real ID and time before
+mutating the real producer/base during the bounded report pause. Retain the
+receipt snapshot and subsequent native API responses. Never edit receipts to
+manufacture drift. A missed race is not a pass. Malformed/missing PR associations
+leave no safe reporting target: expect rejection before receipt, not proof of
+revocation of an arbitrary old target.
 
 ## Retain and verify the evidence
 
@@ -216,33 +217,34 @@ gh api --paginate "repos/$REPO/commits/$HEAD/statuses?per_page=100" \
   > "$EVIDENCE/$RUN/status-history-pages.json"
 ```
 
-Save the status history **after each transition**, with capture time, rather than
-only the combined latest-status endpoint. Fetch exact job-ID logs and raw ZIP
-bytes by admitted artifact ID with `gh api`; retain provider digest and compute
-the local SHA-256. For rerun drills also retain jobs/logs for attempt 2. Poll
-boundedly for terminal observer runs and retain cancelled/failed predecessors;
-their evidence never substitutes for the required observation.
+Save timestamped status history **after each transition**, not just the combined
+latest status. Fetch exact job-ID logs and raw ZIP bytes by admitted artifact ID
+with `gh api`; retain the provider digest and compute local SHA-256. For rerun
+drills retain attempt 2 jobs/logs too. Bound polling for terminal observer runs.
+Keep cancelled/failed predecessors; they cannot substitute for the required
+observation.
 
-Inspect custody receipts and members in a separate credential-free local audit
-environment. The privileged observer must not extract producer ZIPs or execute
-their contents. Check original attempt-1 job IDs, enrolled names, repository IDs,
+Audit receipts and members locally in a separate credential-free environment.
+The privileged observer must not extract producer ZIPs or execute their contents.
+Check original attempt-1 job IDs, enrolled names, repository IDs,
 source head/tree and raw workflow paths against native API/source responses.
 Separately bind each `workflow_revision` to GitHub's documented
 [`WorkflowRunFile`](https://docs.github.com/en/graphql/reference/actions#workflowrunfile)
 (an executed workflow file), including repository, parent run, attempt, event,
 check-suite identity and an immutable `repositoryFileUrl`. Verify its retained
 workflow commit/tree, Git blob checksum, exact workflow bytes and per-producer
-`source_workflow_sha256`. The source head and workflow commit need not be equal.
+`source_workflow_sha256`. Source head and workflow commit may differ.
 GitHub documents [`GITHUB_WORKFLOW_SHA`](https://docs.github.com/en/actions/reference/variables-reference)
-separately from checkout/event SHAs; producer-written values or checkout logs are
-not native executed-file proof. Never resolve today's mutable merge ref to invent
-a historical definition. If native proof is unavailable, the live row remains
-unaccepted and custody must not report success. Retain capture-final proof and
-report-time logs, including failed/mutable/drifting proof revocation.
+separately from checkout/event SHAs. Producer-written values, checkout logs and today's mutable merge ref cannot
+prove the historical definition; never resolve today's mutable merge ref to
+invent a historical definition. Without native proof, leave the live row
+unaccepted; custody must not report success. Retain
+capture-final proof and report-time logs, including failed/mutable/drifting
+proof revocation.
 
-Bare and ref-qualified paths must match the enrolled file
-and the observed head/ref/exact PR; wrong qualifiers must reject. Verify that
-archive member hashes match inert bytes, and bounds are present in the receipt.
+Match bare and ref-qualified paths to the enrolled file and observed
+head/ref/exact PR; reject wrong qualifiers. Check member hashes against inert
+bytes and confirm the receipt includes bounds.
 
 Independently recompute the context from the receipt's stable `snapshot.target`:
 
@@ -252,19 +254,18 @@ context = prefix + '/' + target['event'] + '/' + hashlib.sha256(canonical).hexdi
 assert len(context.encode()) <= 100
 ```
 
-The head SHA selects the commit-status endpoint and is included separately in
-concurrency; `observed_base_sha` is an admission snapshot, not part of this stable
-key and not historical base-execution provenance. Confirm repository casing is
-normalized while ref casing is exact. Compare concurrency output across every
-isolation drill. Use status timestamps and observer logs to prove upload precedes
-fresh revalidation and success, and that later failure replaces prior success.
-The post-upload diagnostic `report-failure.json` is written after artifact upload;
-retain report logs/status history as well as the uploaded capture receipt.
+The head SHA selects the status endpoint and enters concurrency separately.
+`observed_base_sha` is an admission snapshot, not part of the stable key or
+historical base-execution provenance. Confirm normalized repository casing and
+exact ref casing. Compare concurrency output across every isolation drill. Use
+status timestamps and observer logs to prove upload precedes fresh revalidation
+and success, and later failure replaces success. `report-failure.json` comes
+after artifact upload; retain report logs/status history and the uploaded receipt.
 
-The consumer owner signs off a manifest tying every matrix row to installation,
+The consumer owner approves a manifest tying every matrix row to installation,
 producer/observer run and attempt IDs, heads, stable contexts, status IDs/states,
 artifact IDs/digests, logs and observed API snapshots. Missing, cancelled or
-ambiguous rows remain open. Only then propose a separate collector-retirement
-change with the exact target-context enrollment and unchanged required native
-test/build/consumer receipt gates. Candidate readiness and observer-replacement
-readiness must be reported separately.
+ambiguous rows stay open. Only after sign-off, propose separate collector
+retirement with exact target-context enrollment and unchanged required native
+test/build/consumer receipt gates. Report candidate and observer-replacement
+readiness separately.

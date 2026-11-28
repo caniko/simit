@@ -1,23 +1,23 @@
 # Runtime admission
 
-Simit's `runtime_admission` library runs bounded readiness probes. The
-independent `simit runtime admit` command is a thin adapter over that library.
-Networking policy and systemd service integration belong to consumers such as
-canix-toolbelt. Consume the published library directly through Cargo.
+Simit's `runtime_admission` library runs bounded readiness probes. Use the
+published library directly through Cargo or run its standalone
+`simit runtime admit` adapter. Consumers such as canix-toolbelt own networking
+policy and systemd integration.
 
 ## Contract
 
 Each invocation has its own attempt count, monotonic overall deadline,
 per-probe deadline, cancellable backoff, and aggregate stdout/stderr budgets.
-Only explicitly enrolled nonzero exit codes retry. Cancellation, a hanging
-probe, byte overflow, dispatch/capture failure and unenrolled denial are
-terminal. Diagnostic text never decides retry eligibility.
+Only explicitly enrolled nonzero exit codes are retryable; diagnostic text never
+affects retry eligibility. Cancellation, probe hangs, byte overflow,
+dispatch/capture failure and unenrolled denial are terminal.
 
-Success records one fresh observation. It is not a durable grant, cached
-success, or an atomic guarantee that readiness persists until the workload
-starts. Every new invocation dispatches a new probe. Recovery resumes a
-pending invocation only within its budget; after exhaustion a new start
-request must create a new invocation.
+Success records one fresh observation, not a durable grant, cached result, or
+atomic guarantee of readiness at workload start. Every invocation dispatches
+a fresh probe. Recovery resumes a pending invocation only within that
+invocation's remaining budget; once that budget is exhausted, a new start
+request requires a new invocation.
 
 ## Version-1 input
 
@@ -40,57 +40,57 @@ request must create a new invocation.
 }
 ```
 
-The executable and working directory must be absolute. Argument and environment
-vectors are explicit; the runner clears inherited environment variables and
-performs no shell parsing. If the caller explicitly selects a shell, that
-caller owns the shell command's policy. Probe environment values are not
-copied into receipts. Unknown fields, unsupported versions, NULs and oversized
-input reject before execution.
+Use absolute executable and working directory paths and explicit argument and
+environment vectors. The runner clears inherited environment variables and
+never parses shell commands. Callers that explicitly select a shell own its
+command policy. Receipts omit probe environment values. The runner rejects
+unknown fields, unsupported versions, NULs and oversized input before execution.
 
-Input is capped at 64 KiB. Each stream's aggregate budget is 1 byte to 8 MiB,
-attempts are capped at 256, and the overall execution budget is at most one
-hour. The per-probe deadline cannot exceed the overall deadline. A probe is
-clamped to the invocation's remaining time and byte budgets.
+Limits: 64 KiB input, 1 byte to 8 MiB aggregate per stream, 256 attempts, and
+one hour total execution. The per-probe deadline cannot exceed the overall
+deadline. The runner clamps each probe to the invocation's remaining time and
+per-stream byte budgets.
 
 ```sh
 simit runtime admit --spec /path/to/spec.json --evidence /run/my-gate/invocation-1
 ```
 
-The evidence directory must be new and its parent must exist. On Unix it is
-created with mode 0700. Probe streams are retained as `attempt-N.stdout` and
-`attempt-N.stderr`; `receipt.json` is capped at 64 KiB and contains input
-SHA-256, actual observation timestamps, monotonic elapsed time, all attempt
-statuses and retained lengths, and a typed terminal outcome. The CLI also
-prints the receipt as JSON and exits successfully only for `admitted`.
-Reusing an existing evidence directory is an error, not success reuse.
+Use a new evidence directory under an existing parent. On Unix the runner
+creates it with mode 0700. It saves probe streams as `attempt-N.stdout` and
+`attempt-N.stderr`. The `receipt.json` file (max 64 KiB) records input SHA-256,
+actual observation timestamps, monotonic elapsed time, all attempt statuses
+and retained lengths, and a typed terminal outcome. The CLI prints the receipt
+as JSON and succeeds only for `admitted`. An existing evidence directory is
+an error, not a cached success.
 
-Library consumers call `AdmissionSpec::validate` and `admit`. Consumers can
-disable the default `runtime-admission-cli` feature; the library API remains
-available. Libraries do not install process-global signal handlers. The CLI
-owns SIGINT/SIGTERM handlers for its one invocation.
+Call `AdmissionSpec::validate` and `admit`. Disabling the default
+`runtime-admission-cli` feature leaves the library API available. The library
+installs no process-global signal handlers; the CLI owns SIGINT/SIGTERM
+handlers for one invocation.
 
 ## Runtime-manager adapter obligations
 
 For immutable service roots, generate one host-root gate per enrolled service
-in the workload's actual manager. The workload gets additive `Requires` and
-`After` dependencies. Use `Type=oneshot`, `RemainAfterExit=no`, and bounded
-internal retries. Do not inherit the workload's root/image, credentials or
-resource namespace into the gate, and do not create admission bind targets in
-the image. Preserve the workload's authored conditions, pre/post command
-resets and ordering, root, UID/groups, namespaces and resource policy.
+in the workload's actual manager. Append additive `Requires` and `After`
+dependencies to the workload. Use `Type=oneshot`, `RemainAfterExit=no`, and
+bounded internal retries. The gate must neither inherit nor receive the
+workload's root/image, credentials or resource namespace, and the adapter must
+not create admission bind targets in the image. Preserve workload-authored
+conditions, pre/post command resets and ordering, root, UID/groups, namespaces
+and resource policy.
 
 DNS denial belongs to gate accounting, not workload `NRestarts`/StartLimit.
 After successful admission, native workload Restart/RestartSec/StartLimit
 semantics apply. Avoid outer gate restarts that reset the admitted budget.
 
-The shared runner cleans its owned Unix process group and drains nonblocking
-streams with bounded byte retention. Escaped descendants are outside that
-process group: the adapter must supply and qualify runtime-manager **cgroup**
-cleanup. Non-Unix runtime execution is not supported by this boundary.
+The runner cleans its owned Unix process group for the probe and drains
+nonblocking streams with bounded byte retention. For descendants that escape the
+group, the adapter must supply and qualify runtime-manager **cgroup** cleanup.
+This boundary does not support non-Unix runtime execution.
 
-Systemd integration acceptance additionally requires actual read-only image
+Systemd acceptance also requires actual read-only image
 and root-directory VM tests without admission mount targets, fresh admission
 on automatic restart, within-budget recovery and terminal exhaustion,
 concurrent/coalesced requests, canceled starts, explicit stops, shutdown,
-orphan-gate cleanup and no surviving cgroup workers. Library tests do not
-establish those adapter or installed-host acceptance claims.
+orphan-gate cleanup and no surviving cgroup workers. Library tests don't
+qualify the adapter or installed host.

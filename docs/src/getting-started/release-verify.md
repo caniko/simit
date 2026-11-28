@@ -1,6 +1,6 @@
 # Release Verify
 
-`simit release verify` runs the read-only release bar and reports every check
+`simit release verify` runs read-only release checks and reports every result
 before choosing an exit code.
 
 ```sh
@@ -8,9 +8,9 @@ simit release verify --push-target origin
 simit release verify --json --version 0.5.1
 ```
 
-The text output is deterministic: one line per check, followed by a summary.
-Failures and blocked checks include a remediation line naming the command or
-upstream action that should produce the missing evidence.
+Text output is deterministic: one line per check, then a summary. Failed and
+blocked checks add a remediation line naming the command or upstream action
+that should produce the missing evidence.
 
 ```text
 simit release verify
@@ -30,13 +30,13 @@ summary: 1 fail, 1 blocked
 ## Exit Codes
 
 - `0`: every check passed.
-- `1`: at least one check failed.
-- `2`: no checks failed, but at least one check was blocked because the
-  required evidence cannot be verified locally.
+- `1`: any check failed.
+- `2`: no check failed, and at least one was blocked because the required
+  evidence cannot be verified locally.
 
-Blocked is distinct from failed. The current remote-secret check is blocked by
-design because local code cannot prove whether a Forgejo or GitHub repository
-has `CRATES_IO_API_TOKEN` configured.
+The remote-secret check is blocked by design, not failed: local code cannot
+prove whether a Forgejo or GitHub repository has `CRATES_IO_API_TOKEN`
+configured.
 
 ## JSON Schema
 
@@ -62,8 +62,8 @@ has `CRATES_IO_API_TOKEN` configured.
 }
 ```
 
-`status` is one of `pass`, `fail`, or `blocked`. `remediation` is omitted when
-there is nothing to fix.
+`status` is `pass`, `fail`, or `blocked`. Simit omits `remediation` when there's
+nothing to fix.
 
 ## Checks
 
@@ -79,4 +79,4 @@ The command checks, in order:
 - local tag presence, plus remote tag presence when `--push-target` is set;
 - remote publish secrets, currently reported as blocked.
 
-Non-publishable packages are skipped for the crates.io check.
+The crates.io check skips non-publishable packages.
