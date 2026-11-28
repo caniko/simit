@@ -5,11 +5,11 @@ use anyhow::{Result, bail};
 
 pub fn run(command: BinstallCommand) -> Result<()> {
     match command.action {
-        crate::cli::BinstallAction::Sync(command) => sync(command),
+        crate::cli::BinstallAction::Sync(command) => sync(&command),
     }
 }
 
-fn sync(command: BinstallSyncCommand) -> Result<()> {
+fn sync(command: &BinstallSyncCommand) -> Result<()> {
     let metadata = cargo::metadata_for_current_dir()?;
     let system = binstall::resolve_system(command.system.as_deref())?;
     let updates = binstall::plan(

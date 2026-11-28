@@ -283,9 +283,9 @@ fn bump_without_push_writes_expected_git_diff() {
 fn bump_can_clone_commit_and_push_bucket_repo() {
     let temp = init_package(
         "0.9.0",
-        r#"[scoop.architectures]
+        r"[scoop.architectures]
 arm64 = false
-"#,
+",
     );
     let remote = temp.path().join("remote.git");
     let seed = temp.path().join("seed");

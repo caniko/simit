@@ -37,6 +37,151 @@ license = "MIT"
     temp
 }
 
+#[cfg(unix)]
+#[test]
+fn tracked_rust_format_excludes_modules_in_actions_and_crow() {
+    for (provider, platform, path) in [
+        ("actions", "github", ".github/workflows/ci.yaml"),
+        ("crow", "forgejo", ".crow/build.yaml"),
+    ] {
+        let temp = init_package(false);
+        let root = temp.path();
+        let git = |args: &[&str]| {
+            let output = Command::new("git")
+                .current_dir(root)
+                .args(args)
+                .output()
+                .unwrap();
+            assert!(output.status.success(), "{output:?}");
+        };
+        git(&["init", "-q"]);
+        let lib = root.join("src/lib.rs");
+        // Two-space indentation requires rustfmt to discover the root config.
+        let formatted = "mod excluded;\n\npub fn answer() -> u32 {\n  42\n}\n";
+        fs::write(&lib, formatted).unwrap();
+        fs::write(root.join("src/excluded.rs"), "fn  excluded( ) { }\n").unwrap();
+        fs::write(root.join("src/odd '$\nname.rs"), "fn odd() {}\n").unwrap();
+        fs::write(root.join("src/crlf.rs"), b"pub fn crlf() {}\r\n").unwrap();
+        fs::write(root.join("src/bom.rs"), b"\xef\xbb\xbfpub fn bom() {}\n").unwrap();
+        fs::write(root.join("rustfmt.toml"), "tab_spaces = 2\n").unwrap();
+        git(&["add", "--", "src"]);
+        fs::write(
+            root.join("simit.toml"),
+            format!(
+                "[ci]\nprovider = '{provider}'\nplatform = '{platform}'\nruntime = 'cargo'\nformat_all_rust_files = true\nformat_excludes = ['src/excluded.rs']\n"
+            ),
+        )
+        .unwrap();
+        let output = simit()
+            .current_dir(root)
+            .args(["init", "ci"])
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "{output:?}");
+        let yaml: serde_yaml::Value =
+            serde_yaml::from_str(&fs::read_to_string(root.join(path)).unwrap()).unwrap();
+        let command = if provider == "crow" {
+            let command = yaml["steps"]
+                .as_sequence()
+                .unwrap()
+                .iter()
+                .flat_map(|step| step["commands"].as_sequence().into_iter().flatten())
+                .filter_map(serde_yaml::Value::as_str)
+                .find(|command| command.contains("git ls-files"))
+                .unwrap();
+            let unescaped = command.replace("$$", "$");
+            assert_eq!(command, unescaped.replace('$', "$$"));
+            unescaped
+        } else {
+            yaml["jobs"]
+                .as_mapping()
+                .unwrap()
+                .values()
+                .flat_map(|job| job["steps"].as_sequence().into_iter().flatten())
+                .find(|step| step["name"] == "Format check")
+                .unwrap()["run"]
+                .as_str()
+                .unwrap()
+                .to_owned()
+        };
+        let run = || {
+            Command::new("sh")
+                .current_dir(root)
+                .args(["-ec", &command])
+                .output()
+                .unwrap()
+        };
+        let output = run();
+        assert!(output.status.success(), "{provider}: {output:?}");
+        fs::write(&lib, "mod excluded;\npub fn answer()->u32{42}\n").unwrap();
+        let output = run();
+        assert!(
+            !output.status.success() && !output.stdout.is_empty(),
+            "{output:?}"
+        );
+        fs::write(&lib, "mod excluded;\nfn invalid( {\n").unwrap();
+        let output = run();
+        assert!(
+            !output.status.success() && !output.stderr.is_empty(),
+            "{output:?}"
+        );
+    }
+}
+
+#[test]
+fn native_no_default_checks_require_a_distinct_feature_set() {
+    for (provider, platform, path) in [
+        ("crow", "forgejo", ".crow/build.yaml"),
+        ("actions", "github", ".github/workflows/ci.yaml"),
+    ] {
+        for (features, all_features, expect_no_default) in [
+            ("", true, false),
+            ("[features]\nopt = []", false, false),
+            ("[features]\ndefault = []\nopt = []", false, false),
+            ("[features]\ndefault = []", true, false),
+            ("[features]\nopt = []", true, true),
+            ("[features]\ndefault = ['opt']\nopt = []", false, true),
+        ] {
+            let temp = init_package(false);
+            let root = temp.path();
+            let manifest = root.join("Cargo.toml");
+            let text = fs::read_to_string(&manifest).unwrap();
+            fs::write(
+                manifest,
+                format!("{}\n{features}\n", text.replace("1.85", "1.93")),
+            )
+            .unwrap();
+            fs::write(
+            root.join("simit.toml"),
+            format!(
+                "[ci]\nprovider = '{provider}'\nplatform = '{platform}'\nruntime = 'cargo'\nall_features = {all_features}\n"
+            ),
+        )
+        .unwrap();
+            let output = simit()
+                .current_dir(root)
+                .args(["init", "ci"])
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            let workflow = fs::read_to_string(root.join(path)).unwrap();
+            assert_eq!(
+                workflow.contains("--no-default-features"),
+                expect_no_default,
+                "{workflow}"
+            );
+            if provider == "crow" {
+                assert!(workflow.contains("rust:1.93-trixie"));
+                assert!(workflow.contains("cargo test --locked"));
+            }
+        }
+    }
+}
+
 #[test]
 fn primary_plan_is_versioned_read_only_and_preserves_other_owners() {
     let temp = init_package(false);
@@ -108,7 +253,7 @@ fn full_plan_patches_changed_project_policy_without_resolving_trust() {
     .unwrap();
     // An untracked trust root is not what the publishing workflows fetch.
     let git = |args: &[&str]| {
-        let output = std::process::Command::new("git")
+        let output = Command::new("git")
             .current_dir(root)
             .env("GIT_AUTHOR_NAME", "fixture")
             .env("GIT_AUTHOR_EMAIL", "fixture@example.invalid")
@@ -1743,8 +1888,7 @@ fn generates_forgejo_nix_workflows() {
     assert!(publish.contains("keys/maintainers.gpg"));
     assert!(publish.contains("git verify-tag \"$tag\""));
     assert!(
-        publish
-            .contains(r#"$(cargo pkgid -p demo | awk -F'[#@]' 'NF > 1 {print $NF}' | tail -n 1"#)
+        publish.contains(r"$(cargo pkgid -p demo | awk -F'[#@]' 'NF > 1 {print $NF}' | tail -n 1")
     );
     assert!(!publish.contains("inputs:\n"));
     assert!(publish.contains("CRATES_IO_API_TOKEN: ${{ secrets.CRATES_IO_API_TOKEN }}"));
@@ -3056,7 +3200,7 @@ fn crow_python_ci_keeps_the_crow_prebuild() {
     fs::write(
         temp.path().join("simit.toml"),
         format!(
-            "{config}\n[prebuild]\nprovider = \"crow\"\npublish_attic = true\nattic_app = \".#push-flake-inputs\"\nnix_builds = [\".#default\"]\n\n[release.attic]\ncache = \"demo\"\nurl = \"https://attic.example\"\ntoken_name = \"demo\"\ntoken_secret = \"ATTIC_TOKEN\"\n"
+            "{config}\n[ci.crow]\npaths_include = ['**/*.py']\npaths_exclude = ['docs/**']\n\n[prebuild]\nprovider = \"crow\"\npublish_attic = true\nattic_app = \".#push-flake-inputs\"\nnix_builds = [\".#default\"]\n\n[release.attic]\ncache = \"demo\"\nurl = \"https://attic.example\"\ntoken_name = \"demo\"\ntoken_secret = \"ATTIC_TOKEN\"\n"
         ),
     )
     .unwrap();
@@ -3082,6 +3226,12 @@ fn crow_python_ci_keeps_the_crow_prebuild() {
         String::from_utf8_lossy(&output.stderr)
     );
     assert_crow_push_only_maintained_branches(&temp.path().join(".crow/ci.yaml"));
+    let ci: serde_yaml::Value =
+        serde_yaml::from_str(&read(&temp.path().join(".crow/ci.yaml"))).unwrap();
+    for trigger in ci["when"].as_sequence().unwrap() {
+        assert_eq!(trigger["path"]["include"][0], "**/*.py");
+        assert_eq!(trigger["path"]["exclude"][0], "docs/**");
+    }
     assert!(temp.path().join(".crow/prebuild.yaml").is_file());
 }
 
@@ -3335,8 +3485,8 @@ fn crow_audit_provisions_database_in_its_own_step() {
                 fs::create_dir_all(cargo.join("advisory-db")).unwrap();
                 fs::write(cargo.join("advisory-db/keep"), "keep").unwrap();
             }
-            let tmp = home.join("tmp");
-            fs::create_dir(&tmp).unwrap();
+            let scratch = home.join("tmp");
+            fs::create_dir(&scratch).unwrap();
             let inherited_path = std::env::var_os("PATH").unwrap();
             let paths: Vec<_> = std::env::split_paths(&inherited_path).collect();
             let coreutils = paths.iter().find(|p| p.join("mktemp").is_file()).unwrap();
@@ -3348,7 +3498,7 @@ fn crow_audit_provisions_database_in_its_own_step() {
                 .arg(&command)
                 .current_dir(root)
                 .env("HOME", &home)
-                .env("TMPDIR", &tmp)
+                .env("TMPDIR", &scratch)
                 .env("FIXTURE_AUDIT", &audit_tool)
                 .env("NIX_BIN", &nix_bin)
                 .env_remove("CARGO_HOME")
@@ -3372,7 +3522,7 @@ fn crow_audit_provisions_database_in_its_own_step() {
                     "keep"
                 );
             }
-            assert_eq!(fs::read_dir(tmp).unwrap().count(), 0);
+            assert_eq!(fs::read_dir(scratch).unwrap().count(), 0);
             assert!(fs::read_dir(root).unwrap().all(|entry| {
                 !entry
                     .unwrap()
@@ -3405,8 +3555,12 @@ fn crow_prebuilt_cargo_tools_run_in_their_own_gate_containers() {
         let command = |name: &str| {
             let step = steps.iter().find(|step| step["name"] == name).unwrap();
             let commands = step["commands"].as_sequence().unwrap();
-            assert_eq!(commands.len(), 1, "{name}");
-            commands[0].as_str().unwrap()
+            let pinned = runtime == "cargo" && matches!(name, "cargo-deny" | "cargo-nextest");
+            assert_eq!(commands.len(), 1 + usize::from(pinned), "{name}");
+            if pinned {
+                assert!(commands[0].as_str().unwrap().contains("$$(rustup default)"));
+            }
+            commands.last().unwrap().as_str().unwrap()
         };
         let nextest_check = steps.iter().any(|step| step["name"] == "nextest-tool");
         if runtime == "nix" {
@@ -5195,8 +5349,7 @@ fn forgejo_nix_with_om_ci_replace_emits_om_ci_step() {
     assert!(publish.contains("OMNIX_REF:"));
     assert!(publish.contains("nix run \"$OMNIX_REF\" -- ci run"));
     assert!(
-        publish
-            .contains(r#"$(cargo pkgid -p demo | awk -F'[#@]' 'NF > 1 {print $NF}' | tail -n 1"#)
+        publish.contains(r"$(cargo pkgid -p demo | awk -F'[#@]' 'NF > 1 {print $NF}' | tail -n 1")
     );
     assert!(publish.contains("nix develop -c cargo publish --dry-run"));
     assert!(!publish.contains("run: nix flake check"));
@@ -5510,7 +5663,7 @@ fn generates_github_plain_cargo_workflows() {
     assert!(publish.contains("simit changelog release <version>"));
     assert!(publish.contains("run: cargo publish --dry-run"));
     assert!(
-        publish.contains(r#"cargo pkgid -p demo | awk -F'[#@]' 'NF > 1 {print $NF}' | tail -n 1"#)
+        publish.contains(r"cargo pkgid -p demo | awk -F'[#@]' 'NF > 1 {print $NF}' | tail -n 1")
     );
     assert!(!publish.contains("CARGO_REGISTRY_TOKEN"));
     assert!(!publish.contains("CRATES_IO_API_TOKEN"));
@@ -5674,7 +5827,7 @@ fn forgejo_auto_runtime_uses_rust_container_even_when_flake_exists() {
     );
     assert_verified_cargo_tools(&publish);
     assert!(
-        publish.contains(r#"cargo pkgid -p demo | awk -F'[#@]' 'NF > 1 {print $NF}' | tail -n 1"#)
+        publish.contains(r"cargo pkgid -p demo | awk -F'[#@]' 'NF > 1 {print $NF}' | tail -n 1")
     );
 }
 
@@ -6225,7 +6378,14 @@ check_command = "cargo xtask ci"
     assert!(status.success());
 
     let ci = read(&temp.path().join(".crow/build.yaml"));
-    assert!(ci.contains("rustup component add clippy rustfmt && cargo xtask ci"));
+    let (_, command) = ci.split_once("$$(rustup default)").unwrap();
+    let (_, command) = command
+        .split_once("cargo clippy --version >/dev/null 2>&1 || rustup component add clippy")
+        .unwrap();
+    let (_, command) = command
+        .split_once("rustfmt --version >/dev/null 2>&1 || rustup component add rustfmt")
+        .unwrap();
+    assert!(command.contains("cargo xtask ci"));
 }
 
 #[test]
@@ -6414,6 +6574,36 @@ fn aggregate_workspace_strategy_generates_one_workspace_workflow() {
         "run: nix develop -c cargo clippy --workspace --all-targets --all-features -- --deny warnings"
     ));
     assert!(!ci.contains("cargo package"));
+}
+
+#[test]
+fn actions_aggregate_ignores_excluded_packages_for_image_and_feature_passes() {
+    let temp = init_workspace_fixture();
+    let root = temp.path();
+    let beta = root.join("crates/beta/Cargo.toml");
+    fs::write(&beta, read(&beta).replace("1.85", "1.93")).unwrap();
+    for (excluded, image, no_default) in [
+        ("alpha", "rust:1.93-trixie", true),
+        ("beta", "rust:1.85-bookworm", false),
+    ] {
+        fs::write(root.join("simit.toml"), format!("[ci]\nplatform = 'forgejo'\nruntime = 'cargo'\nworkspace = true\nworkspace_strategy = 'aggregate'\nexclude_packages = ['{excluded}']\n")).unwrap();
+        let run = |args: &[&str]| {
+            simit_with_user_config(root)
+                .current_dir(root)
+                .args(args)
+                .output()
+                .unwrap()
+        };
+        let output = run(&["init", "ci"]);
+        assert!(output.status.success(), "{output:?}");
+        let ci = read(&root.join(".forgejo/workflows/ci.yaml"));
+        assert!(ci.contains(image), "{ci}");
+        assert_eq!(ci.contains("--no-default-features"), no_default, "{ci}");
+        let audit = run(&["projects", "audit", "--json", "."]);
+        assert!(audit.status.success(), "{audit:?}");
+        let audit: serde_json::Value = serde_json::from_slice(&audit.stdout).unwrap();
+        assert_eq!(audit["projects"][0]["ciStatus"], "managed", "{audit}");
+    }
 }
 
 #[test]
@@ -6743,6 +6933,83 @@ fn aggregate_workspace_strategy_can_limit_tests_to_library_targets() {
 }
 
 #[test]
+fn aggregate_unit_tests_only_repeat_target_groups_with_distinct_features() {
+    for (provider, platform, path) in [
+        ("crow", "forgejo", ".crow/build.yaml"),
+        ("actions", "github", ".github/workflows/ci.yaml"),
+    ] {
+        let temp = init_workspace_fixture();
+        let root = temp.path();
+        let alpha = root.join("crates/alpha/Cargo.toml");
+        let alpha_manifest = read(&alpha);
+        let beta = root.join("crates/beta/Cargo.toml");
+        let manifest = read(&beta);
+        let beta_manifest = manifest.split("[features]").next().unwrap();
+        fs::remove_file(root.join("crates/beta/src/lib.rs")).unwrap();
+        fs::write(root.join("crates/beta/src/main.rs"), "fn main() {}\n").unwrap();
+        let optional = "\n[features]\nopt = []\n";
+        let default = "\n[features]\ndefault = ['opt']\nopt = []\n";
+        for (all_features, lib_features, bin_features, lib_repeats, bin_repeats) in [
+            (true, optional, "", true, false),
+            (false, default, optional, true, false),
+            (false, optional, default, false, true),
+        ] {
+            fs::write(&alpha, format!("{alpha_manifest}{lib_features}")).unwrap();
+            fs::write(&beta, format!("{beta_manifest}{bin_features}")).unwrap();
+            fs::write(
+                root.join("simit.toml"),
+                format!("[ci]\nprovider = '{provider}'\nplatform = '{platform}'\nruntime = 'cargo'\nworkspace = true\nworkspace_strategy = 'aggregate'\nunit_tests_only = true\nall_features = {all_features}\n"),
+            ).unwrap();
+            let output = simit()
+                .current_dir(root)
+                .args(["init", "ci"])
+                .output()
+                .unwrap();
+            assert!(output.status.success(), "{output:?}");
+            let workflow = read(&root.join(path));
+            for (target, repeats) in [(" --lib", lib_repeats), (" --bins", bin_repeats)] {
+                let passes: Vec<_> = workflow
+                    .lines()
+                    .filter(|line| line.contains("cargo test ") && line.contains(target))
+                    .map(|line| line.contains("--no-default-features"))
+                    .collect();
+                let expected: &[bool] = if repeats { &[false, true] } else { &[false] };
+                assert_eq!(passes, expected, "{provider}, {all_features}, {target}");
+            }
+        }
+    }
+}
+
+#[test]
+fn actions_cargo_runtime_survives_removing_workflows_on_a_flake_repo() {
+    let temp = init_package(true);
+    let root = temp.path();
+    fs::write(
+        root.join("flake.nix"),
+        "{ outputs = _: { checks = {}; }; }\n",
+    )
+    .unwrap();
+    let run = |args: &[&str]| {
+        let output = simit()
+            .current_dir(root)
+            .args(["init", "ci", "--platform", "github"])
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "{output:?}");
+    };
+    run(&["--runtime", "cargo"]);
+    let config: toml_edit::DocumentMut = read(&root.join("simit.toml")).parse().unwrap();
+    assert_eq!(
+        config["ci"].get("runtime").and_then(|item| item.as_str()),
+        Some("cargo")
+    );
+    fs::remove_dir_all(root.join(".github/workflows")).unwrap();
+    run(&[]);
+    assert!(read(&root.join(".github/workflows/ci.yaml")).contains("run: cargo test"));
+}
+
+#[test]
 fn workspace_publish_false_package_keeps_ci_but_skips_package_and_publish_workflows() {
     let temp = init_workspace_fixture();
     let beta_manifest = temp.path().join("crates/beta/Cargo.toml");
@@ -6810,31 +7077,19 @@ fn workspace_publish_tag_validation_is_package_scoped_for_diverging_versions() {
         .unwrap();
     assert!(status.success());
 
-    let member_a_publish = read(
-        &temp
-            .path()
-            .join(".forgejo/workflows/publish-crate-member-a.yaml"),
-    );
-    assert_yaml_parses(&member_a_publish);
-    assert!(
-        member_a_publish
-            .contains(r#"cargo pkgid -p member-a | awk -F'[#@]' 'NF > 1 {print $NF}' | tail -n 1"#)
-    );
-    assert!(!member_a_publish.contains("cargo pkgid -p member-b"));
-    assert!(!member_a_publish.contains("cargo metadata --no-deps --format-version 1"));
-
-    let member_b_publish = read(
-        &temp
-            .path()
-            .join(".forgejo/workflows/publish-crate-member-b.yaml"),
-    );
-    assert_yaml_parses(&member_b_publish);
-    assert!(
-        member_b_publish
-            .contains(r#"cargo pkgid -p member-b | awk -F'[#@]' 'NF > 1 {print $NF}' | tail -n 1"#)
-    );
-    assert!(!member_b_publish.contains("cargo pkgid -p member-a"));
-    assert!(!member_b_publish.contains("cargo metadata --no-deps --format-version 1"));
+    for (member, other) in [("member-a", "member-b"), ("member-b", "member-a")] {
+        let workflow = read(
+            &temp
+                .path()
+                .join(format!(".forgejo/workflows/publish-crate-{member}.yaml")),
+        );
+        assert_yaml_parses(&workflow);
+        assert!(workflow.contains(&format!(
+            r"cargo pkgid -p {member} | awk -F'[#@]' 'NF > 1 {{print $NF}}' | tail -n 1"
+        )));
+        assert!(!workflow.contains(&format!("cargo pkgid -p {other}")));
+        assert!(!workflow.contains("cargo metadata --no-deps --format-version 1"));
+    }
 }
 
 #[test]
@@ -7247,9 +7502,9 @@ fn cli_flags_override_persisted_ci_values() {
     let temp = init_package(false);
     fs::write(
         temp.path().join("simit.toml"),
-        r#"[ci]
+        r"[ci]
 with_audit = false
-"#,
+",
     )
     .unwrap();
 
@@ -9561,7 +9816,7 @@ fn qualified_by_audit_expects_pages_only() {
     );
     let audit = simit::registry::audit_ci(temp.path()).unwrap();
     assert_eq!(audit.status, simit::registry::FeatureStatus::Managed);
-    assert!(audit.extra_generated_files.is_empty());
+    assert_eq!(audit.extra_generated_files.len(), 0);
 
     fs::write(
         temp.path().join(".github/workflows/qualify-generator.yaml"),

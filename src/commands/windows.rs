@@ -5,6 +5,7 @@ use crate::cli::{
     ChocolateyBumpArgs, ScoopBumpArgs, WindowsAction, WindowsCommand, WindowsPublishArgs,
     WingetSubmitArgs,
 };
+use crate::cli::{ChocolateyOverridesArgs, ScoopOverridesArgs};
 use crate::config::ProjectConfig;
 use crate::packaging_common::validate_version;
 use anyhow::{Context, Result, bail};
@@ -41,7 +42,7 @@ fn publish(args: WindowsPublishArgs) -> Result<()> {
 
     if selected.chocolatey {
         let package_dir = args.work_dir.join("chocolatey-package");
-        crate::commands::chocolatey::bump(ChocolateyBumpArgs {
+        crate::commands::chocolatey::bump(&ChocolateyBumpArgs {
             version: args.version.clone(),
             package_dir,
             archive: vec![format!("x64={x64}")],
@@ -51,7 +52,7 @@ fn publish(args: WindowsPublishArgs) -> Result<()> {
             api_key_env: None,
             force_resubmit: args.force_resubmit,
             dry_run: args.dry_run,
-            chocolatey: Default::default(),
+            chocolatey: ChocolateyOverridesArgs::default(),
         })?;
     }
     if selected.scoop {
@@ -65,12 +66,12 @@ fn publish(args: WindowsPublishArgs) -> Result<()> {
             push: !args.dry_run,
             commit_message: None,
             dry_run: args.dry_run,
-            scoop: Default::default(),
+            scoop: ScoopOverridesArgs::default(),
         })?;
     }
     if selected.winget {
         let url = looks_like_url(x64).then(|| x64.clone());
-        crate::commands::winget::submit(WingetSubmitArgs {
+        crate::commands::winget::submit(&WingetSubmitArgs {
             version: args.version,
             package_id: None,
             download_repo: None,

@@ -1,5 +1,6 @@
 //! `simit binstall sync` against a fake flake and a stubbed `nix` binary.
 
+use std::fmt::Write as _;
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
@@ -41,9 +42,7 @@ fn workspace(extra: &str) -> TempDir {
 fn stub_nix(dir: &Path, attrs: &[&str]) {
     let mut arms = String::new();
     for attr in attrs {
-        arms.push_str(&format!(
-            "  *{attr}*) printf '%s' \"$SIMIT_STUB_TOML\" ;;\n"
-        ));
+        writeln!(arms, "  *{attr}*) printf '%s' \"$SIMIT_STUB_TOML\" ;;").expect("write");
     }
     let path = dir.join("nix");
     fs::write(

@@ -10,18 +10,17 @@ fn main() {
             eprintln!("simit: {gate_exit}");
             std::process::exit(gate_exit.code());
         }
-        if let Some(test_exit) = err.downcast_ref::<simit::commands::test::TestExit>() {
+        if let Some(test_exit) = err.downcast_ref::<commands::test::TestExit>() {
             std::process::exit(test_exit.code());
         }
-        if let Some(command_exit) = err.downcast_ref::<simit::commands::projects::CommandExit>() {
+        if let Some(command_exit) = err.downcast_ref::<commands::projects::CommandExit>() {
             eprintln!("simit: {command_exit}");
             std::process::exit(command_exit.code());
         }
-        if let Some(verify_exit) = err.downcast_ref::<simit::commands::release_verify::VerifyExit>()
-        {
+        if let Some(verify_exit) = err.downcast_ref::<commands::release_verify::VerifyExit>() {
             std::process::exit(verify_exit.code());
         }
-        if let Some(upgrade_exit) = err.downcast_ref::<simit::commands::upgrade::UpgradeExit>() {
+        if let Some(upgrade_exit) = err.downcast_ref::<commands::upgrade::UpgradeExit>() {
             eprintln!("simit: {upgrade_exit}");
             std::process::exit(upgrade_exit.code());
         }

@@ -37,7 +37,7 @@ fn writes_language_aware_template_and_checks_it() {
         .args(["init", "gitignore"])
         .output()
         .unwrap();
-    assert!(output.status.success(), "{:?}", output);
+    assert!(output.status.success(), "{output:?}");
 
     let content = fs::read_to_string(root.join(".gitignore")).unwrap();
     assert!(content.contains("# Rust\ntarget/\n"));
@@ -49,7 +49,7 @@ fn writes_language_aware_template_and_checks_it() {
         .args(["init", "gitignore", "--check"])
         .output()
         .unwrap();
-    assert!(check.status.success(), "{:?}", check);
+    assert!(check.status.success(), "{check:?}");
 }
 
 #[test]
@@ -62,7 +62,7 @@ fn print_does_not_write_and_diff_reports_drift() {
         .args(["init", "gitignore", "--print"])
         .output()
         .unwrap();
-    assert!(print.status.success(), "{:?}", print);
+    assert!(print.status.success(), "{print:?}");
     assert!(String::from_utf8_lossy(&print.stdout).contains("--- .gitignore"));
     assert!(!root.join(".gitignore").exists());
 
@@ -95,7 +95,7 @@ fn non_cargo_directory_is_supported() {
         .args(["init", "gitignore"])
         .output()
         .unwrap();
-    assert!(output.status.success(), "{:?}", output);
+    assert!(output.status.success(), "{output:?}");
 
     let content = fs::read_to_string(temp.path().join(".gitignore")).unwrap();
     assert!(content.contains("# Python\n"));

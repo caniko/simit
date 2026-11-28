@@ -43,7 +43,7 @@ fn declared_formatter_failures_never_fall_back_to_cargo_or_ambient_treefmt() {
     for (mode, expected) in [("eval-failed", 7), ("no-executable", 1)] {
         let output = run(mode);
         assert_eq!(output.status.code(), Some(expected));
-        assert!(output.stdout.is_empty());
+        assert_eq!(output.stdout.as_slice(), b"");
     }
     executable(
         &wrapper.join("bin/treefmt"),

@@ -1,4 +1,5 @@
 use std::collections::BTreeMap;
+use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
@@ -14,6 +15,7 @@ use crate::config::{
     JetbrainsCredentialSource, ResolvedJetbrains, ResolvedVscode, VscodePatSource,
 };
 use crate::project::GeneratedFile;
+use crate::release_identity::TagPrefix;
 use crate::user_config::{ResolvedCiRunners, ResolvedRunner};
 
 use super::{cargo_tools::Tool, release_tools};
@@ -198,8 +200,12 @@ pub(crate) fn publisher_bootstrap() -> String {
 }
 
 #[derive(Debug, Clone)]
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "Each flag independently selects a workflow capability or platform"
+)]
 pub struct CiOptions {
-    pub tag_prefix: crate::release_identity::TagPrefix,
+    pub tag_prefix: TagPrefix,
     pub nix_setup_action_ref: Option<NixSetupActionRef>,
     /// CI-only cache policy; publication uses the separate nix_* fields.
     pub ci_nix_substituters: Vec<String>,
@@ -213,9 +219,21 @@ pub struct CiOptions {
     pub repository_checks: bool,
     /// An aggregate selector can include libraries beyond its representative package.
     pub workspace_has_doctests: bool,
-    pub workspace_has_features: bool,
-    pub workspace_has_library: bool,
+    pub workspace_has_non_empty_default_feature: bool,
+    pub workspace_has_any_feature: bool,
+    pub workspace_lib_members: Vec<String>,
+    pub workspace_bin_members: Vec<String>,
+    pub lib_has_any_feature: bool,
+    pub lib_has_non_empty_default_feature: bool,
+    pub bin_has_any_feature: bool,
+    pub bin_has_non_empty_default_feature: bool,
     pub workspace_has_binary: bool,
+    pub exclude_packages: Vec<String>,
+    pub package_features: BTreeMap<String, Vec<String>>,
+    pub clippy_all_targets: bool,
+    pub format_all_rust_files: bool,
+    pub format_excludes: Vec<String>,
+    pub format_edition: Option<String>,
     pub all_features: bool,
     pub unit_tests_only: bool,
     pub nix_substituters: Vec<String>,
@@ -267,7 +285,7 @@ pub struct CodebergPagesOptions {
 impl Default for CiOptions {
     fn default() -> Self {
         Self {
-            tag_prefix: Default::default(),
+            tag_prefix: TagPrefix::default(),
             nix_setup_action_ref: None,
             ci_nix_substituters: Vec::new(),
             ci_nix_trusted_public_keys: Vec::new(),
@@ -278,9 +296,21 @@ impl Default for CiOptions {
             components: Vec::new(),
             repository_checks: true,
             workspace_has_doctests: false,
-            workspace_has_features: false,
-            workspace_has_library: false,
+            workspace_has_non_empty_default_feature: false,
+            workspace_has_any_feature: false,
+            workspace_lib_members: Vec::new(),
+            workspace_bin_members: Vec::new(),
+            lib_has_any_feature: false,
+            lib_has_non_empty_default_feature: false,
+            bin_has_any_feature: false,
+            bin_has_non_empty_default_feature: false,
             workspace_has_binary: false,
+            exclude_packages: Vec::new(),
+            package_features: BTreeMap::new(),
+            clippy_all_targets: true,
+            format_all_rust_files: false,
+            format_excludes: Vec::new(),
+            format_edition: None,
             all_features: true,
             unit_tests_only: false,
             nix_substituters: Vec::new(),
@@ -333,7 +363,7 @@ impl CiOptions {
 
 #[derive(Debug, Clone)]
 pub struct HomebrewOptions {
-    /// Formula name, for example `modde`. UpperCamelCased for the Ruby class.
+    /// Formula name, for example `modde`. `UpperCamelCased` for the Ruby class.
     pub name: String,
     /// Binaries to install. Defaults to `name` if empty.
     pub binaries: Vec<String>,
@@ -356,6 +386,10 @@ pub struct HomebrewOptions {
 }
 
 #[derive(Debug, Clone)]
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "Each flag independently selects a workflow capability or platform"
+)]
 pub struct HomebrewPlatformSet {
     pub darwin_arm: bool,
     pub darwin_intel: bool,
@@ -485,7 +519,7 @@ fn files_for_scope(request: FilesRequest<'_>, primary_only: bool) -> Result<Vec<
             step_runners: request.step_runners,
         };
         return if primary_only {
-            crate::render::crow::primary_files(request)
+            crate::render::crow::primary_files(&request)
         } else {
             crate::render::crow::files(request)
         };
@@ -525,7 +559,7 @@ fn files_for_scope(request: FilesRequest<'_>, primary_only: bool) -> Result<Vec<
                 package,
                 self_check,
                 runners,
-                options.clone(),
+                &options,
                 step_runners,
             ),
         }]
@@ -535,13 +569,7 @@ fn files_for_scope(request: FilesRequest<'_>, primary_only: bool) -> Result<Vec<
     options.repository_checks = true;
 
     if !primary_only && options.publish_crates && package.is_publishable() {
-        let content = publish_workflow(
-            platform,
-            runtime,
-            package,
-            &runners.release,
-            options.clone(),
-        )?;
+        let content = publish_workflow(platform, runtime, package, &runners.release, &options)?;
         if platform == Platform::Github {
             trusted_publisher::validate_credential_free_source(&content, &options)?;
         }
@@ -585,7 +613,7 @@ pub fn publish_files(
     let source = GeneratedFile {
         relative_path: PathBuf::from(platform.workflow_dir())
             .join(workflow_file_name("publish-crate", Some(&package.name))),
-        content: publish_workflow(platform, runtime, package, runner, options.clone())?,
+        content: publish_workflow(platform, runtime, package, runner, &options)?,
     };
     let mut files = vec![];
     if platform == Platform::Github {
@@ -619,6 +647,10 @@ pub struct PublishWorkspaceInputs<'a> {
     pub versions: Vec<(String, String)>,
 }
 
+#[expect(
+    clippy::needless_pass_by_value,
+    reason = "Keep the public API's owned argument type"
+)]
 pub fn publish_workspace_files(
     platform: Platform,
     inputs: PublishWorkspaceInputs<'_>,
@@ -649,7 +681,7 @@ pub fn publish_workspace_files(
     Ok(vec![source, publisher])
 }
 
-fn github_crate_publish_triggers(prefix: crate::release_identity::TagPrefix) -> String {
+fn github_crate_publish_triggers(prefix: TagPrefix) -> String {
     format!(
         "# GitHub crates.io publishers run only on signed semver tag pushes. Retry the original run rather than dispatching a branch.\non:\n  push:\n    tags:\n      - \"{}[0-9]*\"\n\n",
         prefix.as_str()
@@ -706,15 +738,15 @@ fn publish_workspace_workflow(
     w.push_str("# coordinated workspace publish: prerequisites before dependents.\n");
     w.push_str("# Before creating and pushing a release tag, run `simit changelog release <version>` locally.\n");
     push_release_security_header(&mut w, false);
-    w.push_str(&format!(
+    write!(
+        w,
         "name: Publish {}\n\n",
         independent_package.unwrap_or("Workspace")
-    ));
+    )
+    .expect("write");
     w.push_str("on:\n");
     if let Some(package) = independent_package {
-        w.push_str(&format!(
-            "  push:\n    tags:\n      - \"{package}/v[0-9]*\"\n"
-        ));
+        write!(w, "  push:\n    tags:\n      - \"{package}/v[0-9]*\"\n").expect("write");
     } else {
         w.push_str("  push:\n    tags:\n      - \"[0-9]*\"\n");
     }
@@ -752,7 +784,10 @@ fn publish_workspace_workflow(
     w.push_str("          set -euo pipefail\n");
     w.push_str("          tag=\"${GITHUB_REF_NAME:-${GITHUB_REF#refs/tags/}}\"\n");
     if let Some(package) = independent_package {
-        w.push_str(&format!("          case \"$tag\" in {package}/v*) version=\"${{tag#{package}/v}}\" ;; *) echo 'Tag does not belong to this package' >&2; exit 1 ;; esac\n"));
+        writeln!(
+            w,
+            "          case \"$tag\" in {package}/v*) version=\"${{tag#{package}/v}}\" ;; *) echo 'Tag does not belong to this package' >&2; exit 1 ;; esac"
+        ).expect("write");
         w.push_str("          if ! printf '%s\\n' \"$version\" | grep -Eq '^[0-9]+\\.[0-9]+\\.[0-9]+([+-][0-9A-Za-z.+-]+)?$'; then echo 'Invalid package release version' >&2; exit 1; fi\n");
     } else {
         w.push_str("          if ! printf '%s\\n' \"$tag\" | grep -Eq '^[0-9]+\\.[0-9]+\\.[0-9]+$'; then echo \"Tag must be an exact semver version like 0.1.1, got '$tag'\" >&2; exit 1; fi\n");
@@ -792,15 +827,14 @@ fn publish_workspace_workflow(
     for gate in &options.required_gates {
         let gate_runtime = gate.runtime.unwrap_or_else(|| runtime.into());
         let job = format!("gate-{}", sanitize_gate_id(&gate.id));
-        w.push_str(&format!("  {job}:\n"));
-        w.push_str(&format!("    needs: [{previous}]\n"));
+        writeln!(w, "  {job}:").expect("write");
+        writeln!(w, "    needs: [{previous}]").expect("write");
         w.push_str("    runs-on: ");
         w.push_str(&runs_on(runner));
         w.push('\n');
-        w.push_str(&format!("    timeout-minutes: {}\n", gate.timeout_minutes));
+        writeln!(w, "    timeout-minutes: {}", gate.timeout_minutes).expect("write");
         push_release_permissions(&mut w, platform);
-        let mut gate_env: std::collections::BTreeMap<String, String> =
-            options.extra_env.iter().cloned().collect();
+        let mut gate_env: BTreeMap<String, String> = options.extra_env.iter().cloned().collect();
         gate_env.extend(gate.env.clone());
         push_gate_env(
             &mut w,
@@ -830,8 +864,7 @@ fn publish_workspace_workflow(
     // bounded propagation wait. No publish-on-PR: this workflow only runs on
     // Signed tag pushes, with least-privilege permissions and pinned
     // actions. Secrets appear only here, never in ordinary PR jobs.
-    let mut job_names: std::collections::BTreeMap<String, String> =
-        std::collections::BTreeMap::new();
+    let mut job_names: BTreeMap<String, String> = BTreeMap::new();
     for (name, _) in plan {
         let job = format!("publish-{}", sanitize_gate_id(name));
         job_names.insert(name.clone(), job);
@@ -848,8 +881,8 @@ fn publish_workspace_workflow(
         }
         needs.sort();
         needs.dedup();
-        w.push_str(&format!("  {job}:\n"));
-        w.push_str(&format!("    needs: [{}]\n", needs.join(", ")));
+        writeln!(w, "  {job}:").expect("write");
+        writeln!(w, "    needs: [{}]", needs.join(", ")).expect("write");
         w.push_str("    runs-on: ");
         w.push_str(&runs_on(runner));
         w.push('\n');
@@ -896,12 +929,14 @@ fn publish_workspace_workflow(
             true,
             options.tag_prefix,
         ));
-        previous = job.clone();
+        previous.clone_from(job);
     }
     // Auditable summary (always runs, never publishes).
-    w.push_str(&format!(
+    write!(
+        w,
         "  publish-report:\n    needs: [{previous}]\n    if: always()\n"
-    ));
+    )
+    .expect("write");
     w.push_str("    runs-on: ");
     w.push_str(&runs_on(runner));
     w.push('\n');
@@ -991,7 +1026,7 @@ pub fn vscode_extension_file(
     runner: &ResolvedRunner,
     vscode: &ResolvedVscode,
 ) -> Result<GeneratedFile> {
-    vscode_extension_file_with_prefix(platform, runtime, runner, vscode, Default::default())
+    vscode_extension_file_with_prefix(platform, runtime, runner, vscode, TagPrefix::default())
 }
 
 pub fn vscode_extension_file_with_prefix(
@@ -999,7 +1034,7 @@ pub fn vscode_extension_file_with_prefix(
     runtime: Runtime,
     runner: &ResolvedRunner,
     vscode: &ResolvedVscode,
-    prefix: crate::release_identity::TagPrefix,
+    prefix: TagPrefix,
 ) -> Result<GeneratedFile> {
     vscode_extension_file_with_nix_setup(platform, runtime, runner, vscode, prefix, None)
 }
@@ -1009,7 +1044,7 @@ pub(crate) fn vscode_extension_file_with_nix_setup(
     runtime: Runtime,
     runner: &ResolvedRunner,
     vscode: &ResolvedVscode,
-    prefix: crate::release_identity::TagPrefix,
+    prefix: TagPrefix,
     nix_setup: Option<&NixSetupActionRef>,
 ) -> Result<GeneratedFile> {
     if runtime != Runtime::Nix {
@@ -1028,13 +1063,7 @@ pub fn jetbrains_plugin_file(
     runner: &ResolvedRunner,
     jetbrains: &ResolvedJetbrains,
 ) -> Result<GeneratedFile> {
-    jetbrains_plugin_file_with_prefix(
-        platform,
-        runtime,
-        runner,
-        jetbrains,
-        crate::release_identity::TagPrefix::None,
-    )
+    jetbrains_plugin_file_with_prefix(platform, runtime, runner, jetbrains, TagPrefix::None)
 }
 
 pub fn jetbrains_plugin_file_with_prefix(
@@ -1042,7 +1071,7 @@ pub fn jetbrains_plugin_file_with_prefix(
     runtime: Runtime,
     runner: &ResolvedRunner,
     jetbrains: &ResolvedJetbrains,
-    prefix: crate::release_identity::TagPrefix,
+    prefix: TagPrefix,
 ) -> Result<GeneratedFile> {
     jetbrains_plugin_file_with_nix_setup(platform, runtime, runner, jetbrains, prefix, None)
 }
@@ -1052,7 +1081,7 @@ pub(crate) fn jetbrains_plugin_file_with_nix_setup(
     runtime: Runtime,
     runner: &ResolvedRunner,
     jetbrains: &ResolvedJetbrains,
-    prefix: crate::release_identity::TagPrefix,
+    prefix: TagPrefix,
     nix_setup: Option<&NixSetupActionRef>,
 ) -> Result<GeneratedFile> {
     if runtime != Runtime::Nix {
@@ -1205,10 +1234,12 @@ pub(crate) fn nix_flake_ci_file_with_events(
         }
     } else {
         if selected(CiComponent::FlakeWiring) {
-            workflow.push_str(&format!(
+            write!(
+                workflow,
                 "      - name: Check generated flake wiring\n        run: {}\n",
                 super::flake_wiring_check()
-            ));
+            )
+            .expect("write");
         }
         if selected(CiComponent::FlakeEvaluation) && !selected(CiComponent::Checks) {
             workflow.push_str(
@@ -1256,7 +1287,7 @@ pub fn github_prebuild_file(
         prebuild,
         artifacts,
         attic,
-        crate::release_identity::TagPrefix::None,
+        TagPrefix::None,
         crate::config::ReleaseNotesSource::Changelog,
         true,
     )
@@ -1269,14 +1300,17 @@ pub fn prebuild_release_entry(prebuild: &PrebuildConfig, github_release: bool) -
     github_release || prebuild.release_archives
 }
 
-#[allow(clippy::too_many_arguments)]
+#[allow(
+    clippy::too_many_arguments,
+    reason = "Keep the public prebuild renderer API compatible"
+)]
 pub fn github_prebuild_file_with_policy(
     system_runners: &BTreeMap<String, String>,
     nix_builds: &[String],
     prebuild: &PrebuildConfig,
     artifacts: &ArtifactsConfig,
     attic: Option<&AtticConfig>,
-    prefix: crate::release_identity::TagPrefix,
+    prefix: TagPrefix,
     notes: crate::config::ReleaseNotesSource,
     github_release: bool,
 ) -> Result<GeneratedFile> {
@@ -1293,14 +1327,17 @@ pub fn github_prebuild_file_with_policy(
     )
 }
 
-#[allow(clippy::too_many_arguments)]
+#[allow(
+    clippy::too_many_arguments,
+    reason = "Mirror the public prebuild inputs and take the resolved setup action"
+)]
 pub(crate) fn github_prebuild_file_with_nix_setup(
     system_runners: &BTreeMap<String, String>,
     nix_builds: &[String],
     prebuild: &PrebuildConfig,
     artifacts: &ArtifactsConfig,
     attic: Option<&AtticConfig>,
-    prefix: crate::release_identity::TagPrefix,
+    prefix: TagPrefix,
     notes: crate::config::ReleaseNotesSource,
     github_release: bool,
     nix_setup: Option<&NixSetupActionRef>,
@@ -1331,9 +1368,11 @@ pub(crate) fn github_prebuild_file_with_nix_setup(
         if attic.is_none() {
             workflow.push_str("# Required repository secret:\n");
         }
-        workflow.push_str(&format!(
-            "# - {secret}: netrc for private Nix substituters.\n"
-        ));
+        writeln!(
+            workflow,
+            "# - {secret}: netrc for private Nix substituters."
+        )
+        .expect("write");
     }
     workflow.push_str("name: Native Nix prebuild\n\non:\n  push:\n");
     push_ci_branches(&mut workflow, &prebuild.push_branches);
@@ -1349,7 +1388,7 @@ pub(crate) fn github_prebuild_file_with_nix_setup(
         if let Some(secret) = &artifacts.netrc_secret {
             // Declared under its repository name so push runs and release calls
             // read the same `secrets.<name>`.
-            workflow.push_str(&format!("      {secret}:\n        required: false\n"));
+            write!(workflow, "      {secret}:\n        required: false\n").expect("write");
         }
     }
     workflow.push_str("\npermissions:\n  contents: read\n\n");
@@ -1409,27 +1448,30 @@ pub(crate) fn github_prebuild_file_with_nix_setup(
     }
     if prebuild.release_archives {
         let release_if = StepCondition::ReleaseOutsidePullRequests.wrapped();
-        workflow.push_str(&format!(
+        write!(
+            workflow,
             "      - name: Build unsigned release archives\n        if: {release_if}\n"
-        ));
+        )
+        .expect("write");
         workflow.push_str("        run: |\n          set -euo pipefail\n          shopt -s nullglob\n          mkdir -p .simit-prebuild release\n          VERSION=\"${GITHUB_REF_NAME#v}\"\n");
         for (index, attr) in release_attrs.iter().enumerate() {
             let link = format!(".simit-prebuild/release-{index}");
             workflow.push_str("          nix build ");
-            workflow.push_str(&shell_quote(&format!(".#{}", attr)));
+            workflow.push_str(&shell_quote(&format!(".#{attr}")));
             workflow.push_str(" --out-link ");
             workflow.push_str(&shell_quote(&link));
             workflow.push_str(" --print-build-logs --max-jobs 1 --cores 2\n");
             workflow.push_str("          manifests=(");
-            workflow.push_str(&format!("{link}/*-release-manifest.json"));
+            write!(workflow, "{link}/*-release-manifest.json").expect("write");
             workflow.push_str(")\n          test \"${#manifests[@]}\" -eq 1\n          jq -e --arg version \"$VERSION\" '(.schemaVersion == 2) and (.version == $version) and (.artifacts | length > 0)' \"${manifests[0]}\" >/dev/null\n");
             workflow.push_str("          while IFS= read -r file; do\n            name=\"$(basename \"$file\")\"\n            test ! -e \"release/$name\" || { echo \"release bundle asset collision: $name\" >&2; exit 1; }\n            cp -L \"$file\" \"release/$name\"\n          done < <(find -L ");
             workflow.push_str(&shell_quote(&link));
             workflow.push_str(" -mindepth 1 -maxdepth 1 -type f ! -name '*-release-manifest.json' -print | LC_ALL=C sort)\n");
         }
-        workflow.push_str(&format!(
+        write!(
+            workflow,
             "      - name: Upload unsigned release archives\n        if: {release_if}\n        uses: "
-        ));
+        ).expect("write");
         workflow.push_str(&github_action_ref(
             "actions/upload-artifact",
             artifact_version,
@@ -1537,7 +1579,10 @@ pub fn nix_build_matrix_file_with_options(
     )
 }
 
-#[allow(clippy::too_many_arguments)]
+#[allow(
+    clippy::too_many_arguments,
+    reason = "Mirror the public matrix inputs and take the resolved setup action"
+)]
 pub(crate) fn nix_build_matrix_file_with_nix_setup(
     platform: Platform,
     runner: &ResolvedRunner,
@@ -1580,7 +1625,8 @@ pub(crate) fn nix_build_matrix_file_with_nix_setup(
     workflow.push_str("name: Nix installable builds\n\non:\n  push:\n");
     push_ci_branches(&mut workflow, &options.push_branches);
     let explicitly_branch_only = platform == Platform::Github
-        && !(options.separate_events || !options.push_branches.is_empty())
+        && !options.separate_events
+        && options.push_branches.is_empty()
         && *options != crate::config::NixBuildConfig::default()
         && options.push_tags.is_empty();
     if explicitly_branch_only {
@@ -1589,7 +1635,7 @@ pub(crate) fn nix_build_matrix_file_with_nix_setup(
     if !options.push_tags.is_empty() {
         workflow.push_str("    tags:\n");
         for pattern in &options.push_tags {
-            workflow.push_str(&format!("      - \"{}\"\n", yaml_double_quote(pattern)));
+            writeln!(workflow, "      - \"{}\"", yaml_double_quote(pattern)).expect("write");
         }
     }
     workflow.push_str("  pull_request:\n  workflow_dispatch:\n\n");
@@ -1615,23 +1661,26 @@ pub(crate) fn nix_build_matrix_file_with_nix_setup(
     }
     workflow.push('\n');
     if let Some(timeout) = options.timeout_minutes {
-        workflow.push_str(&format!("    timeout-minutes: {timeout}\n"));
+        writeln!(workflow, "    timeout-minutes: {timeout}").expect("write");
     }
-    workflow.push_str(&format!(
+    write!(
+        workflow,
         "    strategy:\n      fail-fast: false\n      max-parallel: {}\n      matrix:\n",
         options.max_parallel.unwrap_or(2)
-    ));
+    )
+    .expect("write");
     if native_runners {
         workflow.push_str("        include:\n");
         for installable in installables {
             let system = options.installable_system(installable)?;
             let runner = &options.system_runners[system];
-            workflow.push_str(&format!(
+            write!(
+                workflow,
                 "          - installable: \"{}\"\n            system: \"{}\"\n            runner: \"{}\"\n",
                 yaml_double_quote(installable),
                 yaml_double_quote(system),
-                yaml_double_quote(runner),
-            ));
+                yaml_double_quote(runner)
+            ).expect("write");
         }
     } else {
         workflow.push_str("        installable:\n");
@@ -1646,7 +1695,7 @@ pub(crate) fn nix_build_matrix_file_with_nix_setup(
         workflow.push_str("      NIX_CONFIG: \"experimental-features = nix-command flakes\"\n");
     }
     for (key, value) in &options.extra_env {
-        workflow.push_str(&format!("      {key}: \"{}\"\n", yaml_double_quote(value)));
+        writeln!(workflow, "      {key}: \"{}\"", yaml_double_quote(value)).expect("write");
     }
     workflow.push_str("    steps:\n");
     let checkout_version =
@@ -1681,40 +1730,49 @@ pub(crate) fn nix_build_matrix_file_with_nix_setup(
         command.push_str(" --no-update-lock-file");
     }
     if let Some(jobs) = options.max_jobs {
-        command.push_str(&format!(" --max-jobs {jobs}"));
+        write!(command, " --max-jobs {jobs}").expect("write");
     }
     if let Some(cores) = options.cores {
-        command.push_str(&format!(" --cores {cores}"));
+        write!(command, " --cores {cores}").expect("write");
     }
     if options.capture_results {
         // Builder phases go to stderr only when explicitly requested. Retaining
         // the client diagnostics alone cannot explain a cancelled build.
         command.push_str(" --print-build-logs --json");
-        workflow.push_str(&format!("        run: |\n          set -euo pipefail\n          exec 3> >(tee \"$SIMIT_NIX_BUILD_RESULTS/build.log\" >&2)\n          log_pid=$!\n          status=0\n          {command} \"$INSTALLABLE\" 2>&3 | tee \"$SIMIT_NIX_BUILD_RESULTS/result.json\" || status=$?\n          exec 3>&-\n          wait \"$log_pid\"\n          exit \"$status\"\n"));
+        write!(
+            workflow,
+            "        run: |\n          set -euo pipefail\n          exec 3> >(tee \"$SIMIT_NIX_BUILD_RESULTS/build.log\" >&2)\n          log_pid=$!\n          status=0\n          {command} \"$INSTALLABLE\" 2>&3 | tee \"$SIMIT_NIX_BUILD_RESULTS/result.json\" || status=$?\n          exec 3>&-\n          wait \"$log_pid\"\n          exit \"$status\"\n"
+        ).expect("write");
         for (index, script) in options.post_build.iter().enumerate() {
-            workflow.push_str(&format!(
+            write!(
+                workflow,
                 "      - name: Retain Nix results {}\n        run: |\n",
                 index + 1
-            ));
+            )
+            .expect("write");
             for line in script.lines() {
-                workflow.push_str(&format!("          {line}\n"));
+                writeln!(workflow, "          {line}").expect("write");
             }
         }
         // Collect failed-build diagnostics without keeping canceled runs alive.
         for (index, script) in options.post_build_always.iter().enumerate() {
-            workflow.push_str(&format!(
+            write!(
+                workflow,
                 "      - name: Retain Nix diagnostics {}\n        if: {}\n        run: |\n",
                 index + 1,
                 StepCondition::NotCancelled.wrapped()
-            ));
+            )
+            .expect("write");
             for line in script.lines() {
-                workflow.push_str(&format!("          {line}\n"));
+                writeln!(workflow, "          {line}").expect("write");
             }
         }
-        workflow.push_str(&format!(
+        write!(
+            workflow,
             "      - name: Upload Nix build evidence\n        if: {}\n",
             StepCondition::Always.expression()
-        ));
+        )
+        .expect("write");
         push_action_uses(
             &mut workflow,
             platform,
@@ -1723,12 +1781,16 @@ pub(crate) fn nix_build_matrix_file_with_nix_setup(
             nix_build_action_version(runner, options, "v7.0.2", "v4.6.2"),
             "v4.6.2",
         );
-        workflow.push_str(&format!("\n        with:\n          name: nix-build-${{{{ strategy.job-index }}}}\n          retention-days: {}\n          if-no-files-found: warn\n          path: |\n            ${{{{ runner.temp }}}}/simit-nix-build-${{{{ strategy.job-index }}}}\n", options.artifact_retention_days.unwrap_or(14)));
+        write!(
+            workflow,
+            "\n        with:\n          name: nix-build-${{{{ strategy.job-index }}}}\n          retention-days: {}\n          if-no-files-found: warn\n          path: |\n            ${{{{ runner.temp }}}}/simit-nix-build-${{{{ strategy.job-index }}}}\n",
+            options.artifact_retention_days.unwrap_or(14)
+        ).expect("write");
         for path in &options.artifact_paths {
-            workflow.push_str(&format!("            {path}\n"));
+            writeln!(workflow, "            {path}").expect("write");
         }
     } else {
-        workflow.push_str(&format!("        run: {command} \"$INSTALLABLE\"\n"));
+        writeln!(workflow, "        run: {command} \"$INSTALLABLE\"").expect("write");
     }
 
     push_docs_gate_job(
@@ -1761,8 +1823,7 @@ fn push_native_nix_runner_step_with_context(
 
 pub fn gitlab_nix_flake_workflow() -> String {
     format!(
-        "{}\nimage: nixos/nix:2.28.3\n\nstages:\n  - check\n\nflake-check:\n  stage: check\n  script:\n    - nix --extra-experimental-features 'nix-command flakes' flake check\n",
-        GENERATED_WORKFLOW_MARKER
+        "{GENERATED_WORKFLOW_MARKER}\nimage: nixos/nix:2.28.3\n\nstages:\n  - check\n\nflake-check:\n  stage: check\n  script:\n    - nix --extra-experimental-features 'nix-command flakes' flake check\n"
     )
 }
 
@@ -1907,7 +1968,7 @@ fn vscode_extension_workflow(
     platform: Platform,
     runner: &ResolvedRunner,
     vscode: &ResolvedVscode,
-    prefix: crate::release_identity::TagPrefix,
+    prefix: TagPrefix,
     nix_setup: Option<&NixSetupActionRef>,
 ) -> Result<String> {
     let mut workflow = String::new();
@@ -1915,10 +1976,12 @@ fn vscode_extension_workflow(
     workflow.push_str("name: Publish VS Code Extension\n\n");
     workflow.push_str("on:\n");
     workflow.push_str("  push:\n");
-    workflow.push_str(&format!(
-        "    tags: [\"{}[0-9]*.[0-9]*.[0-9]*\"]\n",
+    writeln!(
+        workflow,
+        "    tags: [\"{}[0-9]*.[0-9]*.[0-9]*\"]",
         prefix.as_str()
-    ));
+    )
+    .expect("write");
     workflow.push_str("  workflow_dispatch:\n\n");
     push_platform_concurrency(&mut workflow, platform);
     workflow.push_str("jobs:\n");
@@ -1966,7 +2029,7 @@ fn jetbrains_plugin_workflow(
     platform: Platform,
     runner: &ResolvedRunner,
     jetbrains: &ResolvedJetbrains,
-    prefix: crate::release_identity::TagPrefix,
+    prefix: TagPrefix,
     nix_setup: Option<&NixSetupActionRef>,
 ) -> String {
     let artifact_label = Path::new(&jetbrains.plugin_dir)
@@ -1979,10 +2042,12 @@ fn jetbrains_plugin_workflow(
     workflow.push_str("name: Publish JetBrains Plugin\n\n");
     workflow.push_str("on:\n");
     workflow.push_str("  push:\n");
-    workflow.push_str(&format!(
-        "    tags: [\"{}[0-9]*.[0-9]*.[0-9]*\"]\n",
+    writeln!(
+        workflow,
+        "    tags: [\"{}[0-9]*.[0-9]*.[0-9]*\"]",
         prefix.as_str()
-    ));
+    )
+    .expect("write");
     workflow.push_str("  workflow_dispatch:\n");
     workflow.push_str("    inputs:\n");
     workflow.push_str("      version:\n");
@@ -2178,7 +2243,7 @@ fn push_jetbrains_credential_preflight(workflow: &mut String, jetbrains: &Resolv
 fn push_jetbrains_version_validation(
     workflow: &mut String,
     jetbrains: &ResolvedJetbrains,
-    prefix: crate::release_identity::TagPrefix,
+    prefix: TagPrefix,
 ) {
     workflow.push_str("      - name: Validate plugin version and metadata\n");
     workflow.push_str("        env:\n");
@@ -2190,7 +2255,7 @@ fn push_jetbrains_version_validation(
     workflow.push_str("\n        run: |\n");
     workflow.push_str("          set -euo pipefail\n");
     workflow.push_str("          if [ -n \"$DISPATCH_VERSION\" ]; then\n            VERSION=\"$DISPATCH_VERSION\"\n          else\n");
-    if prefix == crate::release_identity::TagPrefix::V {
+    if prefix == TagPrefix::V {
         workflow.push_str("            case \"$TAG_LABEL\" in v*) VERSION=\"${TAG_LABEL#v}\" ;; *) echo 'Tag prefix mismatch' >&2; exit 1 ;; esac\n");
     } else {
         workflow.push_str("            VERSION=\"$TAG_LABEL\"\n");
@@ -2273,7 +2338,7 @@ fn push_jetbrains_sign_and_publish(workflow: &mut String, jetbrains: &ResolvedJe
 
 // Read the task's RegularFileProperty rather than guessing a filename. Bind
 // signature verification to that same output, including project overrides.
-const JETBRAINS_SIGNED_ARCHIVE_INIT_SCRIPT: &str = r#"gradle.projectsEvaluated {
+const JETBRAINS_SIGNED_ARCHIVE_INIT_SCRIPT: &str = r"gradle.projectsEvaluated {
     def currentDir = gradle.startParameter.currentDir.canonicalFile
     def projects = gradle.rootProject.allprojects.findAll { it.projectDir.canonicalFile == currentDir }
     if (projects.size() != 1) {
@@ -2291,7 +2356,7 @@ const JETBRAINS_SIGNED_ARCHIVE_INIT_SCRIPT: &str = r#"gradle.projectsEvaluated {
         }
         new File(System.getenv('RUNNER_TEMP'), 'jetbrains-plugin-signed-path').text = signed.path + '\n'
     }
-}"#;
+}";
 
 fn push_vscode_credential_preflight(
     workflow: &mut String,
@@ -2337,7 +2402,7 @@ fn push_vscode_credential_preflight(
     )));
     workflow.push_str(")\n");
     workflow.push_str("          test -n \"$VSCE_PUBLISHER\" && test \"$VSCE_PUBLISHER\" != null || { echo \"missing VS Code extension publisher in ");
-    workflow.push_str(&format!("{}/package.json", vscode.extension_dir));
+    write!(workflow, "{}/package.json", vscode.extension_dir).expect("write");
     workflow.push_str("\"; exit 1; }\n");
     workflow.push_str("          nix develop -c npx --yes @vscode/vsce verify-pat \"$VSCE_PUBLISHER\" --pat \"$VSCE_PUBLISH_PAT\" || { echo \"VS Code Marketplace publisher $VSCE_PUBLISHER is missing or the VSCE PAT lacks publisher permissions. Create/repair it at https://aka.ms/vsm-create-publisher before publishing.\"; exit 1; }\n");
     workflow.push_str("          resolve_pat ovsx >/dev/null\n\n");
@@ -2346,13 +2411,13 @@ fn push_vscode_credential_preflight(
 fn push_vscode_version_validation(
     workflow: &mut String,
     vscode: &ResolvedVscode,
-    prefix: crate::release_identity::TagPrefix,
+    prefix: TagPrefix,
 ) {
     workflow.push_str("      - name: Validate release tag and extension version\n");
     workflow.push_str("        env:\n          GITHUB_TOKEN: ${{ github.token }}\n");
     workflow.push_str("        run: |\n");
     workflow.push_str("          set -euo pipefail\n");
-    if prefix == crate::release_identity::TagPrefix::V {
+    if prefix == TagPrefix::V {
         workflow.push_str("          case \"$GITHUB_REF_NAME\" in v*) VERSION=\"${GITHUB_REF_NAME#v}\" ;; *) echo 'Tag prefix mismatch' >&2; exit 1 ;; esac\n");
     } else {
         workflow.push_str("          VERSION=\"$GITHUB_REF_NAME\"\n");
@@ -2716,14 +2781,14 @@ fn push_vscode_pat_resolution_function(workflow: &mut String, vscode: &ResolvedV
         ("vsce", &vscode.vsce_pat_file_env, "VSCE_PAT_FROM_SECRET"),
         ("ovsx", &vscode.ovsx_pat_file_env, "OVSX_PAT_FROM_SECRET"),
     ] {
-        workflow.push_str(&format!("              {publisher}) "));
+        write!(workflow, "              {publisher}) ").expect("write");
         if !matches!(vscode.pat_source, VscodePatSource::ActionsSecret) {
             workflow.push_str("file_env=");
             workflow.push_str(&shell_word(file_env));
             workflow.push_str("; ");
         }
         if !matches!(vscode.pat_source, VscodePatSource::FileEnv) {
-            workflow.push_str(&format!("secret=\"${{{secret_env}:-}}\"; "));
+            write!(workflow, "secret=\"${{{secret_env}:-}}\"; ").expect("write");
         }
         workflow.push_str(";;\n");
     }
@@ -2815,7 +2880,7 @@ fn python_ci_workflow(
     push_extra_setup_steps(&mut workflow, &options.extra_setup);
     if selected(CiComponent::FlakeWiring) {
         workflow.push_str("      - name: Check generated flake wiring\n");
-        workflow.push_str(&format!("        run: {}\n\n", super::flake_wiring_check()));
+        write!(workflow, "        run: {}\n\n", super::flake_wiring_check()).expect("write");
     }
     if selected(CiComponent::FlakeEvaluation) {
         workflow.push_str("      - name: Check flake evaluation\n");
@@ -2882,10 +2947,12 @@ fn python_publish_workflow(
     workflow.push_str("name: Publish to PyPI\n\n");
     workflow.push_str("on:\n");
     workflow.push_str("  push:\n");
-    workflow.push_str(&format!(
+    write!(
+        workflow,
         "    tags: [\"{}[0-9]*\"]\n\n",
         options.tag_prefix.as_str()
-    ));
+    )
+    .expect("write");
     push_provider_concurrency(&mut workflow, platform);
     workflow.push_str("jobs:\n");
     workflow.push_str("  publish:\n");
@@ -2968,10 +3035,12 @@ fn maturin_publish_workflow(
     workflow.push_str("name: Publish to PyPI\n\n");
     workflow.push_str("on:\n");
     workflow.push_str("  push:\n");
-    workflow.push_str(&format!(
+    write!(
+        workflow,
         "    tags: [\"{}[0-9]*\"]\n\n",
         options.tag_prefix.as_str()
-    ));
+    )
+    .expect("write");
     push_provider_concurrency(&mut workflow, platform);
     workflow.push_str("jobs:\n");
     workflow.push_str("  publish:\n");
@@ -2997,7 +3066,7 @@ fn maturin_publish_workflow(
     push_extra_setup_steps(&mut workflow, &options.extra_setup);
     workflow.push_str("      - name: Build and publish to PyPI\n");
     if pyproject_dir != "." {
-        workflow.push_str(&format!("        working-directory: {pyproject_dir}\n"));
+        writeln!(workflow, "        working-directory: {pyproject_dir}").expect("write");
     }
     workflow.push_str("        env:\n");
     workflow.push_str("          MATURIN_PYPI_TOKEN: ${{ secrets.");
@@ -3017,7 +3086,7 @@ fn ci_workflow(
     package: &Package,
     self_check: SelfCheckOptions<'_>,
     runners: &ResolvedCiRunners,
-    options: CiOptions,
+    options: &CiOptions,
     step_runners: &BTreeMap<String, ResolvedRunner>,
 ) -> String {
     if options.independent_lanes {
@@ -3044,12 +3113,12 @@ fn ci_workflow_single_job(
     package: &Package,
     self_check: SelfCheckOptions<'_>,
     runners: &ResolvedCiRunners,
-    options: CiOptions,
+    options: &CiOptions,
 ) -> String {
     let mut workflow = String::new();
     push_generated_workflow_header(&mut workflow);
     push_required_secrets_header(&mut workflow, &options.required_secrets);
-    push_ci_workflow_name(&mut workflow, package, &options);
+    push_ci_workflow_name(&mut workflow, package, options);
     workflow.push_str("on:\n");
     workflow.push_str("  push:\n");
     push_ci_branches(&mut workflow, &options.push_branches);
@@ -3059,10 +3128,10 @@ fn ci_workflow_single_job(
     }
     workflow.push('\n');
     push_github_read_permissions(&mut workflow, platform);
-    push_rust_ci_concurrency(&mut workflow, platform, &options);
+    push_rust_ci_concurrency(&mut workflow, platform, options);
     workflow.push_str("jobs:\n");
     workflow.push_str("  test:\n");
-    push_member_job_name(&mut workflow, package, &options, "test");
+    push_member_job_name(&mut workflow, package, options, "test");
     push_docs_gate_keys(&mut workflow, platform, &[]);
     workflow.push_str("    runs-on: ");
     workflow.push_str(&runs_on(&runners.ci));
@@ -3082,34 +3151,29 @@ fn ci_workflow_single_job(
                 &options.ci_nix_trusted_public_keys,
                 options.nix_setup_action_ref.as_ref(),
             );
-            push_nix_cargo_cache_steps(&mut workflow, platform, &runners.ci, &options, "test");
+            push_nix_cargo_cache_steps(&mut workflow, platform, &runners.ci, options, "test");
             push_nix_cargo_bin_path_step(&mut workflow);
             push_extra_setup_steps(&mut workflow, &options.extra_setup);
             if options.repository_checks && options.check_command.is_none() {
-                workflow.push_str(&format!(
-                "      - name: Format check\n        run: |\n          # Expand formatter variables inside the Nix shell.\n          # shellcheck disable=SC2016\n          nix develop -c {NIX_FORMAT_COMMAND}\n\n",
-            ));
+                write!(
+                    workflow,
+                    "      - name: Format check\n        run: |\n          # Expand formatter variables inside the Nix shell.\n          # shellcheck disable=SC2016\n          nix develop -c {NIX_FORMAT_COMMAND}\n\n"
+                ).expect("write");
             }
             match options.om_ci {
                 OmCiMode::Off => {
-                    push_nix_ci_legacy_steps(
-                        &mut workflow,
-                        platform,
-                        package,
-                        self_check,
-                        &options,
-                    );
+                    push_nix_ci_legacy_steps(&mut workflow, platform, package, self_check, options);
                 }
                 OmCiMode::Replace => {
-                    push_nix_check_steps(&mut workflow, &options);
+                    push_nix_check_steps(&mut workflow, options);
                     if options.repository_checks {
-                        push_om_ci_step(&mut workflow, &options);
+                        push_om_ci_step(&mut workflow, options);
                     }
                     if let Some(command) = options.check_command.as_deref() {
                         workflow.push_str(&project_check_step_yaml(runtime, command));
                     } else {
-                        push_quality_ci_steps(&mut workflow, runtime, &options);
-                        push_optional_ci_steps(&mut workflow, runtime, package, &options);
+                        push_quality_ci_steps(&mut workflow, runtime, options);
+                        push_optional_ci_steps(&mut workflow, runtime, package, options);
                     }
                     if self_check.enabled {
                         push_self_check_steps(
@@ -3117,21 +3181,15 @@ fn ci_workflow_single_job(
                             platform,
                             runtime,
                             self_check,
-                            &options,
+                            options,
                         );
                     }
                 }
                 OmCiMode::Augment => {
                     if options.repository_checks {
-                        push_om_ci_step(&mut workflow, &options);
+                        push_om_ci_step(&mut workflow, options);
                     }
-                    push_nix_ci_legacy_steps(
-                        &mut workflow,
-                        platform,
-                        package,
-                        self_check,
-                        &options,
-                    );
+                    push_nix_ci_legacy_steps(&mut workflow, platform, package, self_check, options);
                 }
             }
         }
@@ -3142,7 +3200,7 @@ fn ci_workflow_single_job(
                 package,
                 self_check,
                 &runners.ci,
-                &options,
+                options,
             );
         }
     }
@@ -3154,7 +3212,7 @@ fn ci_workflow_single_job(
         runtime,
         package,
         runners,
-        &options,
+        options,
         true,
     );
     trim_trailing_blank_lines(&mut workflow);
@@ -3187,8 +3245,7 @@ fn push_cargo_ci_steps(
         return;
     }
     if options.repository_checks {
-        workflow
-            .push_str("      - name: Format check\n        run: cargo fmt --all -- --check\n\n");
+        workflow.push_str(&cargo_format_step(package, options));
     }
     push_test_steps(workflow, runtime, package, options);
     push_quality_ci_steps(workflow, runtime, options);
@@ -3229,13 +3286,22 @@ fn ci_workflow_multi_job(
     package: &Package,
     self_check: SelfCheckOptions<'_>,
     runners: &ResolvedCiRunners,
-    options: CiOptions,
+    options: &CiOptions,
     step_runners: &BTreeMap<String, ResolvedRunner>,
 ) -> String {
+    struct StepDef<'a> {
+        runner: &'a ResolvedRunner,
+        yaml: String,
+    }
+    struct JobEmit<'a> {
+        name: String,
+        runner: &'a ResolvedRunner,
+        steps: String,
+    }
     let mut workflow = String::new();
     push_generated_workflow_header(&mut workflow);
     push_required_secrets_header(&mut workflow, &options.required_secrets);
-    push_ci_workflow_name(&mut workflow, package, &options);
+    push_ci_workflow_name(&mut workflow, package, options);
     workflow.push_str("on:\n");
     workflow.push_str("  push:\n");
     push_ci_branches(&mut workflow, &options.push_branches);
@@ -3245,13 +3311,9 @@ fn ci_workflow_multi_job(
     }
     workflow.push('\n');
     push_github_read_permissions(&mut workflow, platform);
-    push_rust_ci_concurrency(&mut workflow, platform, &options);
+    push_rust_ci_concurrency(&mut workflow, platform, options);
     workflow.push_str("jobs:\n");
 
-    struct StepDef<'a> {
-        runner: &'a ResolvedRunner,
-        yaml: String,
-    }
     let mut steps: Vec<StepDef> = Vec::new();
 
     let mut capture = |key: &str, s: &str| {
@@ -3264,7 +3326,7 @@ fn ci_workflow_multi_job(
 
     if runtime == Runtime::Nix {
         let mut checks = String::new();
-        push_nix_check_steps(&mut checks, &options);
+        push_nix_check_steps(&mut checks, options);
         if !checks.is_empty() {
             capture(STEP_FLAKE_CHECK, &checks);
         }
@@ -3276,29 +3338,32 @@ fn ci_workflow_multi_job(
         );
         if self_check.enabled {
             let mut sc = String::new();
-            push_self_check_steps(&mut sc, platform, runtime, self_check, &options);
+            push_self_check_steps(&mut sc, platform, runtime, self_check, options);
             capture(STEP_SELF_CHECK, &sc);
         }
     } else if runtime == Runtime::Nix && options.om_ci == OmCiMode::Replace {
         if options.repository_checks {
             let mut om = String::new();
-            om.push_str(&format!("      - name: Format check\n        run: |\n          nix develop -c {NIX_FORMAT_COMMAND}\n\n"));
-            push_om_ci_step(&mut om, &options);
+            write!(
+                om,
+                "      - name: Format check\n        run: |\n          nix develop -c {NIX_FORMAT_COMMAND}\n\n"
+            ).expect("write");
+            push_om_ci_step(&mut om, options);
             capture(STEP_FLAKE_CHECK, &om);
         }
         let mut quality = String::new();
-        push_quality_ci_steps(&mut quality, runtime, &options);
+        push_quality_ci_steps(&mut quality, runtime, options);
         if !quality.is_empty() {
             capture(STEP_QUALITY_TOOLS, &quality);
         }
         let mut optional = String::new();
-        push_optional_ci_steps(&mut optional, runtime, package, &options);
+        push_optional_ci_steps(&mut optional, runtime, package, options);
         if !optional.is_empty() {
             capture(STEP_CARGO_DOC, &optional);
         }
         if self_check.enabled {
             let mut sc = String::new();
-            push_self_check_steps(&mut sc, platform, runtime, self_check, &options);
+            push_self_check_steps(&mut sc, platform, runtime, self_check, options);
             capture(STEP_SELF_CHECK, &sc);
         }
     } else {
@@ -3306,7 +3371,7 @@ fn ci_workflow_multi_job(
             Runtime::Nix => {
                 if options.repository_checks && options.om_ci == OmCiMode::Augment {
                     let mut om = String::new();
-                    push_om_ci_step(&mut om, &options);
+                    push_om_ci_step(&mut om, options);
                     capture(STEP_FLAKE_CHECK, &om);
                 }
                 if options.repository_checks {
@@ -3319,17 +3384,17 @@ fn ci_workflow_multi_job(
                 }
 
                 let mut test = String::new();
-                push_test_steps(&mut test, runtime, package, &options);
+                push_test_steps(&mut test, runtime, package, options);
                 capture(STEP_CARGO_TEST, &test);
 
                 let mut q = String::new();
-                push_quality_ci_steps(&mut q, runtime, &options);
+                push_quality_ci_steps(&mut q, runtime, options);
                 if !q.is_empty() {
                     capture(STEP_QUALITY_TOOLS, &q);
                 }
 
                 let mut opt = String::new();
-                push_optional_ci_steps(&mut opt, runtime, package, &options);
+                push_optional_ci_steps(&mut opt, runtime, package, options);
                 if !opt.is_empty() {
                     capture(STEP_CARGO_DOC, &opt);
                 }
@@ -3346,38 +3411,35 @@ fn ci_workflow_multi_job(
                 }
 
                 let mut clippy = String::new();
-                push_clippy_steps(&mut clippy, runtime, package, &options);
+                push_clippy_steps(&mut clippy, runtime, package, options);
                 capture(STEP_CARGO_CLIPPY, &clippy);
 
                 if package.is_publishable() {
                     let mut pkg =
                         "      - name: Package crate\n        run: nix develop -c cargo package"
                             .to_string();
-                    push_package_selector(&mut pkg, package, &options);
-                    push_package_flags(&mut pkg, package, &options);
+                    push_package_selector(&mut pkg, package, options);
+                    push_package_flags(&mut pkg, package, options);
                     capture(STEP_CARGO_PACKAGE, &pkg);
                 }
             }
             Runtime::Cargo => {
                 if options.repository_checks {
-                    capture(
-                        STEP_CARGO_FMT,
-                        "      - name: Format check\n        run: cargo fmt --all -- --check\n\n",
-                    );
+                    capture(STEP_CARGO_FMT, &cargo_format_step(package, options));
                 }
 
                 let mut test = String::new();
-                push_test_steps(&mut test, runtime, package, &options);
+                push_test_steps(&mut test, runtime, package, options);
                 capture(STEP_CARGO_TEST, &test);
 
                 let mut q = String::new();
-                push_quality_ci_steps(&mut q, runtime, &options);
+                push_quality_ci_steps(&mut q, runtime, options);
                 if !q.is_empty() {
                     capture(STEP_QUALITY_TOOLS, &q);
                 }
 
                 let mut opt = String::new();
-                push_optional_ci_steps(&mut opt, runtime, package, &options);
+                push_optional_ci_steps(&mut opt, runtime, package, options);
                 if !opt.is_empty() {
                     capture(STEP_CARGO_DOC, &opt);
                 }
@@ -3391,24 +3453,18 @@ fn ci_workflow_multi_job(
                 }
 
                 let mut clippy = String::new();
-                push_clippy_steps(&mut clippy, runtime, package, &options);
+                push_clippy_steps(&mut clippy, runtime, package, options);
                 capture(STEP_CARGO_CLIPPY, &clippy);
 
                 if package.is_publishable() {
                     let mut pkg =
                         String::from("      - name: Package crate\n        run: cargo package");
-                    push_package_selector(&mut pkg, package, &options);
-                    push_package_flags(&mut pkg, package, &options);
+                    push_package_selector(&mut pkg, package, options);
+                    push_package_flags(&mut pkg, package, options);
                     capture(STEP_CARGO_PACKAGE, &pkg);
                 }
             }
         }
-    }
-
-    struct JobEmit<'a> {
-        name: String,
-        runner: &'a ResolvedRunner,
-        steps: String,
     }
 
     // Group steps by runner label, deduplicating job names.
@@ -3416,12 +3472,7 @@ fn ci_workflow_multi_job(
     {
         let mut label_to_idx: BTreeMap<&str, usize> = BTreeMap::new();
         for step in &steps {
-            let label = step
-                .runner
-                .labels
-                .first()
-                .map(|s| s.as_str())
-                .unwrap_or("runner");
+            let label = step.runner.labels.first().map_or("runner", String::as_str);
             let idx = label_to_idx.len();
             let entry = label_to_idx.entry(label).or_insert(idx);
             if *entry == jobs.len() {
@@ -3446,8 +3497,8 @@ fn ci_workflow_multi_job(
 
     let first_job_name = jobs.first().map(|j| j.name.clone()).unwrap_or_default();
     for (idx, job) in jobs.iter().enumerate() {
-        workflow.push_str(&format!("  {}:\n", job.name));
-        push_member_job_name(&mut workflow, package, &options, &job.name);
+        writeln!(workflow, "  {}:", job.name).expect("write");
+        push_member_job_name(&mut workflow, package, options, &job.name);
         if idx > 0 {
             push_docs_gate_keys(&mut workflow, platform, &[&first_job_name]);
         } else {
@@ -3471,13 +3522,7 @@ fn ci_workflow_multi_job(
                     &options.ci_nix_trusted_public_keys,
                     options.nix_setup_action_ref.as_ref(),
                 );
-                push_nix_cargo_cache_steps(
-                    &mut workflow,
-                    platform,
-                    job.runner,
-                    &options,
-                    &job.name,
-                );
+                push_nix_cargo_cache_steps(&mut workflow, platform, job.runner, options, &job.name);
                 push_nix_cargo_bin_path_step(&mut workflow);
                 push_extra_setup_steps(&mut workflow, &options.extra_setup);
             }
@@ -3498,7 +3543,7 @@ fn ci_workflow_multi_job(
         runtime,
         package,
         runners,
-        &options,
+        options,
         true,
     );
     trim_trailing_blank_lines(&mut workflow);
@@ -3513,10 +3558,12 @@ fn ci_workflow_multi_job(
 
 fn push_ci_workflow_name(workflow: &mut String, package: &Package, options: &CiOptions) {
     if options.package_scoped {
-        workflow.push_str(&format!(
+        write!(
+            workflow,
             "name: \"CI ({})\"\n\n",
             yaml_double_quote(&package.name)
-        ));
+        )
+        .expect("write");
     } else {
         workflow.push_str("name: CI\n\n");
     }
@@ -3524,11 +3571,13 @@ fn push_ci_workflow_name(workflow: &mut String, package: &Package, options: &CiO
 
 fn push_member_job_name(workflow: &mut String, package: &Package, options: &CiOptions, job: &str) {
     if options.package_scoped {
-        workflow.push_str(&format!(
-            "    name: \"{} / {}\"\n",
+        writeln!(
+            workflow,
+            "    name: \"{} / {}\"",
             yaml_double_quote(&package.name),
             yaml_double_quote(job)
-        ));
+        )
+        .expect("write");
     }
 }
 
@@ -3557,7 +3606,7 @@ fn push_required_gate_jobs(
         let gate_runtime = gate.runtime.unwrap_or_else(|| runtime.into());
         let job = format!("gate-{}", sanitize_gate_id(&gate.id));
         trim_trailing_blank_lines(workflow);
-        workflow.push_str(&format!("\n  {job}:\n"));
+        write!(workflow, "\n  {job}:\n").expect("write");
         push_member_job_name(workflow, package, options, &job);
         if docs_gate {
             push_docs_gate_keys(workflow, platform, &[]);
@@ -3566,15 +3615,14 @@ fn push_required_gate_jobs(
         workflow.push_str(&runs_on(&runners.ci));
         workflow.push('\n');
         let job_timeout = gate.timeout_minutes + if gate.artifacts.is_some() { 15 } else { 0 };
-        workflow.push_str(&format!("    timeout-minutes: {job_timeout}\n"));
+        writeln!(workflow, "    timeout-minutes: {job_timeout}").expect("write");
         push_job_github_read_permissions(workflow, platform);
         // Gate env is scoped to this job only. Values may reference
         // `${{ secrets.X }}` for project-owned test credentials; release
         // secrets (CRATES_IO_API_TOKEN, minisign, etc.) must never appear here.
         // The project env comes first, as in the release gates, so a gate
         // passes CI under the same RUSTDOCFLAGS etc. that release enforces.
-        let mut gate_env: std::collections::BTreeMap<String, String> =
-            options.extra_env.iter().cloned().collect();
+        let mut gate_env: BTreeMap<String, String> = options.extra_env.iter().cloned().collect();
         gate_env.extend(gate.env.clone());
         if gate.runtime == Some(GateRuntime::Cargo) {
             push_container(workflow, platform, Runtime::Cargo, package);
@@ -3605,11 +3653,13 @@ fn push_required_gate_jobs(
         workflow.push_str(&gate.id);
         workflow.push('\n');
         if gate.artifacts.is_some() {
-            workflow.push_str(&format!(
+            write!(
+                workflow,
                 "        id: simit-required-gate-{}\n        timeout-minutes: {}\n",
                 sanitize_gate_id(&gate.id),
                 gate.timeout_minutes
-            ));
+            )
+            .expect("write");
         }
         workflow.push_str("        run: ");
         workflow.push_str(&gate.run);
@@ -3729,7 +3779,7 @@ pub(crate) fn target_smokes_file_with_nix_setup(
             workflow.push('\n');
         }
         first_smoke = false;
-        workflow.push_str(&format!("  build-target-smoke-{id}:\n"));
+        writeln!(workflow, "  build-target-smoke-{id}:").expect("write");
         push_docs_gate_keys(&mut workflow, platform, &[]);
         workflow.push_str("    runs-on: ");
         workflow.push_str(&runs_on(ci_runner));
@@ -3744,11 +3794,12 @@ pub(crate) fn target_smokes_file_with_nix_setup(
             nix_cache.1,
             nix_setup,
         );
-        workflow.push_str(&format!(
+        write!(
+            workflow,
             "      - name: Build {}\n        run: |\n          set -euo pipefail\n          nix build {} --out-link result\n          mkdir {dir}\n          cp -rL result/. {dir}/\n          chmod -R u+w {dir}\n\n",
             smoke.id,
-            shell_word(&smoke.nix_build),
-        ));
+            shell_word(&smoke.nix_build)
+        ).expect("write");
         workflow.push_str("      - name: Upload build output\n");
         push_action_uses(
             &mut workflow,
@@ -3758,24 +3809,28 @@ pub(crate) fn target_smokes_file_with_nix_setup(
             "v7.0.2",
             "v4.6.2",
         );
-        workflow.push_str(&format!(
+        write!(
+            workflow,
             "        with:\n          name: {dir}\n          path: {dir}/\n          include-hidden-files: true\n          retention-days: 1\n          if-no-files-found: error\n"
-        ));
+        ).expect("write");
 
         // Run on the target OS against the downloaded output.
         let build_job = format!("build-target-smoke-{id}");
-        workflow.push_str(&format!("\n  target-smoke-{id}:\n"));
+        write!(workflow, "\n  target-smoke-{id}:\n").expect("write");
         push_docs_gate_keys(&mut workflow, platform, &[&build_job]);
         workflow.push_str("    runs-on: ");
         workflow.push_str(&runs_on(&target));
-        workflow.push_str(&format!(
+        write!(
+            workflow,
             "\n    timeout-minutes: {}\n",
             smoke.timeout_minutes + 15
-        ));
+        )
+        .expect("write");
         push_job_github_read_permissions(&mut workflow, platform);
-        workflow.push_str(&format!(
+        write!(
+            workflow,
             "    env:\n      SIMIT_TARGET_SMOKE_DIR: ${{{{ github.workspace }}}}/{dir}\n    steps:\n"
-        ));
+        ).expect("write");
         push_checkout_step(&mut workflow, platform, &target);
         workflow.push_str("      - name: Download build output\n");
         push_action_uses(
@@ -3786,28 +3841,34 @@ pub(crate) fn target_smokes_file_with_nix_setup(
             "v8.0.2",
             "v4.3.0",
         );
-        workflow.push_str(&format!(
+        write!(
+            workflow,
             "        with:\n          name: {dir}\n          path: {dir}\n\n"
-        ));
-        workflow.push_str(&format!(
+        )
+        .expect("write");
+        write!(
+            workflow,
             "      - name: Target smoke {}\n        id: simit-required-gate-{id}\n        shell: {}\n        timeout-minutes: {}\n",
             smoke.id,
             smoke.shell.as_str(),
             smoke.timeout_minutes
-        ));
+        ).expect("write");
         if !smoke.env.is_empty() {
             workflow.push_str("        env:\n");
             for (key, value) in &smoke.env {
-                workflow.push_str(&format!(
-                    "          {key}: \"{}\"\n",
+                writeln!(
+                    workflow,
+                    "          {key}: \"{}\"",
                     yaml_double_quote(value)
-                ));
+                )
+                .expect("write");
             }
         }
-        workflow.push_str(&format!("        run: |\n          {}\n", smoke.run));
+        write!(workflow, "        run: |\n          {}\n", smoke.run).expect("write");
         // Reuse the gate evidence upload: it runs when the smoke started,
         // pass or fail, and never publishes for a skipped smoke.
         let gate = crate::config::RequiredGate {
+            secret: None,
             id: smoke.id.clone(),
             run: smoke.run.clone(),
             runtime: None,
@@ -3840,7 +3901,7 @@ pub(crate) fn is_toolchain_name(name: &str) -> bool {
 }
 
 /// The `[toolchain].channel` of `rust-toolchain.toml`, when it is a plain toolchain name.
-pub fn rust_toolchain_channel(root: &std::path::Path) -> Option<String> {
+pub fn rust_toolchain_channel(root: &Path) -> Option<String> {
     let text = std::fs::read_to_string(root.join("rust-toolchain.toml")).ok()?;
     let doc = text.parse::<toml_edit::DocumentMut>().ok()?;
     let channel = doc.get("toolchain")?.get("channel")?.as_str()?;
@@ -3878,7 +3939,7 @@ pub fn native_tests_file(
             workflow.push('\n');
         }
         first_test = false;
-        workflow.push_str(&format!("  native-test-{id}:\n"));
+        writeln!(workflow, "  native-test-{id}:").expect("write");
         push_docs_gate_keys(&mut workflow, platform, &[]);
         workflow.push_str("    runs-on: ");
         workflow.push_str(&runs_on(&runner));
@@ -3890,47 +3951,56 @@ pub fn native_tests_file(
             } else {
                 0
             };
-        workflow.push_str(&format!(
+        write!(
+            workflow,
             "\n    timeout-minutes: {}\n",
             test.timeout_minutes + overhead
-        ));
+        )
+        .expect("write");
         push_job_github_read_permissions(&mut workflow, platform);
         workflow.push_str("    steps:\n");
         push_checkout_step(&mut workflow, platform, &runner);
         workflow.push_str("      - name: Install Rust\n        uses: ");
         workflow.push_str(&github_action_ref("dtolnay/rust-toolchain", "stable"));
-        workflow.push_str(&format!(
+        write!(
+            workflow,
             "\n        with:\n          toolchain: {toolchain}\n\n"
-        ));
+        )
+        .expect("write");
         if let Some(setup) = &test.setup {
-            workflow.push_str(&format!(
+            write!(
+                workflow,
                 "      - name: Setup {}\n        shell: bash\n        timeout-minutes: {}\n        run: |\n",
                 test.id,
                 crate::config::NATIVE_TEST_SETUP_MINUTES
-            ));
+            ).expect("write");
             for line in setup.trim().lines() {
                 if line.trim().is_empty() {
                     workflow.push('\n');
                 } else {
-                    workflow.push_str(&format!("          {}\n", line.trim_end()));
+                    writeln!(workflow, "          {}", line.trim_end()).expect("write");
                 }
             }
             workflow.push('\n');
         }
-        workflow.push_str(&format!(
+        write!(
+            workflow,
             "      - name: Native tests {}\n        shell: bash\n        timeout-minutes: {}\n",
             test.id, test.timeout_minutes
-        ));
+        )
+        .expect("write");
         if !test.env.is_empty() {
             workflow.push_str("        env:\n");
             for (key, value) in &test.env {
-                workflow.push_str(&format!(
-                    "          {key}: \"{}\"\n",
+                writeln!(
+                    workflow,
+                    "          {key}: \"{}\"",
                     yaml_double_quote(value)
-                ));
+                )
+                .expect("write");
             }
         }
-        workflow.push_str(&format!("        run: cargo test {}\n", test.args.trim()));
+        writeln!(workflow, "        run: cargo test {}", test.args.trim()).expect("write");
     }
     trim_trailing_blank_lines(&mut workflow);
     push_docs_gate_job(&mut workflow, platform, CHECKOUT_VERSION, None);
@@ -3951,9 +4021,10 @@ pub(crate) fn push_required_gate_artifacts(
         return;
     };
     let id = sanitize_gate_id(&gate.id);
-    workflow.push_str(&format!(
-        "\n      - name: Retain required gate evidence\n        if: always() && steps.simit-required-gate-{id}.outcome != '' && steps.simit-required-gate-{id}.outcome != 'skipped'\n        timeout-minutes: 5\n",
-    ));
+    write!(
+        workflow,
+        "\n      - name: Retain required gate evidence\n        if: always() && steps.simit-required-gate-{id}.outcome != '' && steps.simit-required-gate-{id}.outcome != 'skipped'\n        timeout-minutes: 5\n"
+    ).expect("write");
     push_action_uses(
         workflow,
         Platform::Github,
@@ -3962,12 +4033,14 @@ pub(crate) fn push_required_gate_artifacts(
         "v7.0.2",
         "v4.6.2",
     );
-    workflow.push_str(&format!(
+    write!(
+        workflow,
         "        with:\n          name: \"{}{}{}\"\n          include-hidden-files: true\n",
         yaml_double_quote(name_affixes.0),
         yaml_double_quote(&artifacts.name),
         yaml_double_quote(name_affixes.1)
-    ));
+    )
+    .expect("write");
     let mut paths = String::new();
     for path in &artifacts.paths {
         let (exclude, path) = path
@@ -3983,16 +4056,20 @@ pub(crate) fn push_required_gate_artifacts(
                     .get(2)
                     .is_some_and(|ch| matches!(ch, b'/' | b'\\')));
         let prefix = if absolute { "" } else { directory };
-        paths.push_str(&format!("{exclude}{prefix}{path}\n"));
+        writeln!(paths, "{exclude}{prefix}{path}").expect("write");
     }
-    workflow.push_str(&format!(
-        "          path: {}\n",
+    writeln!(
+        workflow,
+        "          path: {}",
         serde_json::to_string(&paths).expect("artifact paths serialize")
-    ));
-    workflow.push_str(&format!(
+    )
+    .expect("write");
+    write!(
+        workflow,
         "          retention-days: {}\n          if-no-files-found: warn\n",
         artifacts.retention_days
-    ));
+    )
+    .expect("write");
 }
 
 fn artifact_path_has_absolute_context(path: &str) -> bool {
@@ -4028,7 +4105,7 @@ fn publish_workflow(
     runtime: Runtime,
     package: &Package,
     runner: &ResolvedRunner,
-    options: CiOptions,
+    options: &CiOptions,
 ) -> Result<String> {
     if platform == Platform::Forgejo
         && let Some(gate) = options.required_gates.first()
@@ -4055,10 +4132,12 @@ fn publish_workflow(
     );
     push_release_security_header(&mut workflow, false);
     if platform == Platform::Github {
-        workflow.push_str(&format!(
+        write!(
+            workflow,
             "name: \"{}\"\n\n",
             yaml_double_quote(&trusted_publisher::crate_build_display(&package.name))
-        ));
+        )
+        .expect("write");
     } else {
         workflow.push_str("name: Publish Crate\n\n");
     }
@@ -4080,7 +4159,7 @@ fn publish_workflow(
     if validate_in_separate_job {
         workflow.push_str("  validate:\n");
         push_job_github_read_permissions(&mut workflow, platform);
-        workflow.push_str(&format!("    runs-on: {}\n", runs_on(runner)));
+        writeln!(workflow, "    runs-on: {}", runs_on(runner)).expect("write");
         workflow.push_str("    timeout-minutes: 15\n");
         push_container(&mut workflow, platform, Runtime::Cargo, package);
         workflow.push_str("    steps:\n");
@@ -4128,15 +4207,15 @@ fn publish_workflow(
             push_extra_setup_steps(&mut workflow, &options.extra_setup);
             match options.om_ci {
                 OmCiMode::Off => {
-                    push_nix_publish_legacy_steps(&mut workflow, platform, package, &options);
+                    push_nix_publish_legacy_steps(&mut workflow, platform, package, options);
                 }
                 OmCiMode::Replace => {
-                    push_om_ci_step(&mut workflow, &options);
-                    push_quality_tool_install_steps(&mut workflow, runtime, &options);
-                    push_optional_publish_steps(&mut workflow, runtime, package, &options);
+                    push_om_ci_step(&mut workflow, options);
+                    push_quality_tool_install_steps(&mut workflow, runtime, options);
+                    push_optional_publish_steps(&mut workflow, runtime, package, options);
                     workflow.push_str("      - name: Dry-run publish\n");
                     workflow.push_str("        run: nix develop -c cargo publish");
-                    push_package_selector(&mut workflow, package, &options);
+                    push_package_selector(&mut workflow, package, options);
                     workflow.push_str(" --dry-run\n\n");
                     workflow.push_str(&publish_step(
                         platform,
@@ -4147,8 +4226,8 @@ fn publish_workflow(
                     ));
                 }
                 OmCiMode::Augment => {
-                    push_om_ci_step(&mut workflow, &options);
-                    push_nix_publish_legacy_steps(&mut workflow, platform, package, &options);
+                    push_om_ci_step(&mut workflow, options);
+                    push_nix_publish_legacy_steps(&mut workflow, platform, package, options);
                 }
             }
         }
@@ -4161,13 +4240,13 @@ fn publish_workflow(
                 options.tag_prefix,
             ));
             push_extra_setup_steps(&mut workflow, &options.extra_setup);
-            push_test_steps(&mut workflow, runtime, package, &options);
-            push_quality_tool_install_steps(&mut workflow, runtime, &options);
-            push_optional_publish_steps(&mut workflow, runtime, package, &options);
-            push_clippy_steps(&mut workflow, runtime, package, &options);
+            push_test_steps(&mut workflow, runtime, package, options);
+            push_quality_tool_install_steps(&mut workflow, runtime, options);
+            push_optional_publish_steps(&mut workflow, runtime, package, options);
+            push_clippy_steps(&mut workflow, runtime, package, options);
             workflow.push_str("      - name: Dry-run publish\n");
             workflow.push_str("        run: cargo publish");
-            push_package_selector(&mut workflow, package, &options);
+            push_package_selector(&mut workflow, package, options);
             workflow.push_str(" --dry-run\n\n");
             workflow.push_str(&publish_step(
                 platform,
@@ -4377,10 +4456,12 @@ fn push_windows_publish_job(
     workflow.push_str("          merge-multiple: true\n\n");
     push_stable_rust_setup_step(workflow, platform);
     workflow.push_str("      - name: Install simit\n");
-    workflow.push_str(&format!(
+    write!(
+        workflow,
         "        run: {}\n\n",
         super::simit_cargo_install()
-    ));
+    )
+    .expect("write");
 
     if let Some(chocolatey) = &options.chocolatey {
         push_chocolatey_publish_step(workflow, chocolatey, options.tag_prefix);
@@ -4520,7 +4601,7 @@ fn resolve_windows_archive(pattern: &str, name: &str, arch: &str) -> String {
 fn push_chocolatey_publish_step(
     workflow: &mut String,
     opts: &ChocolateyOptions,
-    prefix: crate::release_identity::TagPrefix,
+    prefix: TagPrefix,
 ) {
     let archive = resolve_windows_archive(&opts.archive_pattern, &opts.name, "x86_64");
     workflow.push_str("      - name: Install Chocolatey\n");
@@ -4557,11 +4638,7 @@ fn push_chocolatey_publish_step(
     workflow.push_str("            --api-key-env CHOCOLATEY_API_KEY\n\n");
 }
 
-fn push_scoop_publish_step(
-    workflow: &mut String,
-    opts: &ScoopOptions,
-    prefix: crate::release_identity::TagPrefix,
-) {
+fn push_scoop_publish_step(workflow: &mut String, opts: &ScoopOptions, prefix: TagPrefix) {
     workflow.push_str("      - name: Publish Scoop bucket\n");
     workflow.push_str("        env:\n");
     workflow.push_str("          SCOOP_BUCKET_TOKEN: ${{ secrets.");
@@ -4609,8 +4686,8 @@ fn push_windows_version_lines(workflow: &mut String) {
     workflow.push_str("          if (-not $version) { throw 'Release tag name is unavailable' }\n");
 }
 
-fn push_windows_version_prefix(workflow: &mut String, prefix: crate::release_identity::TagPrefix) {
-    if prefix == crate::release_identity::TagPrefix::V {
+fn push_windows_version_prefix(workflow: &mut String, prefix: TagPrefix) {
+    if prefix == TagPrefix::V {
         workflow.push_str("          if (-not $version.StartsWith('v')) { throw 'Release tag prefix mismatch' }\n          $version = $version.Substring(1)\n");
     }
 }
@@ -4710,7 +4787,7 @@ fn push_homebrew_publish_step(
     workflow: &mut String,
     platform: Platform,
     opts: &HomebrewOptions,
-    prefix: crate::release_identity::TagPrefix,
+    prefix: TagPrefix,
 ) {
     let tap_repo = homebrew_tap_repo(&opts.tap_url);
     let archives = homebrew_archives(opts);
@@ -4863,8 +4940,7 @@ fn homebrew_tap_repo(tap_url: &str) -> String {
         .trim_start_matches("http://")
         .trim_end_matches(".git")
         .split_once('/')
-        .map(|(_, path)| path.to_owned())
-        .unwrap_or_else(|| tap_url.to_owned())
+        .map_or_else(|| tap_url.to_owned(), |(_, path)| path.to_owned())
 }
 
 fn push_release_security_header(workflow: &mut String, include_artifact_signing: bool) {
@@ -4996,11 +5072,7 @@ fn push_release_integrity_steps(workflow: &mut String, platform: Platform) {
     workflow.push_str("          done\n\n");
 }
 
-fn push_release_smoke_step(
-    workflow: &mut String,
-    command: &str,
-    prefix: crate::release_identity::TagPrefix,
-) {
+fn push_release_smoke_step(workflow: &mut String, command: &str, prefix: TagPrefix) {
     workflow.push_str("      - name: Run release smoke checks\n");
     workflow.push_str("        run: |\n");
     workflow.push_str("          set -euo pipefail\n");
@@ -5016,8 +5088,8 @@ fn push_release_smoke_step(
     workflow.push_str(" \"$VERSION\" release\n\n");
 }
 
-fn push_bash_version_prefix(workflow: &mut String, prefix: crate::release_identity::TagPrefix) {
-    if prefix == crate::release_identity::TagPrefix::V {
+fn push_bash_version_prefix(workflow: &mut String, prefix: TagPrefix) {
+    if prefix == TagPrefix::V {
         workflow.push_str("          case \"$VERSION\" in v*) VERSION=\"${VERSION#v}\" ;; *) echo 'Release tag prefix mismatch' >&2; exit 1 ;; esac\n");
     }
 }
@@ -5145,7 +5217,7 @@ pub(crate) fn with_maintenance_branches(branches: &[String]) -> Vec<String> {
     branches
 }
 
-/// Only x86_64 Linux hosted runners expose KVM. A native runner matrix
+/// Only `x86_64` Linux hosted runners expose KVM. A native runner matrix
 /// decides that inside the script, so the step itself stays unconditional and
 /// its outcome needs no proof.
 fn push_hosted_kvm_step(workflow: &mut String, native_runners: bool) {
@@ -5166,7 +5238,7 @@ fn push_ci_branches(workflow: &mut String, branches: &[String]) {
     } else {
         workflow.push_str("    branches:\n");
         for branch in with_maintenance_branches(branches) {
-            workflow.push_str(&format!("      - \"{}\"\n", yaml_double_quote(&branch)));
+            writeln!(workflow, "      - \"{}\"", yaml_double_quote(&branch)).expect("write");
         }
     }
 }
@@ -5202,7 +5274,7 @@ pub(crate) fn docs_gate_condition(needs: &[&str]) -> String {
     let mut condition =
         format!("${{{{ !cancelled() && needs.{DOCS_GATE_JOB}.outputs.code != 'false'");
     for need in needs {
-        condition.push_str(&format!(" && needs.{need}.result == 'success'"));
+        write!(condition, " && needs.{need}.result == 'success'").expect("write");
     }
     condition.push_str(" }}");
     condition
@@ -5223,10 +5295,12 @@ fn push_docs_gate_job(
     workflow.push_str(DOCS_GATE_JOB);
     workflow.push_str(":\n    name: ");
     if let Some(member) = member {
-        workflow.push_str(&format!(
+        write!(
+            workflow,
             "\"{}\"",
             yaml_double_quote(&format!("{member} / {DOCS_GATE_JOB}"))
-        ));
+        )
+        .expect("write");
     } else {
         workflow.push_str(DOCS_GATE_JOB_NAME);
     }
@@ -5249,7 +5323,7 @@ fn push_docs_gate_job(
     workflow.push_str(DOCS_GATE_STEP);
     workflow.push_str("\n        shell: bash\n        env:\n");
     for (name, value) in DOCS_GATE_ENV {
-        workflow.push_str(&format!("          {name}: {value}\n"));
+        writeln!(workflow, "          {name}: {value}").expect("write");
     }
     workflow.push_str("        run: |\n");
     workflow.push_str(&docs_gate_script("          "));
@@ -5762,17 +5836,19 @@ fn push_install_nix_step_with_netrc(
         if !substituters.is_empty() || !trusted_public_keys.is_empty() {
             let mut config = String::new();
             if !substituters.is_empty() {
-                config.push_str(&format!("substituters = {}\n", substituters.join(" ")));
+                writeln!(config, "substituters = {}", substituters.join(" ")).expect("write");
             }
             if !trusted_public_keys.is_empty() {
-                config.push_str(&format!(
-                    "trusted-public-keys = {}\n",
+                writeln!(
+                    config,
+                    "trusted-public-keys = {}",
                     trusted_public_keys.join(" ")
-                ));
+                )
+                .expect("write");
             }
             workflow.push_str("      - name: Configure preinstalled Nix caches\n        env:\n          SIMIT_NIX_CACHE_CONFIG: |\n");
             for line in config.lines() {
-                workflow.push_str(&format!("            {line}\n"));
+                writeln!(workflow, "            {line}").expect("write");
             }
             workflow.push_str("        run: |\n          delimiter=SIMIT_NIX_CACHE\n          while printf '%s\\n' \"${NIX_CONFIG:-}\" \"$SIMIT_NIX_CACHE_CONFIG\" | grep -Fx \"$delimiter\" > /dev/null; do\n            delimiter=\"${delimiter}_\"\n          done\n          printf '%s\\n' \"NIX_CONFIG<<$delimiter\" \"${NIX_CONFIG:-}\" \"$SIMIT_NIX_CACHE_CONFIG\" \"$delimiter\" >> \"$GITHUB_ENV\"\n\n");
         }
@@ -5858,7 +5934,10 @@ fn push_nix_cargo_cache_steps(
         "v4.3.0",
     );
     workflow.push_str("        with:\n          path: |\n            /tmp/.cargo/registry\n            /tmp/.cargo/git\n            target\n");
-    workflow.push_str(&format!("          key: cargo-nix-${{{{ runner.os }}}}-${{{{ runner.arch }}}}-{scope}-${{{{ hashFiles('Cargo.lock', 'flake.lock', 'flake.nix', 'rust-toolchain.toml', '.cargo/config', '.cargo/config.toml') }}}}\n          restore-keys: |\n            cargo-nix-${{{{ runner.os }}}}-${{{{ runner.arch }}}}-{scope}-\n\n"));
+    write!(
+        workflow,
+        "          key: cargo-nix-${{{{ runner.os }}}}-${{{{ runner.arch }}}}-{scope}-${{{{ hashFiles('Cargo.lock', 'flake.lock', 'flake.nix', 'rust-toolchain.toml', '.cargo/config', '.cargo/config.toml') }}}}\n          restore-keys: |\n            cargo-nix-${{{{ runner.os }}}}-${{{{ runner.arch }}}}-{scope}-\n\n"
+    ).expect("write");
 }
 
 fn project_check_step_yaml(runtime: Runtime, command: &str) -> String {
@@ -5904,10 +5983,12 @@ fn push_nix_ci_legacy_steps(
 
 fn push_flake_wiring_check_step(workflow: &mut String, options: &CiOptions) {
     if options.repository_checks && options.components.contains(&CiComponent::FlakeWiring) {
-        workflow.push_str(&format!(
+        write!(
+            workflow,
             "      - name: Check generated flake wiring\n        run: {}\n\n",
             super::flake_wiring_check()
-        ));
+        )
+        .expect("write");
     }
 }
 
@@ -5960,7 +6041,7 @@ fn push_nix_publish_legacy_steps(
     ));
 }
 
-fn rust_container(package: &Package) -> String {
+pub(super) fn rust_container(package: &Package) -> String {
     let Some(rust_version) = package.rust_version.as_deref() else {
         return "rust:bookworm".to_owned();
     };
@@ -5984,10 +6065,6 @@ fn rust_version_supports_trixie(rust_version: &str) -> bool {
 
 pub(super) fn push_rust_setup_step(workflow: &mut String, platform: Platform) {
     match platform {
-        Platform::Forgejo => {
-            workflow.push_str("      - name: Install Rust components\n");
-            workflow.push_str("        run: rustup component add clippy rustfmt\n\n");
-        }
         Platform::Github => {
             workflow.push_str("      - name: Install Rust\n");
             workflow.push_str("        uses: ");
@@ -5997,7 +6074,7 @@ pub(super) fn push_rust_setup_step(workflow: &mut String, platform: Platform) {
             workflow.push_str("          toolchain: stable\n");
             workflow.push_str("          components: rustfmt, clippy\n\n");
         }
-        Platform::Gitlab => {
+        Platform::Forgejo | Platform::Gitlab => {
             workflow.push_str("      - name: Install Rust components\n");
             workflow.push_str("        run: rustup component add clippy rustfmt\n\n");
         }
@@ -6021,9 +6098,10 @@ fn push_rust_cache_steps(workflow: &mut String, platform: Platform, runner: &Res
         Platform::Github => ".github/workflows/*.yaml",
         Platform::Gitlab => ".gitlab-ci.yml",
     };
-    workflow.push_str(&format!(
-        "          key: cargo-bin-${{{{ runner.os }}}}-${{{{ runner.arch }}}}-${{{{ hashFiles('{workflow_glob}') }}}}\n\n",
-    ));
+    write!(
+        workflow,
+        "          key: cargo-bin-${{{{ runner.os }}}}-${{{{ runner.arch }}}}-${{{{ hashFiles('{workflow_glob}') }}}}\n\n"
+    ).expect("write");
     if platform == Platform::Forgejo {
         workflow.push_str("      - name: Verify compiler cache\n");
         workflow.push_str("        run: |\n");
@@ -6058,12 +6136,163 @@ fn push_sccache_stats_step(workflow: &mut String, platform: Platform, runtime: R
 pub(super) fn unit_test_target_args(package: &Package, options: &CiOptions) -> &'static str {
     if !options.unit_tests_only {
         ""
-    } else if !(package.has_library_target() || options.workspace_has_library)
-        && (package.has_binary_target() || options.workspace_has_binary)
-    {
+    } else if !package.has_library_target() && package.has_binary_target() {
         " --bins"
     } else {
         " --lib"
+    }
+}
+
+pub(super) fn test_selections<'a>(
+    package: &Package,
+    options: &'a CiOptions,
+    no_default: bool,
+) -> Vec<(String, &'static str, Option<&'a [String]>)> {
+    if options.workspace_strategy != WorkspaceStrategy::Aggregate || !options.unit_tests_only {
+        return vec![(
+            package_selector(package, options),
+            unit_test_target_args(package, options),
+            None,
+        )];
+    }
+    if options.workspace_bin_members.is_empty() {
+        return vec![(package_selector(package, options), " --lib", None)];
+    }
+    if options.workspace_lib_members.is_empty() {
+        return vec![(package_selector(package, options), " --bins", None)];
+    }
+    [
+        (
+            &options.workspace_lib_members,
+            " --lib",
+            options.lib_has_any_feature,
+            options.lib_has_non_empty_default_feature,
+        ),
+        (
+            &options.workspace_bin_members,
+            " --bins",
+            options.bin_has_any_feature,
+            options.bin_has_non_empty_default_feature,
+        ),
+    ]
+    .into_iter()
+    .filter(|&(_, _, any, default)| !no_default || if options.all_features { any } else { default })
+    .map(|(members, target, _, _)| (member_selector(members), target, Some(members.as_slice())))
+    .collect()
+}
+
+fn member_selector(members: &[String]) -> String {
+    let mut selector = String::new();
+    for name in members {
+        write!(selector, " -p {}", shell_word(name)).expect("write");
+    }
+    selector
+}
+
+pub(super) fn feature_args(
+    options: &CiOptions,
+    members: Option<&[String]>,
+    no_default: bool,
+) -> String {
+    if no_default {
+        return " --no-default-features".to_owned();
+    }
+    if options.all_features {
+        return " --all-features".to_owned();
+    }
+    if options.workspace_strategy != WorkspaceStrategy::Aggregate {
+        return String::new();
+    }
+    let features = options
+        .package_features
+        .iter()
+        .filter(|(package, _)| match members {
+            Some(members) => members.contains(package),
+            None => !options.exclude_packages.contains(package),
+        })
+        .flat_map(|(package, features)| {
+            features
+                .iter()
+                .map(move |feature| format!("{package}/{feature}"))
+        })
+        .collect::<Vec<_>>();
+    if features.is_empty() {
+        String::new()
+    } else {
+        format!(" --features {}", shell_word(&features.join(",")))
+    }
+}
+
+pub(super) fn clippy_targets(package: &Package, options: &CiOptions) -> &'static str {
+    if options.clippy_all_targets {
+        " --all-targets"
+    } else if options.workspace_strategy == WorkspaceStrategy::Aggregate {
+        match (
+            options.workspace_lib_members.is_empty(),
+            options.workspace_has_binary,
+        ) {
+            (false, false) => " --lib",
+            (true, true) => " --bins",
+            _ => " --lib --bins",
+        }
+    } else {
+        match (package.has_library_target(), package.has_binary_target()) {
+            (true, false) => " --lib",
+            (false, true) => " --bins",
+            _ => " --lib --bins",
+        }
+    }
+}
+
+pub(super) fn cargo_format_command(package: &Package, options: &CiOptions) -> String {
+    if !options.format_all_rust_files {
+        return "cargo fmt --all -- --check".to_owned();
+    }
+    let edition = shell_word(
+        options
+            .format_edition
+            .as_deref()
+            .or(package.edition.as_deref())
+            .unwrap_or("2021"),
+    );
+    let mut excludes = String::new();
+    for glob in &options.format_excludes {
+        write!(excludes, " {}", shell_quote(&format!(":!{glob}"))).expect("write");
+    }
+    let check = if excludes.is_empty() {
+        format!("rustfmt --edition {edition} --check --")
+    } else {
+        // File mode follows `mod` declarations; stdin `--check` isolates the
+        // file, matches CRLF/UTF-8 BOM handling, and discovers rustfmt.toml
+        // from the repository working directory. Because rustfmt currently
+        // exits 0 on stdin diffs, treat non-empty diff output as a failure too.
+        let script = format!(
+            "out=$(mktemp) || exit 1; trap 'rm -f \"$out\"' 0; failed=0; \
+               for f do \
+                   if ! rustfmt --edition {edition} --check < \"$f\" > \"$out\"; then \
+                       if [ -s \"$out\" ]; then printf 'Diff in %s:\\n' \"$f\"; cat \"$out\"; fi; \
+                       exit 1; \
+                   fi; \
+                   if [ -s \"$out\" ]; then \
+                       printf 'Diff in %s:\\n' \"$f\"; cat \"$out\"; failed=1; \
+                   fi; \
+               done; exit \"$failed\""
+        );
+        format!("sh -c {} _", shell_quote(&script))
+    };
+    // Crow's POSIX shell has no pipefail. Scope cleanup to this command even
+    // when Crow runs all the build commands in a single shell.
+    format!(
+        "(tmp=$(mktemp) && trap 'rm -f \"$tmp\"' 0 && git ls-files -z -- '*.rs'{excludes} > \"$tmp\" && xargs -0 -r {check} < \"$tmp\")"
+    )
+}
+
+fn cargo_format_step(package: &Package, options: &CiOptions) -> String {
+    let command = cargo_format_command(package, options);
+    if options.format_all_rust_files {
+        format!("      - name: Format check\n        run: |\n          {command}\n\n")
+    } else {
+        format!("      - name: Format check\n        run: {command}\n\n")
     }
 }
 
@@ -6074,7 +6303,6 @@ fn push_test_steps(
     options: &CiOptions,
 ) {
     let prefix = command_prefix(runtime);
-    let targets = unit_test_target_args(package, options);
     // Cargo may prefer an off-PATH $CARGO_HOME/bin; invoke the verified tool directly.
     let nextest = match runtime {
         Runtime::Cargo => "cargo-nextest nextest run",
@@ -6089,71 +6317,45 @@ fn push_test_steps(
             workflow.push_str(command_prefix(runtime));
             workflow.push_str("cargo-nextest --version\n\n");
         }
-        workflow.push_str(if options.all_features {
-            "      - name: Test all features\n"
-        } else {
-            "      - name: Test\n"
-        });
-        workflow.push_str("        run: ");
-        workflow.push_str(prefix);
-        workflow.push_str(nextest);
-        push_package_selector(workflow, package, options);
-        workflow.push_str(targets);
-        if options.all_features {
-            workflow.push_str(" --all-features");
-        }
-        workflow.push_str("\n\n");
+    }
+    let harness = if options.with_nextest {
+        nextest
     } else {
-        workflow.push_str(if options.all_features {
-            "      - name: Test all features\n"
+        "cargo test"
+    };
+    let no_default = needs_no_default_pass(package, options);
+    for pass in [false, true].into_iter().filter(|pass| !pass || no_default) {
+        let name = if pass {
+            "Test no default features"
+        } else if options.all_features {
+            "Test all features"
         } else {
-            "      - name: Test\n"
-        });
-        workflow.push_str("        run: ");
-        workflow.push_str(prefix);
-        workflow.push_str("cargo test");
-        push_package_selector(workflow, package, options);
-        workflow.push_str(targets);
-        if options.all_features {
-            workflow.push_str(" --all-features");
+            "Test"
+        };
+        for (selector, targets, members) in test_selections(package, options, pass) {
+            let features = feature_args(options, members, pass);
+            let suffix = if members.is_some() { targets } else { "" };
+            writeln!(
+                workflow,
+                "      - name: {name}{suffix}\n        run: {prefix}{harness}{selector}{targets}{features}\n"
+            )
+            .expect("write");
         }
-        workflow.push_str("\n\n");
     }
-    if has_features(package, options) {
-        workflow.push_str("      - name: Test no default features\n");
-        workflow.push_str("        run: ");
-        workflow.push_str(prefix);
-        workflow.push_str(if options.with_nextest {
-            nextest
-        } else {
-            "cargo test"
-        });
-        push_package_selector(workflow, package, options);
-        workflow.push_str(targets);
-        workflow.push_str(" --no-default-features\n\n");
-    }
-    if options.with_nextest
-        && !options.unit_tests_only
-        && (package.has_doctests() || options.workspace_has_doctests)
-    {
-        let mut modes = vec![(
-            "Doctests",
-            if options.all_features {
-                " --all-features"
+    if options.with_nextest && !options.unit_tests_only && has_doctests(package, options) {
+        let selector = package_selector(package, options);
+        for pass in [false, true].into_iter().filter(|pass| !pass || no_default) {
+            let name = if pass {
+                "Doctests no default features"
             } else {
-                ""
-            },
-        )];
-        if has_features(package, options) {
-            modes.push(("Doctests no default features", " --no-default-features"));
-        }
-        for (name, features) in modes {
-            workflow.push_str(&format!(
-                "      - name: {name}\n        run: {prefix}cargo test --doc"
-            ));
-            push_package_selector(workflow, package, options);
-            workflow.push_str(features);
-            workflow.push_str("\n\n");
+                "Doctests"
+            };
+            let features = feature_args(options, None, pass);
+            writeln!(
+                workflow,
+                "      - name: {name}\n        run: {prefix}cargo test --doc{selector}{features}\n"
+            )
+            .expect("write");
         }
     }
 }
@@ -6165,27 +6367,25 @@ fn push_clippy_steps(
     options: &CiOptions,
 ) {
     let prefix = command_prefix(runtime);
-    workflow.push_str(if options.all_features {
-        "      - name: Clippy all features\n"
-    } else {
-        "      - name: Clippy\n"
-    });
-    workflow.push_str("        run: ");
-    workflow.push_str(prefix);
-    workflow.push_str("cargo clippy");
-    push_package_selector(workflow, package, options);
-    workflow.push_str(" --all-targets");
-    if options.all_features {
-        workflow.push_str(" --all-features");
-    }
-    workflow.push_str(" -- --deny warnings\n\n");
-    if has_features(package, options) {
-        workflow.push_str("      - name: Clippy no default features\n");
-        workflow.push_str("        run: ");
-        workflow.push_str(prefix);
-        workflow.push_str("cargo clippy");
-        push_package_selector(workflow, package, options);
-        workflow.push_str(" --all-targets --no-default-features -- --deny warnings\n\n");
+    let selector = package_selector(package, options);
+    let targets = clippy_targets(package, options);
+    for pass in [false, true]
+        .into_iter()
+        .filter(|pass| !pass || needs_no_default_pass(package, options))
+    {
+        let name = if pass {
+            "Clippy no default features"
+        } else if options.all_features {
+            "Clippy all features"
+        } else {
+            "Clippy"
+        };
+        let features = feature_args(options, None, pass);
+        writeln!(
+            workflow,
+            "      - name: {name}\n        run: {prefix}cargo clippy{selector}{targets}{features} -- --deny warnings\n"
+        )
+        .expect("write");
     }
 }
 
@@ -6245,7 +6445,7 @@ fn push_msrv_step(workflow: &mut String, runtime: Runtime, package: &Package, op
         return;
     }
     workflow.push_str("      - name: Check MSRV\n        run: |\n");
-    for line in msrv_check_command(runtime, package, options).lines() {
+    for line in msrv_check_command(runtime, package, options, false).lines() {
         workflow.push_str("          ");
         workflow.push_str(line);
         workflow.push('\n');
@@ -6257,27 +6457,35 @@ pub(super) fn msrv_check_command(
     runtime: Runtime,
     package: &Package,
     options: &CiOptions,
+    locked: bool,
 ) -> String {
     let version = package.rust_version.as_deref().expect("validated MSRV");
-    let mut command = String::from("set -eu\n");
+    let mut command = String::from("(\nset -eu\n");
     if runtime == Runtime::Nix {
         // A shell named `msrv` is not sufficient evidence of the actual compiler.
         // Fail closed if a custom flake accidentally aliases its default shell.
         let exact_version = crate::render::flake::rust_overlay_version(version);
-        command.push_str(&format!(
-            "test \"$(nix develop .#msrv -c rustc --version | cut -d ' ' -f 2)\" = '{exact_version}'\n"
-        ));
+        writeln!(
+            command,
+            "test \"$(nix develop .#msrv -c rustc --version | cut -d ' ' -f 2)\" = '{exact_version}'"
+        ).expect("write");
         command.push_str("nix develop .#msrv -c cargo check");
     } else {
-        command.push_str(&format!(
+        write!(
+            command,
             "rustup toolchain install {version} --profile minimal\ncargo +{version} check"
-        ));
+        )
+        .expect("write");
     }
     push_package_selector(&mut command, package, options);
+    if locked {
+        command.push_str(" --locked");
+    }
     command.push_str(" --all-targets");
     if options.all_features {
         command.push_str(" --all-features");
     }
+    command.push_str("\n)");
     command
 }
 
@@ -6353,11 +6561,20 @@ fn push_audit_step(workflow: &mut String, runtime: Runtime) {
 }
 
 fn push_package_selector(workflow: &mut String, package: &Package, options: &CiOptions) {
+    workflow.push_str(&package_selector(package, options));
+}
+
+pub(super) fn package_selector(package: &Package, options: &CiOptions) -> String {
     if options.workspace_strategy == WorkspaceStrategy::Aggregate {
-        workflow.push_str(" --workspace");
+        let mut selector = " --workspace".to_owned();
+        for name in &options.exclude_packages {
+            write!(selector, " --exclude {}", shell_word(name)).expect("write");
+        }
+        selector
     } else if options.package_scoped {
-        workflow.push_str(" -p ");
-        workflow.push_str(&shell_word(&package.name));
+        format!(" -p {}", shell_word(&package.name))
+    } else {
+        String::new()
     }
 }
 
@@ -6409,10 +6626,12 @@ pub(crate) fn release_plz_checks(
     push_required_env_step(workflow, &options.required_env);
     push_extra_setup_steps(workflow, &options.extra_setup);
     if runtime == Runtime::Nix {
-        workflow.push_str(&format!("      - name: Format check\n        run: |\n          # Expand formatter variables inside the Nix shell.\n          # shellcheck disable=SC2016\n          nix develop -c {NIX_FORMAT_COMMAND}\n\n"));
-    } else {
-        workflow
-            .push_str("      - name: Format check\n        run: cargo fmt --all -- --check\n\n");
+        write!(
+            workflow,
+            "      - name: Format check\n        run: |\n          # Expand formatter variables inside the Nix shell.\n          # shellcheck disable=SC2016\n          nix develop -c {NIX_FORMAT_COMMAND}\n\n"
+        ).expect("write");
+    } else if let Some(package) = packages.first() {
+        workflow.push_str(&cargo_format_step(package, options));
     }
     if needs_nix {
         if options.independent_lanes {
@@ -6457,23 +6676,29 @@ pub(crate) fn release_plz_checks(
     }
     push_quality_ci_steps(workflow, runtime, options);
     for gate in &options.required_gates {
-        workflow.push_str(&format!(
+        write!(
+            workflow,
             "      - name: Required gate {}\n        timeout-minutes: {}\n",
             gate.id, gate.timeout_minutes
-        ));
+        )
+        .expect("write");
         if !gate.env.is_empty() {
             workflow.push_str("        env:\n");
             for (key, value) in &gate.env {
-                workflow.push_str(&format!(
-                    "          {key}: \"{}\"\n",
+                writeln!(
+                    workflow,
+                    "          {key}: \"{}\"",
                     yaml_double_quote(value)
-                ));
+                )
+                .expect("write");
             }
         }
-        workflow.push_str(&format!(
+        write!(
+            workflow,
             "        run: |\n          {}\n\n",
             gate.run.replace('\n', "\n          ")
-        ));
+        )
+        .expect("write");
     }
 }
 
@@ -6490,8 +6715,22 @@ fn trim_trailing_blank_lines(workflow: &mut String) {
     }
 }
 
-fn has_features(package: &Package, options: &CiOptions) -> bool {
-    !package.features.is_empty() || options.workspace_has_features
+pub(super) fn needs_no_default_pass(package: &Package, options: &CiOptions) -> bool {
+    let aggregate = options.workspace_strategy == WorkspaceStrategy::Aggregate;
+    match (aggregate, options.all_features) {
+        (true, true) => options.workspace_has_any_feature,
+        (true, false) => options.workspace_has_non_empty_default_feature,
+        (false, true) => package.has_any_feature(),
+        (false, false) => package.has_non_empty_default_feature(),
+    }
+}
+
+pub(super) fn has_doctests(package: &Package, options: &CiOptions) -> bool {
+    if options.workspace_strategy == WorkspaceStrategy::Aggregate {
+        options.workspace_has_doctests
+    } else {
+        package.has_doctests()
+    }
 }
 
 fn push_self_check_steps(
@@ -6608,11 +6847,7 @@ fn runs_on(runner: &ResolvedRunner) -> String {
     format!("[{labels}]")
 }
 
-fn push_validate_pypi_tag_step(
-    workflow: &mut String,
-    prefix: crate::release_identity::TagPrefix,
-    pyproject_dir: &str,
-) {
+fn push_validate_pypi_tag_step(workflow: &mut String, prefix: TagPrefix, pyproject_dir: &str) {
     workflow.push_str(
         r#"      - name: Validate release tag
         run: |
@@ -6621,7 +6856,7 @@ fn push_validate_pypi_tag_step(
           release_version="$tag"
 "#,
     );
-    if prefix == crate::release_identity::TagPrefix::V {
+    if prefix == TagPrefix::V {
         workflow.push_str("          case \"$tag\" in v*) release_version=\"${tag#v}\" ;; *) echo 'Tag prefix mismatch' >&2; exit 1 ;; esac\n");
     }
     let step = r#"          if ! printf '%s\n' "$release_version" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$'; then
@@ -6682,16 +6917,15 @@ fn release_trust_root_steps() -> String {
 fn validate_release_tag_step(
     package_name: Option<&str>,
     namespace: Option<&str>,
-    prefix: crate::release_identity::TagPrefix,
+    prefix: TagPrefix,
 ) -> String {
     let signed_tag_name = signed_tag_name_steps("tag");
     let expected_tag = namespace.map_or_else(
         || format!("{}$version", prefix.as_str()),
         |package| format!("{package}/v$version"),
     );
-    let namespace_check = namespace.map_or_else(|| if prefix == crate::release_identity::TagPrefix::V { "          case \"$tag\" in v*) release_version=\"${tag#v}\" ;; *) echo 'Tag prefix mismatch' >&2; exit 1 ;; esac\n".into() } else { String::new() }, |package| format!("          case \"$tag\" in {package}/v*) release_version=\"${{tag#{package}/v}}\" ;; *) echo 'Tag does not belong to this package' >&2; exit 1 ;; esac\n"));
-    let version_subject = if namespace.is_some() || prefix == crate::release_identity::TagPrefix::V
-    {
+    let namespace_check = namespace.map_or_else(|| if prefix == TagPrefix::V { "          case \"$tag\" in v*) release_version=\"${tag#v}\" ;; *) echo 'Tag prefix mismatch' >&2; exit 1 ;; esac\n".into() } else { String::new() }, |package| format!("          case \"$tag\" in {package}/v*) release_version=\"${{tag#{package}/v}}\" ;; *) echo 'Tag does not belong to this package' >&2; exit 1 ;; esac\n"));
+    let version_subject = if namespace.is_some() || prefix == TagPrefix::V {
         "$release_version"
     } else {
         "$tag"
@@ -6761,7 +6995,7 @@ fn publish_step(
     package: &Package,
     runtime: Runtime,
     package_scoped: bool,
-    tag_prefix: crate::release_identity::TagPrefix,
+    tag_prefix: TagPrefix,
 ) -> String {
     if platform == Platform::Github {
         return trusted_publisher::prefixed_archive_steps(&package.name, runtime, tag_prefix);
@@ -6773,11 +7007,11 @@ fn publish_crate_steps(
     name: &str,
     runtime: Runtime,
     package_scoped: bool,
-    tag_prefix: crate::release_identity::TagPrefix,
+    tag_prefix: TagPrefix,
 ) -> String {
     let package_name = shell_quote(name);
     let prefix = command_prefix(runtime);
-    let version_prefix = if tag_prefix == crate::release_identity::TagPrefix::V {
+    let version_prefix = if tag_prefix == TagPrefix::V {
         "          case \"$version\" in v*) version=\"${version#v}\" ;; *) echo 'Tag prefix mismatch' >&2; exit 1 ;; esac\n"
     } else {
         ""
@@ -7128,6 +7362,6 @@ mod maintenance_branch_tests {
             filter(&["**", "!simit/**"]),
             ["**", "!simit/**", "simit/update/**"]
         );
-        assert!(filter(&[]).is_empty());
+        assert_eq!(filter(&[]).len(), 0);
     }
 }

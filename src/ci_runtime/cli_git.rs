@@ -29,7 +29,7 @@ pub(super) fn executable() -> Result<PathBuf> {
         if let Ok(entries) = std::fs::read_dir("/etc/profiles/per-user") {
             let mut profiles = entries
                 .take(64)
-                .filter_map(|entry| entry.ok())
+                .filter_map(std::result::Result::ok)
                 .map(|entry| entry.path().join("bin/git"))
                 .collect::<Vec<_>>();
             profiles.sort();

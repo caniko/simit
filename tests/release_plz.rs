@@ -1,3 +1,4 @@
+use std::fmt::Write as _;
 use std::{fs, path::Path, process::Command};
 
 mod common;
@@ -194,6 +195,26 @@ fn new_publishing_defaults_to_release_plz_and_round_trips() {
 }
 
 #[test]
+fn release_plz_uses_the_configured_tracked_file_format_check() {
+    let temp = project("[ci]\nformat_all_rust_files = true\nformat_excludes = ['vendor/**']\n");
+    let output = init(temp.path(), &["--publish-crates"]);
+    assert!(output.status.success(), "{output:?}");
+    let workflow =
+        fs::read_to_string(temp.path().join(".github/workflows/release-plz.yaml")).unwrap();
+    let yaml: serde_yaml::Value = serde_yaml::from_str(&workflow).unwrap();
+    let format = yaml["jobs"]["release-plz-qualify"]["steps"]
+        .as_sequence()
+        .unwrap()
+        .iter()
+        .find(|step| step["name"] == "Format check")
+        .unwrap()["run"]
+        .as_str()
+        .unwrap();
+    assert!(format.contains("git ls-files -z -- '*.rs' ':!vendor/**'"));
+    assert!(format.contains("rustfmt --edition 2024 --check < \"$f\" > \"$out\""));
+}
+
+#[test]
 fn existing_implicit_and_explicit_members_are_preserved() {
     for extra in ["", "publish_strategy = \"members\"\n"] {
         let temp = project(&format!("[ci]\npublish_crates = true\n{extra}"));
@@ -307,7 +328,7 @@ fn credential_contract_rejects_invalid_app_and_credential_names() {
             init(temp.path(), &[]),
         ] {
             assert!(!output.status.success(), "{credentials}: {output:?}");
-            assert!(output.stdout.is_empty(), "{output:?}");
+            assert_eq!(output.stdout.as_slice(), b"", "{output:?}");
             assert!(
                 String::from_utf8_lossy(&output.stderr).contains(error),
                 "{output:?}"
@@ -779,7 +800,10 @@ fn explicit_metadata_members_overrides_new_default_in_both_cargo_scopes() {
         fs::remove_file(temp.path().join("simit.toml")).unwrap();
         let manifest = temp.path().join("Cargo.toml");
         let mut text = fs::read_to_string(&manifest).unwrap();
-        text.push_str(&format!("\n[{scope}.metadata.simit.ci]\n# Keep the opted-out policy.\nplatform = \"github\"\npublish_crates = false\npublish_strategy = \"members\"\n"));
+        write!(
+            text,
+            "\n[{scope}.metadata.simit.ci]\n# Keep the opted-out policy.\nplatform = \"github\"\npublish_crates = false\npublish_strategy = \"members\"\n"
+        ).expect("write");
         fs::write(&manifest, text).unwrap();
         let output = init(temp.path(), &["--publish-crates"]);
         assert!(output.status.success(), "{output:?}");

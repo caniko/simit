@@ -12,6 +12,10 @@ use crate::config::{ProjectConfig, ResolvedScoop};
 use crate::registry::{self, FeatureStatus};
 use crate::render::scoop_manifest::{self, ScoopChecksums};
 
+#[expect(
+    clippy::needless_pass_by_value,
+    reason = "Keep the public command entry point's owned argument API"
+)]
 pub fn run(command: InitScoopBucketCommand) -> Result<()> {
     let mode = CheckPrintMode::parse(
         "init scoop-bucket",

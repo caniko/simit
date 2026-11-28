@@ -1,8 +1,20 @@
 //! Paired credential-free source builds and independent default-branch publishers.
 
-use super::*;
+use super::{
+    BTreeMap, CHECKOUT_COMPAT_VERSION, CHECKOUT_VERSION, CiOptions, GeneratedFile, OmCiMode, Path,
+    PathBuf, Platform, Result, Runtime, artifact_path_has_absolute_context, bail, command_prefix,
+    github_crate_publish_triggers, push_action_uses, push_audit_database_step, push_audit_step,
+    push_deny_step, push_event_checkout_step, push_extra_setup_steps,
+    push_extra_setup_steps_with_context, push_gate_env, push_gate_setup,
+    push_generated_workflow_header, push_install_nix_step_with_cache, push_job_env,
+    push_om_ci_step, push_quality_tool_install_steps, push_required_env_step,
+    push_required_env_step_with_context, push_required_gate_artifacts, push_rust_setup_step,
+    sanitize_gate_id, shell_quote, shell_word, trim_trailing_blank_lines,
+    validate_release_tag_step, yaml_double_quote,
+};
 use crate::config::github_expression;
 use anyhow::Context;
+use std::fmt::Write as _;
 
 // Candidate-controlled build scripts/setup run only on fresh hosted workers,
 // independently of configured CI/release runners and their mounted credentials.
@@ -210,9 +222,7 @@ fn archive_steps_with_packaging(
         "      - name: Build immutable archive {name}\n        run: |\n          set -euo pipefail\n          version=\"{version_expression}\"\n{packaging}          mkdir -p \"$RUNNER_TEMP/simit-crates/{name}\"\n          cp \"$RUNNER_TEMP/simit-package-target/package/{name}-$version.crate\" \"$RUNNER_TEMP/simit-crates/{name}/\"\n          size=\"$(wc -c < \"$RUNNER_TEMP/simit-crates/{name}/{name}-$version.crate\")\"\n          test \"$size\" -le {limit} || {{ echo \"crate {name} archive is $size bytes, over the crates.io upload limit of {limit} bytes (10 MiB)\" >&2; exit 1; }}\n",
         limit = crate::release_publisher::archive::MAX_CRATES_IO_UPLOAD_BYTES
     );
-    w.push_str(&format!(
-        "      - name: Retain original-run archive {name}\n"
-    ));
+    writeln!(w, "      - name: Retain original-run archive {name}").expect("write");
     push_action_uses(
         &mut w,
         Platform::Github,
@@ -221,7 +231,10 @@ fn archive_steps_with_packaging(
         "v7.0.2",
         "v4.6.2",
     );
-    w.push_str(&format!("        with:\n          name: simit-crate-{name}-${{{{ github.run_attempt }}}}\n          path: ${{{{ runner.temp }}}}/simit-crates/{name}/*.crate\n          if-no-files-found: error\n          retention-days: 30\n\n"));
+    write!(
+        w,
+        "        with:\n          name: simit-crate-{name}-${{{{ github.run_attempt }}}}\n          path: ${{{{ runner.temp }}}}/simit-crates/{name}/*.crate\n          if-no-files-found: error\n          retention-days: 30\n\n"
+    ).expect("write");
     w
 }
 
@@ -247,10 +260,12 @@ pub(super) fn source_workflow_with_namespace(
         "# Credential-free signed-tag build. Rerun the original signed-tag run for recovery.\n",
     );
     if let Some(package) = namespace {
-        w.push_str(&format!("name: {}\n\n", crate_build_display(package)));
-        w.push_str(&format!(
+        write!(w, "name: {}\n\n", crate_build_display(package)).expect("write");
+        write!(
+            w,
             "on:\n  push:\n    tags:\n      - \"{package}/v[0-9]*\"\n\n"
-        ));
+        )
+        .expect("write");
     } else {
         w.push_str(if workspace {
             "name: Build Workspace Crates\n\n"
@@ -272,18 +287,19 @@ pub(super) fn source_workflow_with_namespace(
     let manifest = manifest_argument(options);
     w.push_str("      - name: Validate Cargo package versions\n        run: |\n          set -euo pipefail\n");
     let version = tag_version_expression(namespace, options.tag_prefix);
-    w.push_str(&format!("          version=\"{version}\"\n"));
+    writeln!(w, "          version=\"{version}\"").expect("write");
     for name in names {
         let name = shell_word(name);
-        w.push_str(&format!(
-            "          test \"$(cargo pkgid --locked{manifest} -p {name} | awk -F'[#@]' 'NF > 1 {{print $NF}}' | tail -n 1)\" = \"$version\" || {{ echo \"Cargo package {name} does not match release version $version\" >&2; exit 1; }}\n"
-        ));
+        writeln!(
+            w,
+            "          test \"$(cargo pkgid --locked{manifest} -p {name} | awk -F'[#@]' 'NF > 1 {{print $NF}}' | tail -n 1)\" = \"$version\" || {{ echo \"Cargo package {name} does not match release version $version\" >&2; exit 1; }}"
+        ).expect("write");
     }
 
     w.push_str("\n  build:\n    needs: validate\n    runs-on: ");
     w.push_str(CANDIDATE_RUNNER);
     // The source build runs no gates; the first trusted verify job owns them.
-    w.push_str(&format!("\n    timeout-minutes: {CANDIDATE_JOB_MINUTES}\n"));
+    write!(w, "\n    timeout-minutes: {CANDIDATE_JOB_MINUTES}\n").expect("write");
     push_job_env(&mut w, Platform::Github, runtime, &options.extra_env, true);
     w.push_str("    steps:\n");
     push_event_checkout_step(&mut w, Platform::Github, None);
@@ -319,10 +335,19 @@ pub(super) fn source_workflow_with_namespace(
         } else {
             ""
         };
-        w.push_str(&format!("      - name: Test {name}\n        run: {prefix}cargo test --locked{manifest} -p {quoted} --all-targets{features}\n"));
-        w.push_str(&format!("      - name: Clippy {name}\n        run: {prefix}cargo clippy --locked{manifest} -p {quoted} --all-targets{features} -- -D warnings\n"));
+        write!(
+            w,
+            "      - name: Test {name}\n        run: {prefix}cargo test --locked{manifest} -p {quoted} --all-targets{features}\n"
+        ).expect("write");
+        write!(
+            w,
+            "      - name: Clippy {name}\n        run: {prefix}cargo clippy --locked{manifest} -p {quoted} --all-targets{features} -- -D warnings\n"
+        ).expect("write");
         if options.with_docs {
-            w.push_str(&format!("      - name: Document {name}\n        run: {prefix}cargo doc --locked{manifest} -p {quoted} --no-deps --all-features\n"));
+            write!(
+                w,
+                "      - name: Document {name}\n        run: {prefix}cargo doc --locked{manifest} -p {quoted} --no-deps --all-features\n"
+            ).expect("write");
         }
     }
     // Verified packaging of the complete release set: every member's tarball is
@@ -332,10 +357,10 @@ pub(super) fn source_workflow_with_namespace(
     // crates.io. Cargo >= 1.89 resolves not-yet-published interdependent
     // members through its temporary packaging registry. Only plan members are
     // selected, so `publish = false` members are never packaged.
-    let selection = names
-        .iter()
-        .map(|name| format!(" -p {}", shell_word(name)))
-        .collect::<String>();
+    let selection = names.iter().fold(String::new(), |mut output, name| {
+        write!(output, " -p {}", shell_word(name)).expect("write");
+        output
+    });
     let prefix = command_prefix(runtime);
     let guard = if names.len() > 1 {
         format!(
@@ -344,7 +369,10 @@ pub(super) fn source_workflow_with_namespace(
     } else {
         String::new()
     };
-    w.push_str(&format!("      - name: Verify and package coordinated release set\n        run: |\n          set -euo pipefail\n{guard}          {prefix}cargo package --locked{manifest} --allow-dirty{selection} --target-dir \"$RUNNER_TEMP/simit-package-target\"\n"));
+    write!(
+        w,
+        "      - name: Verify and package coordinated release set\n        run: |\n          set -euo pipefail\n{guard}          {prefix}cargo package --locked{manifest} --allow-dirty{selection} --target-dir \"$RUNNER_TEMP/simit-package-target\"\n"
+    ).expect("write");
     for name in names {
         w.push_str(&archive_steps_with_packaging(
             name,
@@ -413,13 +441,13 @@ pub(super) fn publisher_file_with_namespace(
     let mut w = String::new();
     push_generated_workflow_header(&mut w);
     w.push_str("# Enroll only after moving CRATES_IO_API_TOKEN into the literal environment below,\n# restricting it to the exact protected default branch, and qualifying the engine revision.\n# Tag-controlled workflows must have no repository/org publishing credential.\n# Recovery: rerun the original signed-tag run; matching immutable archives remain reusable.\nname: Trusted Crate Publisher\n\non:\n  workflow_run:\n    workflows: [");
-    w.push_str(&format!("\"{}\"", yaml_double_quote(&source_display)));
+    write!(w, "\"{}\"", yaml_double_quote(&source_display)).expect("write");
     w.push_str("]\n    types: [completed]\n\npermissions:\n  contents: read\n  actions: read\n\nconcurrency:\n  group: simit-crates-${{ github.event.workflow_run.id }}\n  cancel-in-progress: false\n\njobs:\n");
     let mut previous: Option<String> = None;
-    let reconstruction = plan
-        .iter()
-        .map(|(name, _)| format!(" --reconstruct-package {}", shell_word(name)))
-        .collect::<String>();
+    let reconstruction = plan.iter().fold(String::new(), |mut output, (name, _)| {
+        write!(output, " --reconstruct-package {}", shell_word(name)).expect("write");
+        output
+    });
     let namespace_argument = namespace.map_or_else(
         || {
             // Unprefixed tags are also the original enrolled engine's default.
@@ -451,7 +479,7 @@ pub(super) fn publisher_file_with_namespace(
         let id = name;
         let verify = format!("verify-{id}");
         let publish = format!("publish-{id}");
-        w.push_str(&format!("  {verify}:\n"));
+        writeln!(w, "  {verify}:").expect("write");
         let mut needs: Vec<String> = dependencies
             .iter()
             .map(|dependency| format!("publish-{dependency}"))
@@ -473,7 +501,7 @@ pub(super) fn publisher_file_with_namespace(
         } else {
             CANDIDATE_JOB_MINUTES
         };
-        w.push_str(&format!("\n    timeout-minutes: {timeout}\n    steps:\n"));
+        write!(w, "\n    timeout-minutes: {timeout}\n    steps:\n").expect("write");
         bootstrap(&mut w);
         if runtime == Runtime::Nix {
             push_install_nix_step_with_cache(
@@ -484,7 +512,13 @@ pub(super) fn publisher_file_with_namespace(
                 options.nix_setup_action_ref.as_ref(),
             );
         }
-        w.push_str(&format!("      - name: Admit signed source and provider-bound archive {name}\n        env:\n          GITHUB_TOKEN: ${{{{ github.token }}}}\n        run: |\n          set -euo pipefail\n          .simit-publisher-engine/target/release/simit release publisher --publisher-stage prepare --repo \"$GITHUB_REPOSITORY\" --package {} --source-workflow {} --publisher-workflow {}{reconstruction}{namespace_argument} --publisher-output \"$RUNNER_TEMP/verified-{id}\" > \"$RUNNER_TEMP/verified-{id}.json\"\n", shell_word(name), shell_word(&source_path.to_string_lossy()), shell_word(&publisher_path.to_string_lossy())));
+        write!(
+            w,
+            "      - name: Admit signed source and provider-bound archive {name}\n        env:\n          GITHUB_TOKEN: ${{{{ github.token }}}}\n        run: |\n          set -euo pipefail\n          .simit-publisher-engine/target/release/simit release publisher --publisher-stage prepare --repo \"$GITHUB_REPOSITORY\" --package {} --source-workflow {} --publisher-workflow {}{reconstruction}{namespace_argument} --publisher-output \"$RUNNER_TEMP/verified-{id}\" > \"$RUNNER_TEMP/verified-{id}.json\"\n",
+            shell_word(name),
+            shell_word(&source_path.to_string_lossy()),
+            shell_word(&publisher_path.to_string_lossy())
+        ).expect("write");
         // Fresh credential-free runner: candidate build scripts may execute here.
         // Publishing always re-admits on a separate hosted runner, never trusts
         // this job's filesystem, exports, output paths or candidate binaries.
@@ -498,9 +532,12 @@ pub(super) fn publisher_file_with_namespace(
         push_required_env_step_with_context(&mut w, &options.required_env, candidate_context);
         push_extra_setup_steps_with_context(&mut w, &options.extra_setup, candidate_context);
         let prefix = command_prefix(runtime);
-        w.push_str(&format!("      - name: Verify packaged contents {name}\n"));
+        writeln!(w, "      - name: Verify packaged contents {name}").expect("write");
         candidate_context(&mut w);
-        w.push_str(&format!("        run: {prefix}cargo publish --dry-run --locked --manifest-path \"$RUNNER_TEMP/verified-{id}/Cargo.toml\"\n"));
+        writeln!(
+            w,
+            "        run: {prefix}cargo publish --dry-run --locked --manifest-path \"$RUNNER_TEMP/verified-{id}/Cargo.toml\""
+        ).expect("write");
         // Every verify job checks out the same candidate commit, and each one
         // after the first depends on the first through its publish predecessor.
         // Run gates once before the first publish. Explicit runtimes get a fresh
@@ -518,12 +555,15 @@ pub(super) fn publisher_file_with_namespace(
                 let environment = environment.into_iter().collect::<Vec<_>>();
                 if let Some(gate_runtime) = gate.runtime {
                     let job = format!("gate-{}", sanitize_gate_id(&gate.id));
-                    w.push_str(&format!("  {job}:\n"));
+                    writeln!(w, "  {job}:").expect("write");
                     publish_needs.push(job);
                     push_needs(&mut w, std::slice::from_ref(&verify));
                     let timeout =
                         gate.timeout_minutes + if gate.artifacts.is_some() { 15 } else { 0 };
-                    w.push_str(&format!("    runs-on: {CANDIDATE_RUNNER}\n    timeout-minutes: {timeout}\n    permissions:\n      contents: read\n"));
+                    write!(
+                        w,
+                        "    runs-on: {CANDIDATE_RUNNER}\n    timeout-minutes: {timeout}\n    permissions:\n      contents: read\n"
+                    ).expect("write");
                     push_gate_env(&mut w, Platform::Github, gate_runtime, &environment);
                     w.push_str("    steps:\n");
                     push_candidate_checkout(&mut w, options.source_submodules);
@@ -535,22 +575,26 @@ pub(super) fn publisher_file_with_namespace(
                         options.nix_setup_action_ref.as_ref(),
                     );
                 }
-                w.push_str(&format!(
+                write!(
+                    w,
                     "      - name: Required gate {}\n        timeout-minutes: {}\n",
                     gate.id, gate.timeout_minutes
-                ));
+                )
+                .expect("write");
                 if gate.runtime.is_some() {
-                    w.push_str(&format!("        working-directory: {directory}\n"));
+                    writeln!(w, "        working-directory: {directory}").expect("write");
                 } else {
                     push_candidate_context(&mut w, runtime, &environment, directory);
                 }
                 if gate.artifacts.is_some() {
-                    w.push_str(&format!(
-                        "        id: simit-required-gate-{}\n",
+                    writeln!(
+                        w,
+                        "        id: simit-required-gate-{}",
                         sanitize_gate_id(&gate.id)
-                    ));
+                    )
+                    .expect("write");
                 }
-                w.push_str(&format!("        run: {}\n", gate.run));
+                writeln!(w, "        run: {}", gate.run).expect("write");
                 push_required_gate_artifacts(
                     &mut w,
                     gate,
@@ -560,11 +604,17 @@ pub(super) fn publisher_file_with_namespace(
                 );
             }
         }
-        w.push_str(&format!("  {publish}:\n"));
+        writeln!(w, "  {publish}:").expect("write");
         push_needs(&mut w, &publish_needs);
         w.push_str("    runs-on: ubuntu-24.04\n    timeout-minutes: 60\n    environment:\n      name: simit-crates-io\n    steps:\n");
         bootstrap(&mut w);
-        w.push_str(&format!("      - name: Upload independently verified archive {name}\n        env:\n          GITHUB_TOKEN: ${{{{ github.token }}}}\n          CRATES_IO_API_TOKEN: ${{{{ secrets.CRATES_IO_API_TOKEN }}}}\n        run: .simit-publisher-engine/target/release/simit release publisher --publisher-stage publish --repo \"$GITHUB_REPOSITORY\" --package {} --source-workflow {} --publisher-workflow {}{reconstruction}{namespace_argument}\n", shell_word(name), shell_word(&source_path.to_string_lossy()), shell_word(&publisher_path.to_string_lossy())));
+        write!(
+            w,
+            "      - name: Upload independently verified archive {name}\n        env:\n          GITHUB_TOKEN: ${{{{ github.token }}}}\n          CRATES_IO_API_TOKEN: ${{{{ secrets.CRATES_IO_API_TOKEN }}}}\n        run: .simit-publisher-engine/target/release/simit release publisher --publisher-stage publish --repo \"$GITHUB_REPOSITORY\" --package {} --source-workflow {} --publisher-workflow {}{reconstruction}{namespace_argument}\n",
+            shell_word(name),
+            shell_word(&source_path.to_string_lossy()),
+            shell_word(&publisher_path.to_string_lossy())
+        ).expect("write");
         previous = Some(publish);
     }
     let jobs = plan
@@ -605,7 +655,7 @@ fn push_needs(w: &mut String, needs: &[String]) {
         // Block sequences retain their representation through YAML formatters.
         w.push_str("    needs:\n");
         for job in needs {
-            w.push_str(&format!("      - {job}\n"));
+            writeln!(w, "      - {job}").expect("write");
         }
     }
 }
@@ -616,7 +666,7 @@ fn push_candidate_context(
     environment: &[(String, String)],
     directory: &str,
 ) {
-    w.push_str(&format!("        working-directory: {directory}\n"));
+    writeln!(w, "        working-directory: {directory}").expect("write");
     let mut env = String::new();
     push_job_env(&mut env, Platform::Github, runtime, environment, true);
     for line in env.lines() {

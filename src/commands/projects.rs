@@ -50,23 +50,23 @@ impl Error for CommandExit {}
 
 pub fn run(command: ProjectsCommand) -> Result<()> {
     match command.action {
-        ProjectsAction::List(args) => list(args),
+        ProjectsAction::List(args) => list(&args),
         ProjectsAction::Show(args) => show(args),
-        ProjectsAction::Scan(args) => scan(args),
+        ProjectsAction::Scan(args) => scan(&args),
         ProjectsAction::Audit(args) => audit(args),
         ProjectsAction::Facts(args) => super::projects_facts::run(args),
-        ProjectsAction::Regenerate(args) => regenerate(args),
+        ProjectsAction::Regenerate(args) => regenerate(&args),
         ProjectsAction::Update(args) => super::projects_update::run(args),
         ProjectsAction::UpdateGithubAdapter(args) => super::projects_update::adapter(args),
         ProjectsAction::UpdateForgejoAdapter(args) => super::projects_update::forgejo_adapter(args),
         ProjectsAction::Discover(args) => discover(args),
-        ProjectsAction::Forget(args) => forget(args),
-        ProjectsAction::Prune(args) => prune(args),
-        ProjectsAction::ClearState(args) => clear_state(args),
+        ProjectsAction::Forget(args) => forget(&args),
+        ProjectsAction::Prune(args) => prune(&args),
+        ProjectsAction::ClearState(args) => clear_state(&args),
     }
 }
 
-fn regenerate(args: ProjectsRegenerateArgs) -> Result<()> {
+fn regenerate(args: &ProjectsRegenerateArgs) -> Result<()> {
     if !args.ci && !args.release {
         bail!("select at least one of --ci or --release");
     }
@@ -95,7 +95,7 @@ fn regenerate(args: ProjectsRegenerateArgs) -> Result<()> {
             .collect::<Result<Vec<_>>>()?
     };
 
-    let executable = std::env::current_exe().context("locating simit executable")?;
+    let executable = env::current_exe().context("locating simit executable")?;
     let mut failures = 0usize;
     for path in paths {
         println!("==> {path}");
@@ -210,7 +210,7 @@ struct AuditProject {
     errors: Vec<String>,
 }
 
-fn list(args: ProjectsListArgs) -> Result<()> {
+fn list(args: &ProjectsListArgs) -> Result<()> {
     let registry = registry::load()?;
     let filters = args
         .features
@@ -281,7 +281,7 @@ fn show(args: ProjectsShowArgs) -> Result<()> {
     Ok(())
 }
 
-fn scan(args: ProjectsScanArgs) -> Result<()> {
+fn scan(args: &ProjectsScanArgs) -> Result<()> {
     let mut registry = registry::load()?;
     let mut touched = 0usize;
     let mut missing = Vec::new();
@@ -389,7 +389,7 @@ fn audit(args: ProjectsAuditArgs) -> Result<()> {
             match registry::audit_ci(path.as_std_path()) {
                 Ok(ci) => {
                     project.ci_status = ci.status;
-                    project.provider = ci.provider.map(|provider| provider.as_str());
+                    project.provider = ci.provider.map(super::super::cli::CiProvider::as_str);
                     project.platform = ci.platform;
                     project.changed_files = ci
                         .changed_files
@@ -494,14 +494,13 @@ fn normalize_audit_path(path: &Utf8PathBuf) -> Result<Utf8PathBuf> {
 }
 
 fn discover(args: ProjectsDiscoverArgs) -> Result<()> {
-    let root = match args.root {
-        Some(root) => root,
-        None => {
-            let current = std::env::current_dir().context("reading current directory")?;
-            Utf8PathBuf::from_path_buf(current).map_err(|path| {
-                anyhow::anyhow!("current directory is not valid UTF-8: {}", path.display())
-            })?
-        }
+    let root = if let Some(root) = args.root {
+        root
+    } else {
+        let current = env::current_dir().context("reading current directory")?;
+        Utf8PathBuf::from_path_buf(current).map_err(|path| {
+            anyhow::anyhow!("current directory is not valid UTF-8: {}", path.display())
+        })?
     };
     let root = match registry::canonical_project_path(root.as_std_path()) {
         Ok(root) if root.as_std_path().is_dir() => root,
@@ -542,7 +541,7 @@ fn discover(args: ProjectsDiscoverArgs) -> Result<()> {
     Ok(())
 }
 
-fn forget(args: ProjectsForgetArgs) -> Result<()> {
+fn forget(args: &ProjectsForgetArgs) -> Result<()> {
     let path = normalize_registry_path(&args.path)?;
     let mut registry = registry::load()?;
     if registry.projects.remove(&path).is_none() {
@@ -608,7 +607,7 @@ fn discover_display_name(path: &Utf8Path) -> Result<String> {
         .with_context(|| format!("resolving package name for {path}"))
 }
 
-fn prune(args: ProjectsPruneArgs) -> Result<()> {
+fn prune(args: &ProjectsPruneArgs) -> Result<()> {
     let mut registry = registry::load()?;
     let stale = registry
         .projects
@@ -640,7 +639,7 @@ fn prune(args: ProjectsPruneArgs) -> Result<()> {
     Ok(())
 }
 
-fn clear_state(args: ProjectsClearStateArgs) -> Result<()> {
+fn clear_state(args: &ProjectsClearStateArgs) -> Result<()> {
     let path = registry::registry_path()?;
     if args.dry_run {
         println!("would clear project registry state at {path}");
@@ -899,7 +898,7 @@ fn normalize_registry_path(path: &Utf8Path) -> Result<Utf8PathBuf> {
     if path.is_absolute() {
         return Ok(path.to_owned());
     }
-    let current = std::env::current_dir().context("reading current directory")?;
+    let current = env::current_dir().context("reading current directory")?;
     let joined = current.join(path);
     Utf8PathBuf::from_path_buf(joined)
         .map_err(|path| anyhow::anyhow!("project path is not valid UTF-8: {}", path.display()))
@@ -946,8 +945,14 @@ mod tests {
 
     #[test]
     fn attention_classifier_ignores_non_issue_hook_states() {
-        assert!(attention_items(&features(&[("hooks", FeatureStatus::Configured)])).is_empty());
-        assert!(attention_items(&features(&[("hooks", FeatureStatus::Installed)])).is_empty());
+        assert_eq!(
+            attention_items(&features(&[("hooks", FeatureStatus::Configured)])).len(),
+            0
+        );
+        assert_eq!(
+            attention_items(&features(&[("hooks", FeatureStatus::Installed)])).len(),
+            0
+        );
     }
 
     #[test]
@@ -959,6 +964,6 @@ mod tests {
             ("hooks", FeatureStatus::Installed),
         ]));
 
-        assert!(items.is_empty());
+        assert_eq!(items.len(), 0);
     }
 }

@@ -5,7 +5,7 @@ use std::process::Command;
 
 use tempfile::TempDir;
 
-const MAINTAINERS_ASC: &str = r#"-----BEGIN PGP PUBLIC KEY BLOCK-----
+const MAINTAINERS_ASC: &str = r"-----BEGIN PGP PUBLIC KEY BLOCK-----
 
 mDMEaRBcoRYJKwYBBAHaRw8BAQdAfqwJgLlh5ZUmOlW3/xcBilGd881RdfZ59DwW
 o6/v7/C0MkNhbiBILiBUYXJ0YW5vZ2x1IChjYW5pa28pIDxncGdAcm90YXMubW96
@@ -22,7 +22,7 @@ CAeIeAQYFgoAIBYhBIGNUH8eYhOfihfqpkYj3qBv2s/hBQJpEFyhAhsMAAoJEEYj
 MxverdzrWh20hxbY1ESMO55STiJlCofv54bICg==
 =vJ/Z
 -----END PGP PUBLIC KEY BLOCK-----
-"#;
+";
 
 thread_local! {
     // libtest runs every test on its own thread, so this directory and every
@@ -36,7 +36,7 @@ thread_local! {
     static DATA_HOMES: Cell<u32> = const { Cell::new(0) };
 }
 
-pub fn maintainer_key_path() -> PathBuf {
+pub(crate) fn maintainer_key_path() -> PathBuf {
     SCRATCH.with(|scratch| {
         let path = scratch.path().join("maintainers.asc");
         if !path.exists() {
@@ -47,7 +47,7 @@ pub fn maintainer_key_path() -> PathBuf {
 }
 
 /// A fresh, empty data home for each call, so commands never share state.
-pub fn data_home_path() -> PathBuf {
+pub(crate) fn data_home_path() -> PathBuf {
     let index = DATA_HOMES.with(|count| {
         let index = count.get();
         count.set(index + 1);
@@ -60,7 +60,7 @@ pub fn data_home_path() -> PathBuf {
     })
 }
 
-pub fn simit() -> Command {
+pub(crate) fn simit() -> Command {
     let mut command = Command::new(env!("CARGO_BIN_EXE_simit"));
     command.env("SIMIT_MAINTAINERS_GPG", maintainer_key_path());
     command.env("XDG_DATA_HOME", data_home_path());

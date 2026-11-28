@@ -1,4 +1,6 @@
 //! Component qualification uses the same changed-path closure as local planning.
+use std::collections::BTreeMap;
+use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
@@ -7,6 +9,7 @@ use serde_json::{Value, json};
 use crate::cli::{CiProvider, InitCiCommand, Platform, Runtime, RuntimeChoice};
 use crate::config::{NixCiCacheConfig, ProjectConfig};
 use crate::project::GeneratedFile;
+use crate::release_trust::TrustOverrides;
 use crate::render::ci::{GENERATED_WORKFLOW_MARKER, github_action_ref};
 
 // GitHub caps both steps and hosted jobs at 360 minutes. Diagnostics are bounded
@@ -89,16 +92,15 @@ pub(super) fn install_nix(
     {
         let mut config = "experimental-features = nix-command flakes\n".to_owned();
         if !cache.substituters.is_empty() {
-            config.push_str(&format!(
-                "substituters = {}\n",
-                cache.substituters.join(" ")
-            ));
+            writeln!(config, "substituters = {}", cache.substituters.join(" ")).expect("write");
         }
         if !cache.trusted_public_keys.is_empty() {
-            config.push_str(&format!(
-                "trusted-public-keys = {}\n",
+            writeln!(
+                config,
+                "trusted-public-keys = {}",
                 cache.trusted_public_keys.join(" ")
-            ));
+            )
+            .expect("write");
         }
         step["with"]["extra_nix_config"] = json!(config);
     }
@@ -239,8 +241,7 @@ pub(crate) fn files(
     let mut needs = vec!["plan".to_owned()];
     // Jobs in name order; members in dependency order so later members reuse
     // the store their prerequisites populated.
-    let mut groups: std::collections::BTreeMap<&str, Vec<&crate::monorepo::Component>> =
-        Default::default();
+    let mut groups: BTreeMap<&str, Vec<&crate::monorepo::Component>> = BTreeMap::default();
     for id in &graph.order {
         let component = &graph.components[id];
         groups
@@ -509,11 +510,11 @@ pub(crate) fn files(
             files.push(crate::release_trust::generated_file(
                 root,
                 config,
-                &Default::default(),
+                &TrustOverrides::default(),
                 true,
             )?);
         } else if include_publishers {
-            crate::release_trust::require_committed(root, config, &Default::default())?;
+            crate::release_trust::require_committed(root, config, &TrustOverrides::default())?;
         }
     }
     Ok(files)

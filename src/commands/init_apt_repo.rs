@@ -15,6 +15,10 @@ const CONF_PATH: &str = "conf/distributions";
 const DISTS_KEEP_PATH: &str = "dists/.gitkeep";
 const POOL_KEEP_PATH: &str = "pool/.gitkeep";
 
+#[expect(
+    clippy::needless_pass_by_value,
+    reason = "Keep the public command entry point's owned argument API"
+)]
 pub fn run(command: InitAptRepoCommand) -> Result<()> {
     let mode = CheckPrintMode::parse("init apt-repo", command.check, command.print, command.diff)?;
     let metadata = cargo::metadata_for_current_dir()?;

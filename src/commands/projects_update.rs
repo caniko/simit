@@ -11,9 +11,16 @@ mod github;
 mod pin;
 mod sandbox;
 pub mod schema;
-use schema::*;
+use schema::{
+    AdapterRequest, AdapterResponse, Config, Inventory, PinFile, PinItem, Profile, Project,
+    Requirement, Workspace,
+};
 
 #[derive(Debug, ClapArgs)]
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "These fields mirror independent command-line switches"
+)]
 pub struct Args {
     #[arg(long, default_value = "/etc/simit/updates.json")]
     pub config: PathBuf,
@@ -56,12 +63,20 @@ pub struct AdapterArgs {
     pub request: PathBuf,
 }
 
+#[expect(
+    clippy::needless_pass_by_value,
+    reason = "Keep the public adapter entry point's owned argument API"
+)]
 pub fn adapter(args: AdapterArgs) -> Result<()> {
-    respond(args, github::execute)
+    respond(&args, github::execute)
 }
 
+#[expect(
+    clippy::needless_pass_by_value,
+    reason = "Keep the public adapter entry point's owned argument API"
+)]
 pub fn forgejo_adapter(args: AdapterArgs) -> Result<()> {
-    respond(args, forgejo::execute)
+    respond(&args, forgejo::execute)
 }
 
 /// Source-level candidate admission of a generation plan, without forge
@@ -107,7 +122,7 @@ pub fn admit_candidate_source(
 }
 
 fn respond(
-    args: AdapterArgs,
+    args: &AdapterArgs,
     execute: fn(&AdapterRequest) -> Result<AdapterResponse>,
 ) -> Result<()> {
     let request: AdapterRequest = crate::review::read_json(&args.request)?;
@@ -117,6 +132,10 @@ fn respond(
     Ok(())
 }
 
+#[expect(
+    clippy::needless_pass_by_value,
+    reason = "Keep the public command entry point's owned argument API"
+)]
 pub fn run(args: Args) -> Result<()> {
     let config: Config = crate::review::read_json(
         &args
@@ -317,7 +336,7 @@ pub fn run(args: Args) -> Result<()> {
         );
         engine::FrozenSelection {
             projects: selection,
-            pins: pins.clone(),
+            pins,
             inventory_digest: crate::review::canonical_digest(&inventory)?,
             completed: false,
             profile: Some(args.profile.clone()),

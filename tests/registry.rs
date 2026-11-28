@@ -41,7 +41,7 @@ impl EnvGuard {
         self.data_home.path()
     }
 
-    fn disable_registry(&self) {
+    fn disable_registry() {
         // SAFETY: guarded by ENV_LOCK for the lifetime of EnvGuard.
         unsafe {
             std::env::set_var("SIMIT_NO_REGISTRY", "1");
@@ -86,6 +86,29 @@ rust-version = "1.85"
 
 fn registry_file(data_home: &Path) -> PathBuf {
     data_home.join("simit/projects.toml")
+}
+
+#[test]
+fn gitlab_flake_audit_rejects_cargo_only_formatting() {
+    let project = TempDir::new().unwrap();
+    let root = project.path();
+    fs::write(
+        root.join("flake.nix"),
+        "{ outputs = _: { checks = {}; }; }\n",
+    )
+    .unwrap();
+    fs::write(
+        root.join(".gitlab-ci.yml"),
+        simit::render::ci::gitlab_nix_flake_workflow(),
+    )
+    .unwrap();
+    fs::write(
+        root.join("simit.toml"),
+        "[ci]\nplatform = 'gitlab'\nformat_all_rust_files = true\n",
+    )
+    .unwrap();
+    let err = registry::audit_ci(root).unwrap_err();
+    assert!(err.to_string().contains("format_all_rust_files"), "{err:#}");
 }
 
 #[test]
@@ -172,7 +195,7 @@ fn schema_version_mismatch_errors_with_required_version() {
 #[test]
 fn no_registry_env_suppresses_touch_io() {
     let env = EnvGuard::new();
-    env.disable_registry();
+    EnvGuard::disable_registry();
     let project = TempDir::new().unwrap();
     init_package(project.path(), "demo");
 

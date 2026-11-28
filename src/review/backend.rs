@@ -1,7 +1,10 @@
 //! Unprivileged execution only. Never call these functions from publication/report jobs.
 use super::{
     artifact, canonical_digest,
-    contract::*,
+    contract::{
+        Backend, EffectivePlan, Identity, Mode, Outcome, Plan, PlatformResult, Target, VERSION,
+        repository, runner, sha,
+    },
     github,
     process::{args, build_deadline, nix_args, run, run_build},
     read_json, write_json,
@@ -14,8 +17,7 @@ fn source_repository(plan: &Plan) -> &str {
     if plan.request.mode == Mode::Head {
         plan.pr
             .as_ref()
-            .map(|p| p.head_repository.as_str())
-            .unwrap_or(&plan.target.repository)
+            .map_or(&plan.target.repository, |p| p.head_repository.as_str())
     } else {
         &plan.target.repository
     }
@@ -67,7 +69,7 @@ pub fn validate_lock(plan: &Plan, lock: &Value) -> Result<Option<String>> {
                 sha(l["rev"].as_str().unwrap_or(""))?;
             }
             Some("git" | "tarball" | "file") => {
-                artifact::public_url(l["url"].as_str().unwrap_or(""))?
+                artifact::public_url(l["url"].as_str().unwrap_or(""))?;
             }
             _ => bail!("unsupported effective-lock transport"),
         }
@@ -114,8 +116,7 @@ pub fn prepare(plan: &Plan, system: &str, out: &Path) -> Result<EffectivePlan> {
         .request
         .recipe
         .as_ref()
-        .map(|r| r.directory.as_str())
-        .unwrap_or(&plan.request.directory);
+        .map_or(plan.request.directory.as_str(), |r| r.directory.as_str());
     let flake = recipe_tree.join(directory).join("flake.nix");
     ensure!(
         flake.is_file()
@@ -194,7 +195,10 @@ pub fn prepare(plan: &Plan, system: &str, out: &Path) -> Result<EffectivePlan> {
                 Some(&out.join(format!("eval-{kind}-{name}.log"))),
             )?;
             artifact::store_path(&drv)?;
-            ensure!(drv.ends_with(".drv"), "not a derivation");
+            ensure!(
+                drv.rsplit_once('.').is_some_and(|(_, ext)| ext == "drv"),
+                "not a derivation"
+            );
             let d: Value = serde_json::from_str(&run(
                 "nix",
                 &nix_args(&["derivation", "show", &drv]),

@@ -706,7 +706,7 @@ mod tests {
         assert!(budget.remaining(120).unwrap() <= Duration::from_secs(10));
         assert_eq!(budget.remaining(5).unwrap(), Duration::from_secs(5));
         let expired = StartupBudget {
-            deadline: Instant::now() - Duration::from_secs(1),
+            deadline: Instant::now().checked_sub(Duration::from_secs(1)).unwrap(),
         };
         // A depleted budget refuses a new process before spawning it.
         assert!(
@@ -826,10 +826,10 @@ mod tests {
         for input in [
             b"{}".to_vec(),
             b"{}\n".to_vec(),
-            vec![b'x'; kvrocks::HOST_REQUEST_MAX_BYTES as usize + 1],
+            vec![b'x'; usize::try_from(kvrocks::HOST_REQUEST_MAX_BYTES).unwrap() + 1],
         ] {
             let cancelled = Arc::new(AtomicBool::new(false));
-            assert!(startup_frame(std::io::Cursor::new(input), cancelled.clone()).is_err());
+            assert!(startup_frame(std::io::Cursor::new(input), cancelled).is_err());
         }
     }
 }

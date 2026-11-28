@@ -40,7 +40,7 @@ fn compressed_budget(maximum: u64) -> Result<u64> {
         COMPRESSED_OVERHEAD,
     ]
     .into_iter()
-    .try_fold(maximum, |total, overhead| total.checked_add(overhead))
+    .try_fold(maximum, u64::checked_add)
     .context("compressed transport budget overflow")
 }
 
@@ -257,7 +257,7 @@ fn exec_batches(
     flag: &str,
     environment: &[(OsString, OsString)],
 ) -> Result<Vec<std::ops::Range<usize>>> {
-    let pointer = std::mem::size_of::<usize>().max(8);
+    let pointer = size_of::<usize>().max(8);
     let base = environment.iter().try_fold(
         // Two pointer-table terminators, argv[0], and the fixed argument.
         2 * pointer + executable.len() + 1 + pointer + flag.len() + 1 + pointer,
@@ -331,7 +331,7 @@ pub fn admit_archive(
     // Snapshot the checksum-bound compressed bytes too: an open archive inode
     // can still be modified by another writer after hashing it.
     let mut compressed_snapshot = private_spool(spool_directory)?;
-    let mut buffer = [0u8; 65536];
+    let mut buffer = vec![0u8; 65536];
     let mut compressed_size = 0u64;
     loop {
         cancellation.check()?;
@@ -413,9 +413,8 @@ fn open_regular(path: &Path) -> Result<File> {
     #[cfg(unix)]
     {
         use std::os::unix::fs::OpenOptionsExt;
-        options.custom_flags(
-            rustix::fs::OFlags::NOFOLLOW.bits() as i32 | rustix::fs::OFlags::NONBLOCK.bits() as i32,
-        );
+        let flags = rustix::fs::OFlags::NOFOLLOW | rustix::fs::OFlags::NONBLOCK;
+        options.custom_flags(i32::from_ne_bytes(flags.bits().to_ne_bytes()));
     }
     let file = options.open(path)?;
     ensure!(
@@ -457,7 +456,7 @@ pub fn validate_export(
         );
         parser.expect(b"nix-archive-1")?;
         parser.node(0)?;
-        ensure!(parser.number()? == 0x4558494e, "invalid export magic");
+        ensure!(parser.number()? == 0x4558_494e, "invalid export magic");
         let path = parser.path()?;
         ensure!(
             admitted.contains(&path) && seen.insert(path),
@@ -539,7 +538,7 @@ impl<R: Read> ExportInventory<'_, R> {
     fn string(&mut self, maximum: usize) -> Result<Vec<u8>> {
         let size = self.number()?;
         ensure!(size <= maximum as u64, "export string exceeds its bound");
-        let mut raw = vec![0; size as usize];
+        let mut raw = vec![0; usize::try_from(size)?];
         self.exact(&mut raw)?;
         self.padding(size)?;
         Ok(raw)
@@ -552,9 +551,11 @@ impl<R: Read> ExportInventory<'_, R> {
         let size = self.number()?;
         ensure!(size <= self.remaining, "truncated NAR contents");
         let mut remaining = size;
-        let mut raw = [0u8; 65536];
+        let mut raw = vec![0u8; 65536];
         while remaining > 0 {
-            let chunk = remaining.min(raw.len() as u64) as usize;
+            let chunk = usize::try_from(remaining)
+                .unwrap_or(usize::MAX)
+                .min(raw.len());
             self.exact(&mut raw[..chunk])?;
             remaining -= chunk as u64;
         }
@@ -687,7 +688,7 @@ mod tests {
     fn exec_budget_counts_environment_pointers_and_exact_batch_edges() {
         // Choose an environment leaving exactly two 255-byte paths including
         // their terminators and pointers. Adding one byte splits the batch.
-        let pointer = std::mem::size_of::<usize>().max(8);
+        let pointer = size_of::<usize>().max(8);
         let path = format!("/nix/store/{}-{}", "0".repeat(32), "x".repeat(211));
         assert_eq!(path.len(), 255);
         let paths = vec![path; 5];

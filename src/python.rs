@@ -172,6 +172,16 @@ pub fn is_python_uv_project(root: &Path) -> bool {
 }
 
 pub fn maturin_pyproject_dir(workspace_root: &Path) -> Result<String> {
+    #[derive(Deserialize)]
+    struct Manifest {
+        #[serde(rename = "build-system")]
+        build_system: Option<BuildSystem>,
+    }
+    #[derive(Deserialize)]
+    struct BuildSystem {
+        #[serde(rename = "build-backend")]
+        build_backend: Option<String>,
+    }
     if workspace_root.join("pyproject.toml").exists() {
         return Ok(".".into());
     }
@@ -184,16 +194,6 @@ pub fn maturin_pyproject_dir(workspace_root: &Path) -> Result<String> {
         Ok(output) if output.status.success() => output,
         _ => return Ok(".".into()),
     };
-    #[derive(Deserialize)]
-    struct BuildSystem {
-        #[serde(rename = "build-backend")]
-        build_backend: Option<String>,
-    }
-    #[derive(Deserialize)]
-    struct Manifest {
-        #[serde(rename = "build-system")]
-        build_system: Option<BuildSystem>,
-    }
     let mut dirs = Vec::new();
     for name in output
         .stdout

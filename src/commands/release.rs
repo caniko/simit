@@ -59,7 +59,7 @@ pub fn run(command: ReleaseCommand) -> Result<()> {
     }
     reject_secrets_flags(&command)?;
     if command.action == ReleaseAction::SyncUp {
-        return sync_up(command);
+        return sync_up(&command);
     }
 
     if command.push {
@@ -206,7 +206,7 @@ pub fn run(command: ReleaseCommand) -> Result<()> {
             }
             println!("would promote CHANGELOG.md [Unreleased] to {new_version}");
         }
-        println!("would run git commit with {:?}", git_args);
+        println!("would run git commit with {git_args:?}");
         if create_tag {
             println!("would create tag {tag}");
         }
@@ -252,11 +252,10 @@ pub fn run(command: ReleaseCommand) -> Result<()> {
         } else {
             content
         };
-        let prefix = command
-            .component
-            .as_ref()
-            .map(|_| format!("{}/v", plans[0].package.name))
-            .unwrap_or_else(|| config.release.tag_prefix.as_str().to_owned());
+        let prefix = command.component.as_ref().map_or_else(
+            || config.release.tag_prefix.as_str().to_owned(),
+            |_| format!("{}/v", plans[0].package.name),
+        );
         Some(changelog::release_content_with_prefix(
             &content,
             &new_version,
@@ -454,7 +453,7 @@ fn trust(command: ReleaseCommand) -> Result<()> {
     }
 }
 
-fn sync_up(command: ReleaseCommand) -> Result<()> {
+fn sync_up(command: &ReleaseCommand) -> Result<()> {
     if command.no_tag {
         bail!("--no-tag is not valid with `simit release sync-up`");
     }
@@ -467,15 +466,15 @@ fn sync_up(command: ReleaseCommand) -> Result<()> {
     if command.no_changelog {
         bail!("--no-changelog is not valid with `simit release sync-up`");
     }
-    reject_verify_flags(&command)?;
+    reject_verify_flags(command)?;
 
-    if let Some(selection) = crate::monorepo::releases::select(&command)? {
+    if let Some(selection) = crate::monorepo::releases::select(command)? {
         let tag = crate::release_identity::ReleaseTag::for_package(
             &selection.package.config.namespace,
             selection.package.version.clone(),
         )?;
         return sync_tag(
-            &command,
+            command,
             &selection.root,
             &selection.package.version,
             &tag,
@@ -516,7 +515,7 @@ fn sync_up(command: ReleaseCommand) -> Result<()> {
     } else {
         config.release.tag_prefix.tag(version.clone())
     };
-    sync_tag(&command, workspace_root, &version, &tag, || {
+    sync_tag(command, workspace_root, &version, &tag, || {
         if let Some(component) = &command.component {
             crate::monorepo::releases::qualify_component(workspace_root, &config, component)?;
         }

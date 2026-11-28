@@ -8,6 +8,10 @@ use crate::commands::scaffold::{ArtifactCheck, CheckPrintMode, print_next_steps,
 use crate::registry::{self, FeatureStatus};
 use crate::render::chocolatey_nuspec::{RenderedPackage, Sha256Set};
 
+#[expect(
+    clippy::needless_pass_by_value,
+    reason = "Keep the public command entry point's owned argument API"
+)]
 pub fn run(command: InitChocolateyCommand) -> Result<()> {
     let mode = CheckPrintMode::parse(
         "init chocolatey",
@@ -16,7 +20,7 @@ pub fn run(command: InitChocolateyCommand) -> Result<()> {
         command.diff,
     )?;
 
-    let (resolved, package_version) = chocolatey::resolve(command.chocolatey.as_overrides())?;
+    let (resolved, package_version) = chocolatey::resolve(&command.chocolatey.as_overrides())?;
     chocolatey::validate_resolved(&resolved)?;
     let package = chocolatey::render_package(
         &resolved,

@@ -24,4 +24,8 @@ pub struct UsageArgs {
     /// Maximum pathway rows to report.
     #[arg(long, default_value_t = 20)]
     pub top: usize,
+
+    /// Wall-clock minutes available per 30 days.
+    #[arg(long, value_parser = clap::value_parser!(u64).range(1..))]
+    pub budget_minutes: Option<u64>,
 }

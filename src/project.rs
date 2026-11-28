@@ -188,6 +188,10 @@ pub fn reconcile_generated_files(
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "A project can independently contain each supported language"
+)]
 pub struct Languages {
     pub rust: bool,
     pub nix: bool,
@@ -324,7 +328,7 @@ pub fn check_generated_files(
 }
 
 fn validate_generated_paths(files: &[GeneratedFile], obsolete: &[PathBuf]) -> Result<()> {
-    let mut paths = std::collections::BTreeSet::new();
+    let mut paths = BTreeSet::new();
     for path in files
         .iter()
         .map(|file| &file.relative_path)
@@ -469,6 +473,5 @@ fn should_skip_dir(root: &Path, path: &Path) -> bool {
         ".git" | "target" | ".direnv" | "result" | "result-doc" | "node_modules"
     ) || path
         .strip_prefix(root)
-        .map(|relative| relative.starts_with(".forgejo/workflows"))
-        .unwrap_or(false)
+        .is_ok_and(|relative| relative.starts_with(".forgejo/workflows"))
 }

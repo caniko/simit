@@ -1,4 +1,5 @@
 //! Execute the same project-owned gate locally and in generated qualification.
+use std::fmt::Write as _;
 use std::{
     process::{Child, Command},
     sync::{
@@ -32,7 +33,7 @@ impl std::fmt::Display for GateExit {
 
 impl std::error::Error for GateExit {}
 
-pub(super) fn run(command: MonorepoCheckCommand) -> Result<()> {
+pub(super) fn run(command: &MonorepoCheckCommand) -> Result<()> {
     let (root, project) = super::load(&std::env::current_dir()?)?;
     let graph = project
         .monorepo
@@ -97,7 +98,7 @@ pub(super) fn run(command: MonorepoCheckCommand) -> Result<()> {
             process.env_remove(name);
         }
         process.env(&alias, value);
-        script.push_str(&format!("export {name}=\"${alias}\"\nunset {alias}\n"));
+        write!(script, "export {name}=\"${alias}\"\nunset {alias}\n").expect("write");
     }
     script.push_str(&gate.run);
     process
@@ -241,7 +242,8 @@ impl Drop for GateProcess {
             return;
         }
         #[cfg(unix)]
-        if let Some(pid) = rustix::process::Pid::from_raw(self.child.id() as i32) {
+        {
+            let pid = rustix::process::Pid::from_child(&self.child);
             let _ = rustix::process::kill_process_group(pid, rustix::process::Signal::KILL);
         }
         let _ = self.child.kill();

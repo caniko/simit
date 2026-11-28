@@ -8,6 +8,7 @@ mod plan;
 pub(crate) mod releases;
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::fmt::Write as _;
 use std::path::{Component as PathComponent, Path, PathBuf};
 
 use anyhow::{Context, Result, bail, ensure};
@@ -650,15 +651,17 @@ pub(crate) fn compose_formatter_modules(
     let imports = config
         .formatter_modules
         .iter()
-        .map(|path| {
-            format!(
-                "    (../. + {})\n",
+        .fold(String::new(), |mut output, path| {
+            writeln!(
+                output,
+                "    (../. + {})",
                 serde_json::to_string(&format!("/{path}"))
                     .expect("path string serialization")
                     .replace("${", "\\${")
             )
-        })
-        .collect::<String>();
+            .expect("write");
+            output
+        });
     if let Some(file) = files
         .iter_mut()
         .find(|file| file.relative_path == Path::new("nix/treefmt.nix"))
@@ -674,7 +677,7 @@ pub(crate) fn compose_formatter_modules(
 
 pub fn run(command: crate::cli::MonorepoCommand) -> Result<()> {
     match command.action {
-        crate::cli::MonorepoAction::Check(command) => check::run(command),
+        crate::cli::MonorepoAction::Check(command) => check::run(&command),
         crate::cli::MonorepoAction::Plan(command) => {
             let (root, project) = load(&std::env::current_dir()?)?;
             let graph = project

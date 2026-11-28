@@ -139,7 +139,7 @@ impl Transport for Provider {
                 let reads = self.run_reads.entry(id).or_default();
                 *reads += 1;
                 let drift = self.drift_after_capture && *reads >= 3;
-                let mut run = self.run((id - 12) as usize);
+                let mut run = self.run(usize::try_from(id - 12).unwrap());
                 if drift {
                     run["run_attempt"] = json!(2);
                 }

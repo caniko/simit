@@ -35,7 +35,7 @@ fn symlink(target: &Path, path: &Path, _directory: bool) -> Result<()> {
     Ok(())
 }
 
-pub fn ensure_idle(root: &Path) -> Result<()> {
+pub(super) fn ensure_idle(root: &Path) -> Result<()> {
     match fs::symlink_metadata(root.join(MARKER)) {
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
         Err(error) => Err(error.into()),
@@ -144,7 +144,7 @@ fn clear(root: &Path, path: &Path, checkout: &Path, backup: &Path) -> Result<()>
     Ok(())
 }
 
-pub fn protect<T>(
+pub(super) fn protect<T>(
     root: &Path,
     checkout: &Path,
     operation: impl FnOnce() -> Result<T>,

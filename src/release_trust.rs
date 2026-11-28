@@ -239,11 +239,10 @@ pub fn status(
 }
 
 fn trust_root_path(config: &ProjectConfig, overrides: &TrustOverrides) -> Result<PathBuf> {
-    let trust_root = overrides
-        .trust_root
-        .as_ref()
-        .map(|path| PathBuf::from(path.as_str()))
-        .unwrap_or_else(|| PathBuf::from(&config.release.signing.trust_root));
+    let trust_root = overrides.trust_root.as_ref().map_or_else(
+        || PathBuf::from(&config.release.signing.trust_root),
+        |path| PathBuf::from(path.as_str()),
+    );
     if trust_root.is_absolute() {
         bail!(
             "release trust-root path must be repository-relative: {}",

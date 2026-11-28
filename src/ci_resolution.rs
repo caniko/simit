@@ -107,7 +107,7 @@ pub fn release_backend(
         .release
         .windows_signing
         .as_ref()
-        .is_some_and(|windows| windows.is_signpath())
+        .is_some_and(super::config::WindowsSigningConfig::is_signpath)
         && (provider != CiProvider::Actions || platform != Platform::Github)
     {
         bail!(
@@ -194,10 +194,23 @@ pub struct CiInference {
 
 impl CiInference {
     pub fn from_workflows(marked: &[WorkflowSnapshot]) -> Result<Self> {
+        let marked = marked
+            .iter()
+            .filter(|workflow| {
+                let path = &workflow.relative_path;
+                !path
+                    .file_stem()
+                    .and_then(|stem| stem.to_str())
+                    .is_some_and(|name| {
+                        name == "manual-gates"
+                            || (path.starts_with(".crow") && name.starts_with("manual-"))
+                    })
+            })
+            .cloned()
+            .collect::<Vec<_>>();
         if marked.is_empty() {
             return Ok(Self::default());
         }
-
         let all_content = marked
             .iter()
             .map(|workflow| workflow.content.as_str())
@@ -214,8 +227,7 @@ impl CiInference {
             .map(|workflow| lines_outside_gates(&workflow.content).collect::<String>());
         let self_check_workspace = self_check
             .as_deref()
-            .map(|content| content.contains(" --workspace"))
-            .unwrap_or(false);
+            .is_some_and(|content| content.contains(" --workspace"));
         let self_check_packages = self_check
             .as_deref()
             .map_or_else(Vec::new, infer_self_check_packages);
@@ -239,18 +251,30 @@ impl CiInference {
             .then_some(WorkspaceStrategy::Aggregate)
             .or_else(|| workspace.map(|_| WorkspaceStrategy::Members));
 
-        let runtime = infer_ci_runtime(marked)?;
+        let runtime = infer_ci_runtime(&marked);
         let nextest_run = |line: &str| {
             line.contains("cargo nextest run") || line.contains("cargo-nextest nextest run")
         };
         Ok(Self {
             runtime: Some(runtime),
-            runner: infer_primary_runner_label(marked, "ci"),
-            windows_runner: infer_windows_runner_label(marked),
+            runner: infer_primary_runner_label(&marked, "ci"),
+            windows_runner: infer_windows_runner_label(&marked),
             workspace,
             workspace_strategy,
             packages,
-            all_features: Some(all_content.contains("--all-features")),
+            all_features: Some(
+                all_content
+                    .lines()
+                    .filter(|line| {
+                        line.contains("cargo test")
+                            || nextest_run(line)
+                            || line.contains("cargo clippy")
+                    })
+                    .map(|line| line.contains("--all-features"))
+                    .reduce(|left, right| left || right)
+                    // Custom and Omnix replacement lanes may only have an MSRV check.
+                    .unwrap_or_else(|| all_content.contains("--all-features")),
+            ),
             unit_tests_only: Some(all_content.lines().any(|line| {
                 (line.contains("cargo test") || nextest_run(line))
                     && (line.contains(" --lib") || line.contains(" --bins"))
@@ -264,7 +288,14 @@ impl CiInference {
             nix_flake_check: (runtime == Runtime::Nix
                 && all_content.contains("name: Project checks"))
             .then(|| all_content.contains("nix flake check")),
-            with_msrv: Some(all_content.contains("      - name: Check MSRV\n")),
+            with_msrv: Some(
+                all_content.contains("      - name: Check MSRV\n")
+                    || all_content.contains("name: cargo-msrv")
+                    || all_content.lines().any(|line| {
+                        line.contains("rustup toolchain install")
+                            && line.contains("--profile minimal")
+                    }),
+            ),
             with_audit: Some(
                 all_content.contains("cargo audit")
                     || all_content.contains("cargo-audit audit")
@@ -274,7 +305,11 @@ impl CiInference {
                 all_content.contains("cargo deny check")
                     || all_content.contains("cargo-deny deny check"),
             ),
-            with_docs: Some(all_content.contains("cargo doc --no-deps --all-features")),
+            with_docs: Some(all_content.lines().any(|line| {
+                line.contains("cargo doc")
+                    && line.contains("--no-deps")
+                    && line.contains("--all-features")
+            })),
             with_artifacts: Some(marked.iter().any(|workflow| {
                 workflow_name(&workflow.relative_path) == Some("release-artifacts")
             })),
@@ -289,7 +324,7 @@ impl CiInference {
                     Some("publish-crate" | "publish-workspace" | "release-plz")
                 )
             })),
-            publish_strategy: Some(infer_publish_strategy(marked)),
+            publish_strategy: Some(infer_publish_strategy(&marked)),
             required_gates: Some(required_gates),
             om_ci: Some(infer_om_ci_mode(&all_content)),
             omnix_ref: infer_omnix_ref(&all_content),
@@ -299,8 +334,13 @@ impl CiInference {
 }
 
 #[derive(Debug, Clone)]
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "Each resolved switch independently selects a CI capability"
+)]
 pub struct ResolvedCiInputs {
     pub runtime: Runtime,
+    cargo_over_meaningful_flake: bool,
     pub runner: Option<String>,
     pub windows_runner: Option<String>,
     pub step_runners: BTreeMap<String, String>,
@@ -347,6 +387,7 @@ impl ResolvedCiInputs {
         } else {
             auto_runtime(workspace_root)?
         };
+        cfg.ci.validate_format_runtime(runtime)?;
         let cargo_lanes = runtime == Runtime::Cargo && cfg.ci.independent_lanes;
         let default_nix_flake_check = !cargo_lanes;
         let nix_flake_check = cli
@@ -464,6 +505,10 @@ impl ResolvedCiInputs {
 
         Ok(Self {
             runtime,
+            cargo_over_meaningful_flake: runtime == Runtime::Cargo
+                && (meaningful_flake_outputs(workspace_root)?
+                    || (cli.runtime == Some(RuntimeChoice::Cargo)
+                        && workspace_root.join("flake.nix").exists())),
             runner: cli.runner.clone().or(config.runner).or(inference.runner),
             granular: cli.granular,
             windows_runner: cli
@@ -566,9 +611,21 @@ impl ResolvedCiInputs {
             components: cfg.ci.components.clone(),
             repository_checks: true,
             workspace_has_doctests: false,
-            workspace_has_features: false,
-            workspace_has_library: false,
+            workspace_has_non_empty_default_feature: false,
+            workspace_has_any_feature: false,
+            workspace_lib_members: Vec::new(),
+            workspace_bin_members: Vec::new(),
+            lib_has_any_feature: false,
+            lib_has_non_empty_default_feature: false,
+            bin_has_any_feature: false,
+            bin_has_non_empty_default_feature: false,
             workspace_has_binary: false,
+            exclude_packages: cfg.ci.exclude_packages.clone(),
+            package_features: cfg.ci.package_features.clone(),
+            clippy_all_targets: cfg.ci.clippy_all_targets.unwrap_or(true),
+            format_all_rust_files: cfg.ci.format_all_rust_files,
+            format_excludes: cfg.ci.format_excludes.clone(),
+            format_edition: None,
             all_features: self.all_features,
             unit_tests_only: self.unit_tests_only,
             nix_substituters: cfg.release.artifacts.substituters.clone(),
@@ -629,10 +686,13 @@ impl ResolvedCiInputs {
     ) -> CiConfig {
         let mut ci = cfg.ci.clone();
         ci.platform = Some(platform);
-        // Independent Cargo lanes can coexist with a meaningful flake. Keep the
-        // runtime choice even when there is no generated workflow to infer from.
-        ci.runtime =
-            (self.runtime != Runtime::Cargo || ci.independent_lanes).then_some(self.runtime);
+        // A meaningful flake would otherwise infer Nix without generated workflows.
+        ci.runtime = (self.runtime != Runtime::Cargo
+            || self.cargo_over_meaningful_flake
+            || ci.runtime.is_some()
+            || ci.independent_lanes
+            || ci.crow.requires_cargo())
+        .then_some(self.runtime);
         // Native system runners replace the single runner, and config
         // validation rejects both together.
         ci.runner = runner.filter(|_| ci.nix_system_runners.is_empty());
@@ -640,8 +700,8 @@ impl ResolvedCiInputs {
         ci.workspace = self.workspace;
         ci.workspace_strategy = self.workspace_strategy;
         ci.publish_strategy = self.publish_strategy;
-        ci.required_gates = self.required_gates.clone();
-        ci.packages = self.packages.clone();
+        ci.required_gates.clone_from(&self.required_gates);
+        ci.packages.clone_from(&self.packages);
         ci.all_features = (!self.all_features).then_some(false);
         ci.unit_tests_only = self.unit_tests_only;
         ci.with_nextest = self.with_nextest;
@@ -661,6 +721,94 @@ impl ResolvedCiInputs {
             .then(|| omnix_ref.to_owned());
         ci
     }
+}
+
+/// Resolve the metadata shared by CI generation and registry drift checks.
+pub(crate) fn apply_cargo_metadata(
+    options: &mut CiOptions,
+    metadata: &crate::cargo::Metadata,
+) -> Result<()> {
+    if options.format_all_rust_files {
+        options.format_edition = crate::cargo::rustfmt_edition(metadata).ok();
+    }
+    if options.workspace_strategy != WorkspaceStrategy::Aggregate {
+        if !options.exclude_packages.is_empty() || !options.package_features.is_empty() {
+            bail!(
+                "[ci].exclude_packages and package_features require workspace_strategy = \"aggregate\""
+            );
+        }
+        return Ok(());
+    }
+    let members: BTreeMap<_, _> = metadata
+        .packages
+        .iter()
+        .filter(|package| metadata.workspace_members.contains(&package.id))
+        .map(|package| (package.name.as_str(), package))
+        .collect();
+    for name in &options.exclude_packages {
+        if !members.contains_key(name.as_str()) {
+            bail!("[ci].exclude_packages: `{name}` is not a workspace member");
+        }
+    }
+    for (name, features) in &options.package_features {
+        let Some(package) = members.get(name.as_str()) else {
+            bail!("[ci].package_features: `{name}` is not a workspace member");
+        };
+        for feature in features {
+            if !package.features.contains_key(feature) {
+                bail!("[ci].package_features: `{name}` has no feature `{feature}`");
+            }
+        }
+    }
+    let mut any_selected = false;
+    for package in members
+        .values()
+        .filter(|package| !options.exclude_packages.contains(&package.name))
+    {
+        any_selected = true;
+        options.workspace_has_doctests |= package.has_doctests();
+        let has_any_feature = package.has_any_feature();
+        let has_non_empty_default_feature = package.has_non_empty_default_feature();
+        options.workspace_has_non_empty_default_feature |= has_non_empty_default_feature;
+        options.workspace_has_any_feature |= has_any_feature;
+        options.workspace_has_binary |= package.has_binary_target();
+        if package.has_library_target() {
+            options.workspace_lib_members.push(package.name.clone());
+            options.lib_has_any_feature |= has_any_feature;
+            options.lib_has_non_empty_default_feature |= has_non_empty_default_feature;
+        } else if package.has_binary_target() {
+            options.workspace_bin_members.push(package.name.clone());
+            options.bin_has_any_feature |= has_any_feature;
+            options.bin_has_non_empty_default_feature |= has_non_empty_default_feature;
+        } else if options.unit_tests_only || !options.clippy_all_targets {
+            bail!(
+                "workspace member `{}` has neither a lib nor a bin target; exclude it or enable other targets",
+                package.name
+            );
+        }
+    }
+    if !any_selected {
+        bail!("[ci].exclude_packages excludes every workspace member");
+    }
+    Ok(())
+}
+
+pub(crate) fn crow_aggregate_package<'a>(
+    options: &CiOptions,
+    packages: &'a [crate::cargo::Package],
+) -> Option<&'a crate::cargo::Package> {
+    if options.workspace_strategy != WorkspaceStrategy::Aggregate {
+        return None;
+    }
+    packages
+        .iter()
+        .filter(|package| !options.exclude_packages.contains(&package.name))
+        .max_by_key(|package| {
+            package
+                .rust_version
+                .as_deref()
+                .map(crate::cargo::rust_version_key)
+        })
 }
 
 #[derive(Debug, Clone, Default)]
@@ -707,38 +855,38 @@ impl CiConfigLayer {
     }
 
     fn from_table(ci_table: Option<&dyn toml_edit::TableLike>, cfg: &ProjectConfig) -> Self {
-        let step_runners = present(ci_table, "step_runners").and_then(|_| {
+        let step_runners = present(ci_table, "step_runners").and_then(|()| {
             let m = &cfg.ci.step_runners;
             if m.is_empty() { None } else { Some(m.clone()) }
         });
 
         Self {
             runtime: present(ci_table, "runtime").and(cfg.ci.runtime),
-            runner: present(ci_table, "runner").and_then(|_| cfg.ci.runner.clone()),
+            runner: present(ci_table, "runner").and_then(|()| cfg.ci.runner.clone()),
             windows_runner: present(ci_table, "windows_runner")
-                .and_then(|_| cfg.ci.windows_runner.clone()),
-            workspace: present(ci_table, "workspace").map(|_| cfg.ci.workspace),
+                .and_then(|()| cfg.ci.windows_runner.clone()),
+            workspace: present(ci_table, "workspace").map(|()| cfg.ci.workspace),
             step_runners,
-            packages: present(ci_table, "packages").map(|_| cfg.ci.packages.clone()),
+            packages: present(ci_table, "packages").map(|()| cfg.ci.packages.clone()),
             all_features: present(ci_table, "all_features").and(cfg.ci.all_features),
-            unit_tests_only: present(ci_table, "unit_tests_only").map(|_| cfg.ci.unit_tests_only),
-            with_nextest: present(ci_table, "with_nextest").map(|_| cfg.ci.with_nextest),
+            unit_tests_only: present(ci_table, "unit_tests_only").map(|()| cfg.ci.unit_tests_only),
+            with_nextest: present(ci_table, "with_nextest").map(|()| cfg.ci.with_nextest),
             with_nix_cargo_cache: present(ci_table, "with_nix_cargo_cache")
-                .map(|_| cfg.ci.with_nix_cargo_cache),
+                .map(|()| cfg.ci.with_nix_cargo_cache),
             nix_flake_check: present(ci_table, "nix_flake_check").and(cfg.ci.nix_flake_check),
-            with_msrv: present(ci_table, "with_msrv").map(|_| cfg.ci.with_msrv),
-            with_audit: present(ci_table, "with_audit").map(|_| cfg.ci.with_audit),
-            with_deny: present(ci_table, "with_deny").map(|_| cfg.ci.with_deny),
-            with_docs: present(ci_table, "with_docs").map(|_| cfg.ci.with_docs),
-            with_artifacts: present(ci_table, "with_artifacts").map(|_| cfg.ci.with_artifacts),
+            with_msrv: present(ci_table, "with_msrv").map(|()| cfg.ci.with_msrv),
+            with_audit: present(ci_table, "with_audit").map(|()| cfg.ci.with_audit),
+            with_deny: present(ci_table, "with_deny").map(|()| cfg.ci.with_deny),
+            with_docs: present(ci_table, "with_docs").map(|()| cfg.ci.with_docs),
+            with_artifacts: present(ci_table, "with_artifacts").map(|()| cfg.ci.with_artifacts),
             with_pypi_publish: present(ci_table, "with_pypi_publish")
-                .map(|_| cfg.ci.with_pypi_publish),
-            publish_crates: present(ci_table, "publish_crates").map(|_| cfg.ci.publish_crates),
+                .map(|()| cfg.ci.with_pypi_publish),
+            publish_crates: present(ci_table, "publish_crates").map(|()| cfg.ci.publish_crates),
             publish_strategy: present(ci_table, "publish_strategy")
-                .map(|_| cfg.ci.publish_strategy),
-            om_ci: present(ci_table, "om_ci").map(|_| cfg.ci.om_ci),
-            om_ci_augment: present(ci_table, "om_ci_augment").map(|_| cfg.ci.om_ci_augment),
-            omnix_ref: present(ci_table, "omnix_ref").and_then(|_| cfg.ci.omnix_ref.clone()),
+                .map(|()| cfg.ci.publish_strategy),
+            om_ci: present(ci_table, "om_ci").map(|()| cfg.ci.om_ci),
+            om_ci_augment: present(ci_table, "om_ci_augment").map(|()| cfg.ci.om_ci_augment),
+            omnix_ref: present(ci_table, "omnix_ref").and_then(|()| cfg.ci.omnix_ref.clone()),
         }
     }
 
@@ -848,7 +996,7 @@ fn lines_outside_gates(content: &str) -> impl Iterator<Item = &str> {
     })
 }
 
-fn infer_ci_runtime(marked: &[WorkflowSnapshot]) -> Result<Runtime> {
+fn infer_ci_runtime(marked: &[WorkflowSnapshot]) -> Runtime {
     let Some(ci_workflow) = marked
         .iter()
         .find(|workflow| workflow_name(&workflow.relative_path) == Some("ci"))
@@ -863,7 +1011,7 @@ fn infer_ci_runtime(marked: &[WorkflowSnapshot]) -> Result<Runtime> {
                 .find(|workflow| workflow_name(&workflow.relative_path) == Some("publish-pypi"))
         })
     else {
-        return Ok(Runtime::Cargo);
+        return Runtime::Cargo;
     };
 
     // Independent flake lanes and dedicated gate jobs do not select the Rust runtime.
@@ -876,9 +1024,9 @@ fn infer_ci_runtime(marked: &[WorkflowSnapshot]) -> Result<Runtime> {
         ) || line.contains("run: nix flake check")
             || line.contains("run: nix develop -c cargo")
     }) {
-        Ok(Runtime::Nix)
+        Runtime::Nix
     } else {
-        Ok(Runtime::Cargo)
+        Runtime::Cargo
     }
 }
 
@@ -1025,7 +1173,7 @@ fn infer_required_gates(content: &str) -> Vec<crate::config::RequiredGate> {
         for probe in lines.by_ref() {
             let probe_trim = probe.trim_start();
             if let Some(value) = probe_trim.strip_prefix("run: ") {
-                run = value.trim().to_owned();
+                value.trim().clone_into(&mut run);
                 // `run: |` block: capture the single indented command line.
                 if run == "|" {
                     run = String::new();
@@ -1042,7 +1190,7 @@ fn infer_required_gates(content: &str) -> Vec<crate::config::RequiredGate> {
             {
                 // Continuation of a `run: |` block (single-line gates only).
                 if run.is_empty() {
-                    run = probe_trim.to_owned();
+                    probe_trim.clone_into(&mut run);
                     break;
                 }
             }
@@ -1057,6 +1205,7 @@ fn infer_required_gates(content: &str) -> Vec<crate::config::RequiredGate> {
             continue;
         }
         gates.push(crate::config::RequiredGate {
+            secret: None,
             id: id.to_owned(),
             run,
             runtime: None,
@@ -1158,5 +1307,26 @@ mod tests {
             ]),
             Some(false)
         );
+    }
+
+    #[test]
+    fn manual_gate_commands_do_not_infer_primary_ci_options() {
+        for path in [
+            ".crow/manual-security.yaml",
+            ".github/workflows/manual-gates.yaml",
+        ] {
+            let manual = WorkflowSnapshot {
+                relative_path: PathBuf::from(path),
+                content: "cargo audit && cargo test --all-features && cargo deny check".into(),
+            };
+            let build = WorkflowSnapshot {
+                relative_path: PathBuf::from(".crow/build.yaml"),
+                content: "cargo test --locked".into(),
+            };
+            let inference = CiInference::from_workflows(&[build, manual]).unwrap();
+            assert_eq!(inference.all_features, Some(false), "{path}");
+            assert_eq!(inference.with_audit, Some(false), "{path}");
+            assert_eq!(inference.with_deny, Some(false), "{path}");
+        }
     }
 }

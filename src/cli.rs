@@ -178,6 +178,10 @@ pub struct InitCommand {
 }
 
 #[derive(Debug, Args)]
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "These fields mirror independent command-line switches"
+)]
 pub struct UpgradeCommand {
     #[arg(
         long = "path",
@@ -265,6 +269,10 @@ pub enum DistAction {
 }
 
 #[derive(Debug, Args)]
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "These fields mirror independent command-line switches"
+)]
 pub struct CommitCommand {
     #[arg(
         long = "package",
@@ -301,6 +309,10 @@ pub struct CommitCommand {
 }
 
 #[derive(Debug, Args)]
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "These fields mirror independent command-line switches"
+)]
 pub struct ReleaseCommand {
     #[arg(
         long,
@@ -621,6 +633,10 @@ pub enum BumpKind {
 }
 
 #[derive(Debug, Args)]
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "These fields mirror independent command-line switches"
+)]
 pub struct InitCiCommand {
     #[arg(long, conflicts_with_all = ["check", "diff", "review_only", "pages_only", "prebuild_only"], help = "Print the versioned generated-file ownership plan without writing files; with --primary-only, only primary CI")]
     pub plan_json: bool,
@@ -1247,6 +1263,10 @@ impl ScoopOverridesArgs {
 }
 
 #[derive(Debug, Args)]
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "These fields mirror independent command-line switches"
+)]
 pub struct InitHomebrewTapCommand {
     #[arg(
         long,
@@ -1333,6 +1353,10 @@ pub struct HomebrewBumpArgs {
 }
 
 #[derive(Debug, Args)]
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "These fields mirror independent command-line switches"
+)]
 pub struct InitScoopBucketCommand {
     #[arg(
         long,
@@ -1522,6 +1546,10 @@ pub enum WindowsAction {
 }
 
 #[derive(Debug, Args)]
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "These fields mirror independent command-line switches"
+)]
 pub struct WindowsPublishArgs {
     #[arg(
         long,
@@ -1620,6 +1648,10 @@ pub struct ChocolateyRenderArgs {
 }
 
 #[derive(Debug, Args)]
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "These fields mirror independent command-line switches"
+)]
 pub struct ChocolateyBumpArgs {
     #[arg(
         long,
@@ -1849,6 +1881,10 @@ pub struct InitAptCommand {
 }
 
 #[derive(Debug, Args)]
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "These fields mirror independent command-line switches"
+)]
 pub struct InitAptRepoCommand {
     #[arg(
         long,
@@ -1875,6 +1911,10 @@ pub struct InitAptRepoCommand {
 }
 
 #[derive(Debug, Args)]
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "These fields mirror independent command-line switches"
+)]
 pub struct InitReleaseCommand {
     #[arg(
         long = "package",
@@ -2179,6 +2219,10 @@ pub enum Runtime {
 }
 
 #[derive(Debug, Args)]
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "These fields mirror independent command-line switches"
+)]
 pub struct InitFlakeCommand {
     #[arg(
         long,
@@ -2360,6 +2404,10 @@ pub enum ProjectsAction {
 }
 
 #[derive(Debug, Args)]
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "These fields mirror independent command-line switches"
+)]
 pub struct ProjectsListArgs {
     #[arg(
         long = "feature",
@@ -2449,6 +2497,10 @@ pub struct ProjectsFactsArgs {
 }
 
 #[derive(Debug, Args)]
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "These fields mirror independent command-line switches"
+)]
 pub struct ProjectsRegenerateArgs {
     #[arg(
         value_name = "PATH",
@@ -2471,6 +2523,10 @@ pub struct ProjectsRegenerateArgs {
 }
 
 #[derive(Debug, Args)]
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "These fields mirror independent command-line switches"
+)]
 pub struct ProjectsDiscoverArgs {
     #[arg(
         value_name = "ROOT",

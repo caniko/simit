@@ -1,5 +1,6 @@
 use std::env;
 use std::fmt;
+use std::fmt::Write as _;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitStatus};
@@ -26,6 +27,10 @@ impl fmt::Display for TestExit {
 
 impl std::error::Error for TestExit {}
 
+#[expect(
+    clippy::needless_pass_by_value,
+    reason = "Keep the public command entry point's owned argument API"
+)]
 pub fn run(options: TestCommand) -> Result<()> {
     let Some((program, args)) = options.command.split_first() else {
         bail!("a test command is required after --");
@@ -110,10 +115,12 @@ impl FixtureEnvironment {
             };
             // Git permits missing default global config files.
             if absolute.try_exists()? {
-                contents.push_str(&format!(
+                write!(
+                    contents,
                     "[include]\n\tpath = {}\n",
                     quote(path_text(&absolute)?)
-                ));
+                )
+                .expect("write");
             }
         }
         let fixture_config = root.join("fixture.gitconfig");
@@ -129,11 +136,13 @@ impl FixtureEnvironment {
         // A trailing slash makes Git match descendants. Escape wildmatch syntax
         // in the actual path so a temp parent like /tmp/test[1] cannot widen it.
         let pattern = format!("gitdir:{}/", escape_pattern(path_text(&root)?));
-        contents.push_str(&format!(
+        write!(
+            contents,
             "[includeIf {}]\n\tpath = {}\n",
             quote(&pattern),
             quote(path_text(&fixture_config)?)
-        ));
+        )
+        .expect("write");
         fs::write(&config, contents)?;
         Ok(Self {
             _directory: directory,

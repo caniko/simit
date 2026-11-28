@@ -1,4 +1,5 @@
 use std::collections::{BTreeMap, BTreeSet};
+use std::fmt::Write as _;
 use std::fs;
 use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
@@ -33,6 +34,10 @@ use crate::render::ci::{
 };
 use crate::user_config::{ResolvedRunner, UserConfig, validate_runner_label};
 
+#[expect(
+    clippy::needless_pass_by_value,
+    reason = "Keep the public command entry point's owned argument API"
+)]
 pub fn run(command: InitCiCommand) -> Result<()> {
     if let (Some(strategy), Some(coordinated)) =
         (command.publish_strategy, command.coordinated_publish)
@@ -75,7 +80,7 @@ pub fn run(command: InitCiCommand) -> Result<()> {
                 "[ci].qualified_by = {qualifier:?} delegates qualification; --primary-only, --plan-json, --publish-crates, --with-vscode, --with-jetbrains, --with-homebrew, --with-chocolatey, --with-scoop, --with-artifacts and --with-pypi-publish are not supported"
             );
         }
-        return run_pages_only(command);
+        return run_pages_only(&command);
     }
     if let Some(root) = crate::monorepo::find_root(&std::env::current_dir()?)?
         && !command.review_only
@@ -119,21 +124,21 @@ pub fn run(command: InitCiCommand) -> Result<()> {
         return Ok(());
     }
     if command.prebuild_only {
-        return run_prebuild_only(command);
+        return run_prebuild_only(&command);
     }
     if command.pages_only {
-        return run_pages_only(command);
+        return run_pages_only(&command);
     }
     let current_dir = std::env::current_dir().context("reading current directory")?;
     if command.platform == Some(Platform::Gitlab) {
-        return run_nix_only(command);
+        return run_nix_only(&command);
     }
     if cargo::find_manifest(&current_dir).is_err() {
         if python::find_project_root(&current_dir).is_ok() {
-            return run_python(command);
+            return run_python(&command);
         }
         if current_dir.join("flake.nix").is_file() {
-            return run_nix_only(command);
+            return run_nix_only(&command);
         }
     }
 
@@ -141,7 +146,7 @@ pub fn run(command: InitCiCommand) -> Result<()> {
     let workspace_root = metadata.workspace_root.as_std_path();
     let cfg = ProjectConfig::load(workspace_root)?;
     if cfg.ci.nix_build.only {
-        return run_nix_only_at(command, workspace_root);
+        return run_nix_only_at(&command, workspace_root);
     }
     let provider = command
         .ci_provider
@@ -162,10 +167,10 @@ pub fn run(command: InitCiCommand) -> Result<()> {
     crate::render::workflow_templates::validate_backend(&cfg.ci, provider, platform)?;
     validate_review_policy_backend(&cfg, platform, provider)?;
     if platform == Platform::Gitlab {
-        return run_nix_only(command);
+        return run_nix_only(&command);
     }
     if backend.provider() == CiProvider::Crow {
-        return run_crow(command, &metadata, workspace_root, &cfg, platform);
+        return run_crow(&command, &metadata, workspace_root, &cfg, platform);
     }
     let workflow_snapshots = workflow_snapshots_for_platform(workspace_root, platform)?;
     let inference = CiInference::from_workflows(&workflow_snapshots)?;
@@ -316,6 +321,7 @@ pub fn run(command: InitCiCommand) -> Result<()> {
         .or_else(|| user_config.ci.tools.omnix.r#ref.clone())
         .unwrap_or_else(|| resolved.omnix_ref.clone());
     let mut options = resolved.ci_options(&cfg, with_artifacts, omnix_ref.clone());
+    crate::ci_resolution::apply_cargo_metadata(&mut options, &metadata)?;
     options.publish_crates = publish_crates;
     let runner_override =
         if platform == Platform::Github && cfg.ci.platform != Some(Platform::Github) {
@@ -366,7 +372,11 @@ pub fn run(command: InitCiCommand) -> Result<()> {
         && resolved.workspace_strategy == crate::cli::WorkspaceStrategy::Members;
     let generation_packages =
         if resolved.workspace_strategy == crate::cli::WorkspaceStrategy::Aggregate {
-            packages.first().into_iter().collect::<Vec<_>>()
+            packages
+                .iter()
+                .find(|package| !options.exclude_packages.contains(&package.name))
+                .into_iter()
+                .collect::<Vec<_>>()
         } else {
             packages.iter().collect::<Vec<_>>()
         };
@@ -389,18 +399,6 @@ pub fn run(command: InitCiCommand) -> Result<()> {
         };
         let package_options = CiOptions {
             repository_checks: index == 0,
-            workspace_has_doctests: resolved.workspace_strategy
-                == crate::cli::WorkspaceStrategy::Aggregate
-                && packages.iter().any(cargo::Package::has_doctests),
-            workspace_has_features: resolved.workspace_strategy
-                == crate::cli::WorkspaceStrategy::Aggregate
-                && packages.iter().any(|package| !package.features.is_empty()),
-            workspace_has_library: resolved.workspace_strategy
-                == crate::cli::WorkspaceStrategy::Aggregate
-                && packages.iter().any(cargo::Package::has_library_target),
-            workspace_has_binary: resolved.workspace_strategy
-                == crate::cli::WorkspaceStrategy::Aggregate
-                && packages.iter().any(cargo::Package::has_binary_target),
             homebrew,
             chocolatey,
             scoop,
@@ -545,7 +543,7 @@ pub fn run(command: InitCiCommand) -> Result<()> {
             resolved.runtime,
             &runners.ci,
             &options,
-            &crate::python::maturin_pyproject_dir(workspace_root)?,
+            &python::maturin_pyproject_dir(workspace_root)?,
         )?);
     }
     let pages = if command.primary_only {
@@ -601,7 +599,7 @@ pub fn run(command: InitCiCommand) -> Result<()> {
     persisted_ci.provider = Some(provider);
     persisted_ci.publish_crates = publish_crates;
     if command.with_codeberg_pages {
-        persisted_ci.pages = Some(codeberg_pages_config(&pages)?);
+        persisted_ci.pages = Some(codeberg_pages_config(pages.as_ref())?);
     } else if let Some(pages) = cfg.ci.pages.clone().or(inferred_pages) {
         // Explicit project config owns Pages overrides. Workflow inference is
         // only a fallback for repositories that have not persisted them yet.
@@ -610,8 +608,10 @@ pub fn run(command: InitCiCommand) -> Result<()> {
     let persisted_in_simit_toml =
         workspace_root.join("simit.toml").exists() && cfg.ci == persisted_ci;
     let mut regeneration_inputs = resolved.clone();
-    regeneration_inputs.runner = persisted_ci.runner.clone();
-    regeneration_inputs.windows_runner = persisted_ci.windows_runner.clone();
+    regeneration_inputs.runner.clone_from(&persisted_ci.runner);
+    regeneration_inputs
+        .windows_runner
+        .clone_from(&persisted_ci.windows_runner);
     let check_message = format!(
         "CI workflows are not up to date; run `{}`",
         render_regeneration_command(
@@ -674,7 +674,7 @@ pub fn run(command: InitCiCommand) -> Result<()> {
     }
 }
 
-fn run_prebuild_only(command: InitCiCommand) -> Result<()> {
+fn run_prebuild_only(command: &InitCiCommand) -> Result<()> {
     let workspace_root = workflow_workspace_root()?;
     if !workspace_root.join("flake.nix").is_file() {
         bail!("Prebuild workflow generation requires flake.nix at the workspace root");
@@ -684,7 +684,7 @@ fn run_prebuild_only(command: InitCiCommand) -> Result<()> {
         .prebuild
         .as_ref()
         .is_some_and(crate::config::PrebuildConfig::runs_on_crow);
-    validate_prebuild_only_options(&command, crow_prebuild)?;
+    validate_prebuild_only_options(command, crow_prebuild)?;
     let files = prebuild_files(&cfg, command.crow_format.unwrap_or(cfg.ci.crow.format))?;
     if files.is_empty() {
         bail!("--prebuild-only requires a [prebuild] configuration");
@@ -712,7 +712,7 @@ fn run_prebuild_only(command: InitCiCommand) -> Result<()> {
     }
     if command.check {
         project::check_generated_files(&workspace_root, &files, message, command.diff)?;
-        let obsolete = obsolete_nix_workflows(&workspace_root, Platform::Github, &expected)?;
+        let obsolete = obsolete_nix_workflows(&workspace_root, Platform::Github, &expected);
         if !obsolete.is_empty() {
             bail!(
                 "{message}:\n{}",
@@ -725,7 +725,7 @@ fn run_prebuild_only(command: InitCiCommand) -> Result<()> {
         }
     } else {
         project::write_generated_files(&workspace_root, &files)?;
-        for relative in obsolete_nix_workflows(&workspace_root, Platform::Github, &expected)? {
+        for relative in obsolete_nix_workflows(&workspace_root, Platform::Github, &expected) {
             fs::remove_file(workspace_root.join(&relative))
                 .with_context(|| format!("removing obsolete {}", relative.display()))?;
         }
@@ -847,7 +847,7 @@ fn workflow_workspace_root() -> Result<PathBuf> {
     Ok(python::find_project_root(&current_dir).unwrap_or(current_dir))
 }
 
-fn run_pages_only(command: InitCiCommand) -> Result<()> {
+fn run_pages_only(command: &InitCiCommand) -> Result<()> {
     let workspace_root = workflow_workspace_root()?;
     let cfg = ProjectConfig::load(&workspace_root)?;
     let qualified = cfg.ci.qualified_by.is_some();
@@ -898,7 +898,7 @@ fn run_pages_only(command: InitCiCommand) -> Result<()> {
             .context("Forgejo Pages generation requires --runner or [ci].runner")?,
         Platform::Gitlab => unreachable!(),
     };
-    let pages = codeberg_pages_options(&cfg, &command, inferred_pages.as_ref())?;
+    let pages = codeberg_pages_options(&cfg, command, inferred_pages.as_ref())?;
     if pages.is_none() && !qualified {
         bail!(
             "--pages-only requires --with-pages, [ci.pages], or an existing managed Pages workflow"
@@ -957,7 +957,7 @@ fn run_pages_only(command: InitCiCommand) -> Result<()> {
         )?;
         if command.with_codeberg_pages && ProjectConfig::can_persist_ci(&workspace_root)? {
             let mut persisted_ci = cfg.ci;
-            persisted_ci.pages = Some(codeberg_pages_config(&pages)?);
+            persisted_ci.pages = Some(codeberg_pages_config(pages.as_ref())?);
             ProjectConfig::write_ci(&workspace_root, &persisted_ci)?;
         }
         registry::touch_current_project_or_warn([("ci", FeatureStatus::Managed)]);
@@ -968,7 +968,7 @@ fn run_pages_only(command: InitCiCommand) -> Result<()> {
     Ok(())
 }
 
-fn run_nix_only(command: InitCiCommand) -> Result<()> {
+fn run_nix_only(command: &InitCiCommand) -> Result<()> {
     let workspace_root = std::env::current_dir().context("reading current directory")?;
     run_nix_only_at(command, &workspace_root)
 }
@@ -992,7 +992,7 @@ pub(crate) fn validate_nix_only_publication(
         crate::config::PublishStrategy::Coordinated => {
             bail!("Nix-only coordinated crate publication requires GitHub Actions")
         }
-        strategy => bail!(
+        strategy @ crate::config::PublishStrategy::ReleasePlz => bail!(
             "Nix-only crate publication supports publish_strategy = \"members\" or \"coordinated\"; got {strategy:?}"
         ),
     }
@@ -1028,7 +1028,7 @@ pub(crate) fn nix_only_publish_files(
         bail!("[ci].publish_crates requires a Cargo workspace at the project root");
     }
     let metadata = cargo::cargo_metadata(&cargo::find_manifest(workspace_root)?)?;
-    let options = ci::CiOptions {
+    let options = CiOptions {
         tag_prefix: cfg.release.tag_prefix,
         nix_setup_action_ref: cfg.ci.nix_setup_action_ref.clone(),
         nix_substituters: cfg.release.artifacts.substituters.clone(),
@@ -1050,7 +1050,7 @@ pub(crate) fn nix_only_publish_files(
         required_env: cfg.ci.required_env.clone(),
         push_branches: cfg.ci.push_branches.clone(),
         required_gates: cfg.ci.required_gates.clone(),
-        ..ci::CiOptions::default()
+        ..CiOptions::default()
     };
     let members = cargo::select_packages(&metadata, &[], true)?;
     let crates_io = |name: &str| {
@@ -1132,7 +1132,7 @@ pub(crate) fn nix_only_publish_files(
     Ok(files)
 }
 
-fn run_nix_only_at(command: InitCiCommand, workspace_root: &Path) -> Result<()> {
+fn run_nix_only_at(command: &InitCiCommand, workspace_root: &Path) -> Result<()> {
     if !workspace_root.join("flake.nix").is_file() {
         bail!("Nix CI generation requires flake.nix at the workspace root");
     }
@@ -1238,7 +1238,7 @@ fn run_nix_only_at(command: InitCiCommand, workspace_root: &Path) -> Result<()> 
     let pages = if command.primary_only {
         None
     } else {
-        codeberg_pages_options(&cfg, &command, None)?
+        codeberg_pages_options(&cfg, command, None)?
     };
     let mut crow = cfg.ci.crow.clone();
     if let Some(format) = command.crow_format {
@@ -1340,10 +1340,10 @@ fn run_nix_only_at(command: InitCiCommand, workspace_root: &Path) -> Result<()> 
         }
         files
     };
-    let mut remediation = regeneration_base(&command, CiBackend::from_parts(provider, platform)?);
+    let mut remediation = regeneration_base(command, CiBackend::from_parts(provider, platform)?);
     remediation.push_str(" --runtime nix");
     if system_runners.is_empty() {
-        remediation.push_str(&format!(" --runner {}", shell_word(&runner)));
+        write!(remediation, " --runner {}", shell_word(&runner)).expect("write");
     }
     let message = if system_runners.is_empty() {
         format!("Nix-only CI is not up to date; run `{remediation}`")
@@ -1367,7 +1367,7 @@ fn run_nix_only_at(command: InitCiCommand, workspace_root: &Path) -> Result<()> 
             persisted_ci.step_runners.clear();
         }
         if command.with_codeberg_pages {
-            persisted_ci.pages = Some(codeberg_pages_config(&pages)?);
+            persisted_ci.pages = Some(codeberg_pages_config(pages.as_ref())?);
         }
         Some(persisted_ci)
     };
@@ -1375,7 +1375,7 @@ fn run_nix_only_at(command: InitCiCommand, workspace_root: &Path) -> Result<()> 
         workspace_root,
         files,
         &message,
-        &command,
+        command,
         persisted_ci.as_ref(),
     )?;
     if let Some(persisted_ci) = persisted_ci.filter(|_| !command.plan_json) {
@@ -1464,7 +1464,7 @@ pub(crate) fn prebuild_files(
     )?])
 }
 
-fn run_python(command: InitCiCommand) -> Result<()> {
+fn run_python(command: &InitCiCommand) -> Result<()> {
     let current_dir = std::env::current_dir().context("reading current directory")?;
     let root = python::find_project_root(&current_dir)?;
     let workspace_root = root.as_path();
@@ -1526,7 +1526,7 @@ fn run_python(command: InitCiCommand) -> Result<()> {
     let workflow_snapshots = workflow_snapshots_for_platform(workspace_root, platform)?;
     let inferred_pages = infer_codeberg_pages_from_workflows(&workflow_snapshots)?;
     let inference = CiInference::from_workflows(&workflow_snapshots)?;
-    let mut cli_overrides = ci_cli_overrides(&command);
+    let mut cli_overrides = ci_cli_overrides(command);
     if cli_overrides.runtime.is_none() && cfg.ci.runtime.is_none() {
         cli_overrides.runtime = Some(RuntimeChoice::Nix);
     }
@@ -1596,7 +1596,7 @@ fn run_python(command: InitCiCommand) -> Result<()> {
     let pages = if command.primary_only {
         None
     } else {
-        codeberg_pages_options(&cfg, &command, inferred_pages.as_ref())?
+        codeberg_pages_options(&cfg, command, inferred_pages.as_ref())?
     };
     if let Some(pages) = &pages {
         files.push(ci::pages_file_with_nix_setup(
@@ -1610,7 +1610,7 @@ fn run_python(command: InitCiCommand) -> Result<()> {
         resolved.persisted_ci(&cfg, platform, false, &omnix_ref, persisted_runner, None);
     persisted_ci.provider = Some(provider);
     if command.with_codeberg_pages {
-        persisted_ci.pages = Some(codeberg_pages_config(&pages)?);
+        persisted_ci.pages = Some(codeberg_pages_config(pages.as_ref())?);
     } else if let Some(pages) = cfg.ci.pages.clone().or(inferred_pages) {
         persisted_ci.pages = Some(pages);
     }
@@ -1619,7 +1619,7 @@ fn run_python(command: InitCiCommand) -> Result<()> {
     let check_message = format!(
         "CI workflows are not up to date; run `{}`",
         render_regeneration_command(
-            &command,
+            command,
             backend,
             &resolved,
             false,
@@ -1630,7 +1630,7 @@ fn run_python(command: InitCiCommand) -> Result<()> {
     );
 
     if command.check {
-        reconcile_ci_files(workspace_root, files, &check_message, &command, None)?;
+        reconcile_ci_files(workspace_root, files, &check_message, command, None)?;
         if command.primary_only {
             Ok(())
         } else {
@@ -1641,7 +1641,7 @@ fn run_python(command: InitCiCommand) -> Result<()> {
             workspace_root,
             files,
             &check_message,
-            &command,
+            command,
             Some(&persisted_ci),
         )?;
         if command.primary_only || command.plan_json {
@@ -1657,7 +1657,7 @@ fn run_python(command: InitCiCommand) -> Result<()> {
 }
 
 fn run_crow(
-    command: InitCiCommand,
+    command: &InitCiCommand,
     metadata: &cargo::Metadata,
     workspace_root: &Path,
     cfg: &ProjectConfig,
@@ -1665,12 +1665,10 @@ fn run_crow(
 ) -> Result<()> {
     let snapshots = workflow_snapshots_for_crow(workspace_root)?;
     let inference = CiInference::from_workflows(&snapshots)?;
-    let cli_overrides = ci_cli_overrides(&command);
+    let cli_overrides = ci_cli_overrides(command);
     let resolved =
         ResolvedCiInputs::resolve(workspace_root, cfg, &cli_overrides, Some(&inference))?;
-    if resolved.workspace_strategy == crate::cli::WorkspaceStrategy::Aggregate {
-        bail!("aggregate workspace CI is only supported for Actions workflows");
-    }
+    let aggregate = resolved.workspace_strategy == crate::cli::WorkspaceStrategy::Aggregate;
     if resolved.publish_strategy == crate::config::PublishStrategy::Coordinated {
         bail!(
             "coordinated workspace publication is only supported for Actions workflows on GitHub in v1"
@@ -1683,11 +1681,16 @@ fn run_crow(
     let windows_packagers = command.with_chocolatey || command.with_scoop;
     let with_artifacts = resolved.with_artifacts || command.with_homebrew || windows_packagers;
     let publish_crates = resolved.publish_crates || with_artifacts;
+    if aggregate && publish_crates {
+        bail!("aggregate workspace CI cannot be combined with crate or platform publishing");
+    }
     let omnix_ref = resolved.omnix_ref.clone();
     let mut crow = cfg.ci.crow.clone();
     if let Some(format) = command.crow_format {
         crow.format = format;
     }
+    crow.validate_runtime(resolved.runtime)?;
+    crow.validate_step_runners(!resolved.step_runners.is_empty())?;
     let runners = crow_runners(&resolved, windows_packagers);
     let step_runners = resolved
         .step_runners
@@ -1707,10 +1710,17 @@ fn run_crow(
         .iter()
         .any(|package| package.name == "simit");
     let mut options = resolved.ci_options(cfg, with_artifacts, omnix_ref);
+    crate::ci_resolution::apply_cargo_metadata(&mut options, metadata)?;
     options.publish_crates = publish_crates;
-    let multi_package_workspace = metadata.workspace_members.len() > 1;
+    let multi_package_workspace = metadata.workspace_members.len() > 1 && !aggregate;
+    let aggregate_package = crate::ci_resolution::crow_aggregate_package(&options, &packages);
+    let generation_packages = if aggregate {
+        aggregate_package.into_iter().collect::<Vec<_>>()
+    } else {
+        packages.iter().collect::<Vec<_>>()
+    };
     let mut files = Vec::new();
-    for (index, package) in packages.iter().enumerate() {
+    for (index, package) in generation_packages.into_iter().enumerate() {
         let homebrew = if command.with_homebrew {
             Some(homebrew_options(cfg, &command.homebrew, package)?)
         } else {
@@ -1759,6 +1769,17 @@ fn run_crow(
             step_runners: &step_runners,
         })?);
     }
+    if !command.primary_only
+        && let Some(package) = aggregate_package.or_else(|| packages.first())
+    {
+        files.extend(crate::render::crow::manual_gate_files(
+            &crow,
+            resolved.runtime,
+            package,
+            &runners.ci,
+            &cfg.ci.manual_gates,
+        )?);
+    }
 
     if !command.primary_only
         && resolved.with_pypi_publish
@@ -1769,7 +1790,7 @@ fn run_crow(
             &crow,
             &runners.ci,
             &options,
-            &crate::python::maturin_pyproject_dir(workspace_root)?,
+            &python::maturin_pyproject_dir(workspace_root)?,
         )?);
     }
     cfg.validate_crow_prebuild_beside(CiProvider::Crow)?;
@@ -1779,7 +1800,7 @@ fn run_crow(
     let pages = if command.primary_only {
         None
     } else {
-        codeberg_pages_options(cfg, &command, inferred_pages.as_ref())?
+        codeberg_pages_options(cfg, command, inferred_pages.as_ref())?
     };
     if let Some(pages) = &pages {
         files.push(crate::render::crow::codeberg_pages_file(
@@ -1823,7 +1844,7 @@ fn run_crow(
     let check_message = format!(
         "Crow CI workflows are not up to date; run `{}`",
         render_regeneration_command(
-            &command,
+            command,
             CiBackend::Crow,
             &resolved,
             with_artifacts,
@@ -1833,14 +1854,14 @@ fn run_crow(
         )
     );
     if command.check {
-        reconcile_ci_files(workspace_root, files, &check_message, &command, None)?;
+        reconcile_ci_files(workspace_root, files, &check_message, command, None)?;
         Ok(())
     } else {
         reconcile_ci_files(
             workspace_root,
             files,
             "Crow CI workflows",
-            &command,
+            command,
             Some(&persisted_ci),
         )?;
         if command.primary_only || command.plan_json {
@@ -1856,7 +1877,7 @@ fn run_crow(
 }
 
 fn run_crow_python(
-    command: InitCiCommand,
+    command: &InitCiCommand,
     workspace_root: &Path,
     cfg: &ProjectConfig,
     platform: Platform,
@@ -1883,7 +1904,7 @@ fn run_crow_python(
         crow.format = format;
     }
     let resolved =
-        ResolvedCiInputs::resolve(workspace_root, cfg, &ci_cli_overrides(&command), None)?;
+        ResolvedCiInputs::resolve(workspace_root, cfg, &ci_cli_overrides(command), None)?;
     let runner = ResolvedRunner {
         name: None,
         labels: vec![
@@ -1926,7 +1947,7 @@ fn run_crow_python(
     let check_message = format!(
         "Crow Python CI workflows are not up to date; run `{}`",
         render_regeneration_command(
-            &command,
+            command,
             CiBackend::Crow,
             &resolved,
             false,
@@ -1936,13 +1957,13 @@ fn run_crow_python(
         )
     );
     if command.check {
-        reconcile_ci_files(workspace_root, files, &check_message, &command, None)?;
+        reconcile_ci_files(workspace_root, files, &check_message, command, None)?;
     } else {
         reconcile_ci_files(
             workspace_root,
             files,
             "Crow Python CI workflows",
-            &command,
+            command,
             Some(&persisted_ci),
         )?;
         if command.primary_only || command.plan_json {
@@ -2149,7 +2170,7 @@ pub(crate) fn project_regeneration_command(workspace_root: &Path) -> Result<Opti
             }
             let cfg = ProjectConfig::load(workspace_root).unwrap_or_default();
             let runner = if cfg.ci.nix_system_runners.is_empty() {
-                cfg.ci.runner.clone().or_else(|| {
+                cfg.ci.runner.or_else(|| {
                     snapshots.iter().find_map(|snapshot| {
                         snapshot.content.lines().find_map(|line| {
                             let runner = line.trim().strip_prefix("runs-on: ")?;
@@ -2574,8 +2595,8 @@ fn regeneration_base(command: &InitCiCommand, backend: CiBackend) -> String {
     }
     if let Some(format) = command.crow_format {
         args.push_str(match format {
-            crate::cli::CrowWorkflowFormat::Yaml => " --crow-format yaml",
-            crate::cli::CrowWorkflowFormat::Jsonnet => " --crow-format jsonnet",
+            CrowWorkflowFormat::Yaml => " --crow-format yaml",
+            CrowWorkflowFormat::Jsonnet => " --crow-format jsonnet",
         });
     }
     args
@@ -2628,7 +2649,7 @@ fn persisted_ci_matches_simit_toml(
     let mut persisted_ci = persisted_ci;
     persisted_ci.publish_crates = publish_crates;
     if cfg.ci.pages.is_some() {
-        persisted_ci.pages = cfg.ci.pages.clone();
+        persisted_ci.pages.clone_from(&cfg.ci.pages);
     }
     if cfg.ci.all_features.is_none() {
         persisted_ci.all_features = None;
@@ -2848,7 +2869,7 @@ fn obsolete_nix_workflows(
     workspace_root: &Path,
     platform: Platform,
     expected: &BTreeSet<PathBuf>,
-) -> Result<Vec<PathBuf>> {
+) -> Vec<PathBuf> {
     let workflow_dir = PathBuf::from(platform.workflow_dir());
     let mut obsolete = Vec::new();
     let mut crow_prebuilds = [
@@ -2864,7 +2885,9 @@ fn obsolete_nix_workflows(
             let name = entry.file_name();
             if name.to_str().is_some_and(|name| {
                 name.starts_with("prebuild-qualify-")
-                    && (name.ends_with(".yaml") || name.ends_with(".jsonnet"))
+                    && name
+                        .rsplit_once('.')
+                        .is_some_and(|(_, ext)| matches!(ext, "yaml" | "jsonnet"))
             }) {
                 crow_prebuilds.push(Path::new(".crow").join(name));
             }
@@ -2892,7 +2915,7 @@ fn obsolete_nix_workflows(
         }
     }
     obsolete.sort();
-    Ok(obsolete)
+    obsolete
 }
 
 pub(crate) fn is_ci_managed_workflow_name(name: &std::ffi::OsStr) -> bool {
@@ -2941,6 +2964,7 @@ pub(crate) fn is_ci_managed_workflow_name(name: &std::ffi::OsStr) -> bool {
             | "publish-jetbrains-plugin.yaml"
             | "publish-jetbrains-plugin.yml"
     ) || name.starts_with("build-")
+        || name.starts_with("manual-")
         || name.starts_with("ci-")
         || name.starts_with("nix-builds-")
         || name.starts_with("prebuild-")
@@ -3109,10 +3133,8 @@ fn infer_codeberg_pages_from_workflows(
     }))
 }
 
-fn codeberg_pages_config(pages: &Option<CodebergPagesOptions>) -> Result<CodebergPagesConfig> {
-    let pages = pages
-        .as_ref()
-        .context("--with-codeberg-pages did not resolve a Pages configuration")?;
+fn codeberg_pages_config(pages: Option<&CodebergPagesOptions>) -> Result<CodebergPagesConfig> {
+    let pages = pages.context("--with-codeberg-pages did not resolve a Pages configuration")?;
     Ok(CodebergPagesConfig {
         repo: pages.repo.clone(),
         canonical_domain: pages.canonical_domain.clone(),
@@ -3268,7 +3290,10 @@ fn normalize_tap_url(value: &str) -> Result<String> {
     if path.trim_matches('/').is_empty() {
         bail!("--homebrew-tap must include a repository path");
     }
-    if with_scheme.ends_with(".git") {
+    if with_scheme
+        .rsplit_once('.')
+        .is_some_and(|(_, ext)| ext == "git")
+    {
         Ok(with_scheme)
     } else {
         Ok(format!("{with_scheme}.git"))
@@ -3295,33 +3320,31 @@ pub(crate) fn apply_granular_step_runners(
 ) {
     if runtime == Runtime::Nix {
         step_runners
-            .entry(crate::render::ci::STEP_FLAKE_CHECK.to_string())
+            .entry(ci::STEP_FLAKE_CHECK.to_string())
             .or_insert_with(|| "atlas-nix-trusted".to_string());
     }
     step_runners
         .entry(
-            if runtime == Runtime::Nix
-                && !step_runners.contains_key(crate::render::ci::STEP_CARGO_FMT)
-            {
-                crate::render::ci::STEP_FORMAT.to_string()
+            if runtime == Runtime::Nix && !step_runners.contains_key(ci::STEP_CARGO_FMT) {
+                ci::STEP_FORMAT.to_string()
             } else {
-                crate::render::ci::STEP_CARGO_FMT.to_string()
+                ci::STEP_CARGO_FMT.to_string()
             },
         )
         .or_insert_with(|| "codeberg-tiny".to_string());
     step_runners
-        .entry(crate::render::ci::STEP_CARGO_CLIPPY.to_string())
+        .entry(ci::STEP_CARGO_CLIPPY.to_string())
         .or_insert_with(|| "codeberg-small".to_string());
     step_runners
-        .entry(crate::render::ci::STEP_CARGO_TEST.to_string())
+        .entry(ci::STEP_CARGO_TEST.to_string())
         .or_insert_with(|| "codeberg-medium".to_string());
     step_runners
-        .entry(crate::render::ci::STEP_CARGO_DOC.to_string())
+        .entry(ci::STEP_CARGO_DOC.to_string())
         .or_insert_with(|| "codeberg-small".to_string());
     step_runners
-        .entry(crate::render::ci::STEP_CARGO_PACKAGE.to_string())
+        .entry(ci::STEP_CARGO_PACKAGE.to_string())
         .or_insert_with(|| "codeberg-medium".to_string());
     step_runners
-        .entry(crate::render::ci::STEP_QUALITY_TOOLS.to_string())
+        .entry(ci::STEP_QUALITY_TOOLS.to_string())
         .or_insert_with(|| "codeberg-small".to_string());
 }

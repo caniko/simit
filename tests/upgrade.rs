@@ -1,3 +1,4 @@
+use std::fmt::Write as _;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -55,7 +56,7 @@ repository = "https://codeberg.org/caniko/{name}"
     .unwrap();
     fs::write(
         project.path().join("flake.nix"),
-        r#"{ outputs = { self }: { apps.x86_64-linux.deploy-pages = {}; }; }"#,
+        r"{ outputs = { self }: { apps.x86_64-linux.deploy-pages = {}; }; }",
     )
     .unwrap();
     fs::create_dir_all(project.path().join(".forgejo/workflows")).unwrap();
@@ -112,13 +113,13 @@ fn write_registry(data_home: &Path, projects: &[RegistryProject<'_>]) {
     let mut text = String::from("schema_version = 1\n");
     for (project_path, name, features) in projects {
         text.push_str("\n[[project]]\n");
-        text.push_str(&format!("path = \"{}\"\n", project_path.display()));
-        text.push_str(&format!("name = \"{name}\"\n"));
+        writeln!(text, "path = \"{}\"", project_path.display()).expect("write");
+        writeln!(text, "name = \"{name}\"").expect("write");
         text.push_str("first_seen = \"2026-05-20T00:00:00Z\"\n");
         text.push_str("last_seen = \"2026-05-21T00:00:00Z\"\n");
         text.push_str("[project.features]\n");
         for (feature, status) in *features {
-            text.push_str(&format!("{feature} = \"{status}\"\n"));
+            writeln!(text, "{feature} = \"{status}\"").expect("write");
         }
     }
     fs::write(path, text).unwrap();

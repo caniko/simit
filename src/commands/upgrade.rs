@@ -13,7 +13,7 @@ use crate::pages_infer::{
     infer_pages_canonical_domain, infer_pages_site_output, infer_pages_source_branch,
 };
 use crate::readme_badges;
-use crate::registry::{self, FeatureStatus, Registry};
+use crate::registry::{self, FeatureStatus};
 use crate::render::ci::{self, CodebergPagesOptions};
 use crate::render::diff::unified_diff;
 use crate::user_config::ResolvedRunner;
@@ -66,6 +66,10 @@ struct FileUpgrade {
     upgraded: String,
 }
 
+#[expect(
+    clippy::needless_pass_by_value,
+    reason = "Keep the public command entry point's owned argument API"
+)]
 pub fn run(command: UpgradeCommand) -> Result<()> {
     if command.plan_json {
         return plan_json();
@@ -92,13 +96,11 @@ pub fn run(command: UpgradeCommand) -> Result<()> {
     for target in targets {
         let outcome = upgrade_one(&target, mode, command.diff, fleet, command.pages_only);
         if !fleet {
-            match outcome.error {
-                Some(error) => bail!("{error}"),
-                None => {
-                    print_single_outcome(&outcome, mode);
-                    return check_exit(&[outcome], mode);
-                }
+            if let Some(error) = outcome.error {
+                bail!("{error}")
             }
+            print_single_outcome(&outcome, mode);
+            return check_exit(&[outcome], mode);
         }
         outcomes.push(outcome);
     }
@@ -281,6 +283,10 @@ fn upgrade_one(
     }
 }
 
+#[expect(
+    clippy::unnecessary_debug_formatting,
+    reason = "Escape control characters in the diagnostic path"
+)]
 fn plan_project_upgrade(workspace_root: &Path, pages_only: bool) -> Result<Vec<FileUpgrade>> {
     let mut upgrades = Vec::new();
 
@@ -301,7 +307,7 @@ fn plan_project_upgrade(workspace_root: &Path, pages_only: bool) -> Result<Vec<F
         Ok(_) => {}
         Err(err) if upgrades.is_empty() => return Err(err),
         Err(err) => {
-            eprintln!("simit: skipping README badge upgrade for {workspace_root:?}: {err:#}")
+            eprintln!("simit: skipping README badge upgrade for {workspace_root:?}: {err:#}");
         }
     }
 
@@ -552,6 +558,3 @@ fn check_exit(outcomes: &[ProjectOutcome], mode: Mode) -> Result<()> {
     }
     Ok(())
 }
-
-#[allow(dead_code)]
-fn _assert_registry_send_sync(_: &Registry, _: &Path) {}

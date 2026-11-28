@@ -208,7 +208,7 @@ mod tests {
     #[test]
     fn root_documentation_selects_no_component_while_readmes_and_nested_docs_still_do() {
         let plan = super::select(&graph(), &["VISION.md".into()], false).unwrap();
-        assert!(plan.selected.is_empty(), "{plan:?}");
+        assert_eq!(plan.selected.len(), 0, "{plan:?}");
         assert!(!plan.full);
 
         for path in ["README.md", "docs/VISION.md"] {

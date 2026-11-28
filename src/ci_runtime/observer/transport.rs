@@ -127,9 +127,10 @@ async fn interruptible<T>(
         let remaining = deadline
             .checked_duration_since(Instant::now())
             .ok_or("timeout")?;
-        match tokio::time::timeout(remaining.min(Duration::from_millis(100)), &mut future).await {
-            Ok(result) => return Ok(result),
-            Err(_) => continue,
+        if let Ok(result) =
+            tokio::time::timeout(remaining.min(Duration::from_millis(100)), &mut future).await
+        {
+            return Ok(result);
         }
     }
 }
@@ -230,8 +231,10 @@ impl GitHubTransport {
                 match interruptible(response.chunk(), deadline, cancellation).await {
                     Ok(Ok(None)) => break,
                     Ok(Ok(Some(chunk))) => {
-                        let admitted = (limit.saturating_sub(result.body.len() as u64) as usize)
-                            .min(chunk.len());
+                        let admitted =
+                            usize::try_from(limit.saturating_sub(result.body.len() as u64))
+                                .unwrap_or(usize::MAX)
+                                .min(chunk.len());
                         result.body.extend_from_slice(&chunk[..admitted]);
                         if admitted < chunk.len() {
                             result.transport_error = Some("byte-limit".into());
@@ -304,6 +307,7 @@ fn retry_delay(status: u16, headers: &reqwest::header::HeaderMap, now: u64) -> O
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fmt::Write as _;
 
     #[test]
     fn stalled_async_dns_is_owned_across_reused_client_runtimes_and_interruptible() {
@@ -478,38 +482,7 @@ mod tests {
 
     #[test]
     fn job_proxy_and_ca_environment_cannot_change_observer_transport_trust() {
-        use std::{
-            io::{Read, Write},
-            net::TcpListener,
-            process::Command,
-            thread,
-        };
-        const NAME: &str = "ci_runtime::observer::transport::tests::job_proxy_and_ca_environment_cannot_change_observer_transport_trust";
-        if let Ok(mode) = std::env::var("SIMIT_TRANSPORT_TEST_CHILD") {
-            let url = url::Url::parse(&std::env::var("SIMIT_TRANSPORT_TEST_URL").unwrap()).unwrap();
-            let response = GitHubTransport::new("inert-test-token".into())
-                .unwrap()
-                .get_from_url(
-                    "repos/owner/repo/actions/runs/1/logs",
-                    url,
-                    1024,
-                    Duration::from_secs(3),
-                    &Cancellation::default(),
-                )
-                .unwrap();
-            if mode == "proxy" {
-                assert_eq!(
-                    response.status, 200,
-                    "transport={:?}, body={:?}",
-                    response.transport_error, response.body
-                );
-                assert_eq!(response.body, b"origin");
-            } else {
-                assert_ne!(response.status, 200, "job-selected CA was trusted");
-            }
-            return;
-        }
-        fn accept(listener: TcpListener) -> Option<std::net::TcpStream> {
+        fn accept(listener: &TcpListener) -> Option<std::net::TcpStream> {
             listener.set_nonblocking(true).unwrap();
             let deadline = Instant::now() + Duration::from_secs(5);
             loop {
@@ -525,7 +498,7 @@ mod tests {
                         if error.kind() == std::io::ErrorKind::WouldBlock
                             && Instant::now() < deadline =>
                     {
-                        thread::sleep(Duration::from_millis(10))
+                        thread::sleep(Duration::from_millis(10));
                     }
                     _ => return None,
                 }
@@ -563,12 +536,43 @@ mod tests {
             }
             command
         }
+        use std::{
+            io::{Read, Write},
+            net::TcpListener,
+            process::Command,
+            thread,
+        };
+        const NAME: &str = "ci_runtime::observer::transport::tests::job_proxy_and_ca_environment_cannot_change_observer_transport_trust";
+        if let Ok(mode) = std::env::var("SIMIT_TRANSPORT_TEST_CHILD") {
+            let url = url::Url::parse(&std::env::var("SIMIT_TRANSPORT_TEST_URL").unwrap()).unwrap();
+            let response = GitHubTransport::new("inert-test-token".into())
+                .unwrap()
+                .get_from_url(
+                    "repos/owner/repo/actions/runs/1/logs",
+                    url,
+                    1024,
+                    Duration::from_secs(3),
+                    &Cancellation::default(),
+                )
+                .unwrap();
+            if mode == "proxy" {
+                assert_eq!(
+                    response.status, 200,
+                    "transport={:?}, body={:?}",
+                    response.transport_error, response.body
+                );
+                assert_eq!(response.body, b"origin");
+            } else {
+                assert_ne!(response.status, 200, "job-selected CA was trusted");
+            }
+            return;
+        }
         let origin = TcpListener::bind("127.0.0.1:0").unwrap();
         let proxy = TcpListener::bind("127.0.0.1:0").unwrap();
         let url = format!("http://{}/logs", origin.local_addr().unwrap());
         let proxy_url = format!("http://{}", proxy.local_addr().unwrap());
         let origin = thread::spawn(move || {
-            if let Some(mut stream) = accept(origin) {
+            if let Some(mut stream) = accept(&origin) {
                 read_request(&mut stream);
                 let _ = stream.write_all(
                     b"HTTP/1.1 200 OK\r\nContent-Length: 6\r\nConnection: close\r\n\r\norigin",
@@ -576,7 +580,7 @@ mod tests {
             }
         });
         let proxy = thread::spawn(move || {
-            if let Some(mut stream) = accept(proxy) {
+            if let Some(mut stream) = accept(&proxy) {
                 read_request(&mut stream);
                 let _ = stream.write_all(
                     b"HTTP/1.1 200 OK\r\nContent-Length: 5\r\nConnection: close\r\n\r\nproxy",
@@ -659,7 +663,7 @@ mod tests {
                 listener.local_addr().unwrap().port()
             );
             let server = thread::spawn(move || {
-                if let Some(stream) = accept(listener)
+                if let Some(stream) = accept(&listener)
                     && let Ok(mut stream) = acceptor.accept(stream)
                 {
                     read_request(&mut stream);
@@ -718,20 +722,22 @@ mod tests {
                     body.len()
                 );
                 if let Some(remaining) = remaining {
-                    headers.push_str(&format!("x-ratelimit-remaining: {remaining}\r\n"));
+                    write!(headers, "x-ratelimit-remaining: {remaining}\r\n").expect("write");
                 }
                 if reset {
-                    headers.push_str(&format!(
+                    write!(
+                        headers,
                         "x-ratelimit-reset: {}\r\n",
                         SystemTime::now()
                             .duration_since(SystemTime::UNIX_EPOCH)
                             .unwrap()
                             .as_secs()
                             + 120
-                    ));
+                    )
+                    .expect("write");
                 }
                 if let Some(wait) = retry_after {
-                    headers.push_str(&format!("Retry-After: {wait}\r\n"));
+                    write!(headers, "Retry-After: {wait}\r\n").expect("write");
                 }
                 stream
                     .write_all(format!("{headers}\r\n{body}").as_bytes())
@@ -785,7 +791,7 @@ mod tests {
                         if error.kind() == std::io::ErrorKind::WouldBlock
                             && start.elapsed() < Duration::from_secs(3) =>
                     {
-                        thread::sleep(Duration::from_millis(10))
+                        thread::sleep(Duration::from_millis(10));
                     }
                     Err(error) => panic!("test server accept: {error}"),
                 }

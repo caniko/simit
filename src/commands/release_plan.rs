@@ -36,6 +36,10 @@ struct JsonPlanEntry {
     depends_on: Vec<String>,
 }
 
+#[expect(
+    clippy::needless_pass_by_value,
+    reason = "Keep the public command entry point's owned argument API"
+)]
 pub fn run(command: ReleaseCommand) -> Result<()> {
     reject_non_plan_flags(&command)?;
     if let Some(selection) = crate::monorepo::releases::select(&command)? {
@@ -283,14 +287,13 @@ pub fn build_release_plan(metadata: &Metadata, requested: &[String]) -> Result<R
             .collect::<Vec<_>>();
         local_dependencies.sort();
         local_dependencies.dedup();
-        depends_on.insert(name.clone(), local_dependencies.clone());
-
-        for dependency_name in local_dependencies {
+        for dependency_name in &local_dependencies {
             let edges = adjacency.entry(dependency_name.clone()).or_default();
             if edges.insert(name.clone()) {
                 *incoming.entry(name.clone()).or_insert(0) += 1;
             }
         }
+        depends_on.insert(name.clone(), local_dependencies);
     }
 
     let mut ready = incoming
@@ -697,7 +700,7 @@ mod tests {
             .iter()
             .find(|entry| entry.package.name == "app")
             .unwrap();
-        assert!(app.depends_on.is_empty());
+        assert_eq!(app.depends_on.len(), 0);
     }
 
     #[test]
@@ -726,7 +729,7 @@ mod tests {
         let plan = build_release_plan(&metadata, &[]).unwrap();
 
         assert_eq!(plan.entries.len(), 1);
-        assert!(plan.entries[0].depends_on.is_empty());
+        assert_eq!(plan.entries[0].depends_on.len(), 0);
     }
 
     #[test]

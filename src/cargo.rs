@@ -57,6 +57,18 @@ pub struct Target {
 }
 
 impl Package {
+    pub fn has_any_feature(&self) -> bool {
+        self.features
+            .iter()
+            .any(|(name, features)| name != "default" || !features.is_empty())
+    }
+
+    pub fn has_non_empty_default_feature(&self) -> bool {
+        self.features
+            .get("default")
+            .is_some_and(|features| !features.is_empty())
+    }
+
     pub fn has_doctests(&self) -> bool {
         self.targets.iter().any(|target| target.doctest)
     }
@@ -99,6 +111,11 @@ impl Package {
             .as_ref()
             .is_none_or(|registries| !registries.is_empty())
     }
+}
+
+pub(crate) fn rust_version_key(version: &str) -> [u64; 3] {
+    let mut parts = version.split('.');
+    std::array::from_fn(|_| parts.next().and_then(|part| part.parse().ok()).unwrap_or(0))
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -535,7 +552,7 @@ mod workspace_version_tests {
     fn bumps_workspace_package_and_member_dep_reqs() {
         let dir = tempfile::tempdir().unwrap();
         let cargo_toml = dir.path().join("Cargo.toml");
-        std::fs::write(
+        fs::write(
             &cargo_toml,
             "[workspace]\nmembers = [\"crates/a\", \"crates/b\"]\n\n\
              [workspace.package]\nversion = \"0.2.0\"\nedition = \"2024\"\n\n\
@@ -549,7 +566,7 @@ mod workspace_version_tests {
 
         let changed = update_workspace_version(dir.path(), &version, &members).unwrap();
         assert!(changed);
-        let out = std::fs::read_to_string(&cargo_toml).unwrap();
+        let out = fs::read_to_string(&cargo_toml).unwrap();
         assert!(out.contains("version = \"0.2.1\"")); // [workspace.package]
         assert!(out.contains("path = \"crates/a\"")); // member dep preserved
         assert!(!out.contains("0.2.0")); // member dep req bumped too
@@ -562,7 +579,7 @@ mod workspace_version_tests {
     #[test]
     fn noop_when_no_workspace_package_version() {
         let dir = tempfile::tempdir().unwrap();
-        std::fs::write(
+        fs::write(
             dir.path().join("Cargo.toml"),
             "[package]\nname = \"x\"\nversion = \"0.1.0\"\n",
         )

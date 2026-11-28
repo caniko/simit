@@ -1,3 +1,4 @@
+use std::fmt::Write as _;
 use std::{fs, path::Path};
 
 use tempfile::TempDir;
@@ -338,10 +339,10 @@ fn crow_nextest_replaces_tests_and_retains_doctests_and_feature_modes() {
     fs::write(temp.path().join("simit.toml"), "[ci]\nplatform = \"forgejo\"\nprovider = \"crow\"\nruntime = \"cargo\"\nrunner = \"atlas\"\nwith_nextest = true\n").unwrap();
     generate(temp.path(), false);
     let workflow = fs::read_to_string(temp.path().join(".crow/build.yaml")).unwrap();
-    assert!(workflow.contains("cargo-nextest nextest run --all-features"));
-    assert!(workflow.contains("cargo-nextest nextest run --no-default-features"));
-    assert!(workflow.contains("cargo test --doc --all-features"));
-    assert!(workflow.contains("cargo test --doc --no-default-features"));
+    assert!(workflow.contains("cargo-nextest nextest run --locked --all-features"));
+    assert!(workflow.contains("cargo-nextest nextest run --locked --no-default-features"));
+    assert!(workflow.contains("cargo test --locked --doc --all-features"));
+    assert!(workflow.contains("cargo test --locked --doc --no-default-features"));
     assert!(
         !workflow
             .lines()
@@ -838,15 +839,17 @@ fn aggregate_unit_test_selection_uses_all_selected_members() {
         generate(temp.path(), false);
         generate(temp.path(), true);
         let workflow = fs::read_to_string(temp.path().join(".github/workflows/ci.yaml")).unwrap();
-        let target = if second_has_library {
-            "--lib"
+        let commands = if second_has_library {
+            vec![
+                "cargo-nextest nextest run -p first --bins",
+                "cargo-nextest nextest run -p second --lib",
+            ]
         } else {
-            "--bins"
+            vec!["cargo-nextest nextest run --workspace --bins"]
         };
-        assert!(
-            workflow.contains(&format!("cargo-nextest nextest run --workspace {target}")),
-            "{workflow}"
-        );
+        for command in commands {
+            assert!(workflow.contains(command), "{workflow}");
+        }
     }
 }
 
@@ -896,10 +899,12 @@ fn github_ci_gates_every_job_on_a_cheap_root_docs_classification() {
         let needs = job["needs"].as_sequence().unwrap();
         let mut condition = "${{ !cancelled() && needs.changes.outputs.code != 'false'".to_owned();
         for need in &needs[1..] {
-            condition.push_str(&format!(
+            write!(
+                condition,
                 " && needs.{}.result == 'success'",
                 need.as_str().unwrap()
-            ));
+            )
+            .expect("write");
         }
         condition.push_str(" }}");
         assert_eq!(job["if"], condition, "{id:?}");

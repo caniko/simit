@@ -195,10 +195,10 @@ mod tests {
         let (version, label, divergent) = divergent_versions(&solo).unwrap();
         assert_eq!(version.to_string(), "1.0.0");
         assert_eq!(label, "a -> 1.0.0");
-        assert!(divergent.is_empty());
+        assert_eq!(divergent.len(), 0);
 
         let same = vec![package("a", "1.0.0"), package("b", "1.0.0")];
-        assert!(divergent_versions(&same).unwrap().2.is_empty());
+        assert_eq!(divergent_versions(&same).unwrap().2.len(), 0);
 
         let mixed = vec![package("a", "1.0.0"), package("b", "2.0.0")];
         assert_eq!(

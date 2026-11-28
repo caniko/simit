@@ -22,7 +22,7 @@ pub(super) struct JsonApi {
 impl JsonApi {
     pub(super) fn new(
         base: &str,
-        token: String,
+        token: &str,
         label: &'static str,
         accept: &'static str,
         github: bool,
@@ -110,8 +110,7 @@ impl JsonApi {
                     .as_deref()
                     .and_then(|value| value.parse::<i64>().ok())
                     .and_then(|seconds| chrono::DateTime::from_timestamp(seconds, 0))
-                    .map(|at| at.to_rfc3339())
-                    .unwrap_or_else(|| "unknown".into());
+                    .map_or_else(|| "unknown".into(), |at| at.to_rfc3339());
                 bail!(
                     "{} API rate limit exhausted (HTTP {status}, resets {reset}); retry later or narrow the window{}",
                     self.label,

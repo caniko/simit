@@ -9,6 +9,7 @@ mod github;
 mod http;
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::fmt::Write as _;
 
 use anyhow::{Context, Result, bail, ensure};
 use chrono::{DateTime, Duration, NaiveDate, Utc};
@@ -19,6 +20,10 @@ pub use cli::UsageArgs;
 const SCHEMA_VERSION: u32 = 1;
 
 /// Run one usage report for the already parsed command line.
+#[expect(
+    clippy::needless_pass_by_value,
+    reason = "Keep the public API's owned argument type"
+)]
 pub fn run(args: UsageArgs) -> Result<()> {
     let window = Window::parse(&args.since, args.until.as_deref(), Utc::now())?;
     let specs = parse_repos(&args.repos)?;
@@ -35,6 +40,7 @@ pub fn run(args: UsageArgs) -> Result<()> {
         window,
         specs.iter().map(RepoSpec::display).collect(),
         args.top,
+        args.budget_minutes,
     );
     if args.json {
         println!("{}", serde_json::to_string_pretty(&report)?);
@@ -245,7 +251,13 @@ impl Builder {
         }
     }
 
-    fn finish(self, window: Window, repos: Vec<String>, top: usize) -> Report {
+    fn finish(
+        self,
+        window: Window,
+        repos: Vec<String>,
+        top: usize,
+        budget_minutes: Option<u64>,
+    ) -> Report {
         let grand_total: f64 = self.rows.values().map(|row| row.total_seconds).sum::<f64>();
         let mut pathways: Vec<Pathway> = self
             .rows
@@ -355,6 +367,7 @@ impl Builder {
         Report {
             schema_version: SCHEMA_VERSION,
             generated_at: Utc::now(),
+            budget: budget_minutes.map(|minutes| Budget::new(minutes, grand_total, &window)),
             window,
             top_limit: top,
             repos,
@@ -437,6 +450,34 @@ pub struct Report {
     pub repo_rollup: Vec<RepoRollup>,
     pub workflow_rollup: Vec<WorkflowRollup>,
     pub warnings: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub budget: Option<Budget>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct Budget {
+    pub budget_minutes: u64,
+    pub used_minutes: f64,
+    pub used_percent: f64,
+    pub projected_30d_minutes: f64,
+    pub over_budget: bool,
+    pub projected_over_budget: bool,
+}
+
+impl Budget {
+    fn new(budget_minutes: u64, total_seconds: f64, window: &Window) -> Self {
+        let used_minutes = total_seconds / 60.0;
+        let projected = used_minutes * Duration::days(30).as_seconds_f64()
+            / (window.until - window.since).as_seconds_f64();
+        Self {
+            budget_minutes,
+            used_minutes: round(used_minutes),
+            used_percent: round(100.0 * used_minutes / budget_minutes as f64),
+            projected_30d_minutes: round(projected),
+            over_budget: used_minutes > budget_minutes as f64,
+            projected_over_budget: projected > budget_minutes as f64,
+        }
+    }
 }
 
 #[derive(Debug, Serialize)]
@@ -496,6 +537,25 @@ fn print_human(report: &Report) {
         report.total_runs,
         report.total_seconds / 3600.0
     );
+    if let Some(budget) = &report.budget {
+        println!(
+            "budget   {:.1}/{} min used ({:.1}%{}); 30d projection {:.1} min{}",
+            budget.used_minutes,
+            budget.budget_minutes,
+            budget.used_percent,
+            if budget.over_budget {
+                ", over budget"
+            } else {
+                ""
+            },
+            budget.projected_30d_minutes,
+            if budget.projected_over_budget {
+                " (over budget)"
+            } else {
+                ""
+            },
+        );
+    }
     if report.pathway_count == 0 {
         println!("\nNo timed job/step records in this window.");
     } else {
@@ -623,9 +683,9 @@ fn print_table(headers: &[&str], rows: Vec<Vec<String>>, right_from: usize) {
                 line.push_str("  ");
             }
             if index < right_from {
-                line.push_str(&format!("{cell:<width$}", width = widths[index]));
+                write!(line, "{cell:<width$}", width = widths[index]).expect("write");
             } else {
-                line.push_str(&format!("{cell:>width$}", width = widths[index]));
+                write!(line, "{cell:>width$}", width = widths[index]).expect("write");
             }
         }
         line.trim_end().to_owned()
@@ -693,6 +753,10 @@ mod tests {
     }
 
     #[test]
+    #[allow(
+        clippy::float_cmp,
+        reason = "The selected fixture durations are exactly representable"
+    )]
     fn percentile_uses_nearest_rank() {
         let mut durations = vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0];
         assert_eq!(percentile(&mut durations, 95), 10.0);
@@ -702,6 +766,10 @@ mod tests {
     }
 
     #[test]
+    #[allow(
+        clippy::float_cmp,
+        reason = "The compared fixture totals and averages are exactly representable"
+    )]
     fn report_sorts_by_total_time_and_computes_rollups() {
         let mut builder = Builder::default();
         builder.extend(vec![
@@ -718,6 +786,7 @@ mod tests {
             Window::parse("30d", None, now()).unwrap(),
             vec!["github:caniko/simit".into()],
             2,
+            None,
         );
         assert_eq!(report.pathway_count, 3);
         assert_eq!(report.pathways.len(), 2);
@@ -730,12 +799,22 @@ mod tests {
         assert!((report.pathways[0].share - 400.0 / 650.0).abs() < 0.001);
         assert_eq!(report.total_seconds, 650.0);
         assert_eq!(report.total_runs, 4);
+        assert!(
+            serde_json::to_value(&report)
+                .unwrap()
+                .get("budget")
+                .is_none()
+        );
         assert_eq!(report.repo_rollup.len(), 1);
         assert_eq!(report.workflow_rollup[0].workflow, "CI");
         assert_eq!(report.workflow_rollup[0].total_seconds, 600.0);
     }
 
     #[test]
+    #[allow(
+        clippy::float_cmp,
+        reason = "A quota denial must contribute exactly zero time"
+    )]
     fn quota_rows_do_not_count_as_timed_runs() {
         let mut builder = Builder::default();
         builder.extend(vec![Sample {
@@ -754,11 +833,44 @@ mod tests {
             Window::parse("30d", None, now()).unwrap(),
             vec!["crow:caniko/bekiper".into()],
             20,
+            Some(2500),
         );
         assert_eq!(report.total_runs, 0);
         assert_eq!(report.pathways[0].runs, 0);
         assert_eq!(report.pathways[0].quota_denials, 1);
         assert_eq!(report.pathways[0].share, 0.0);
+        assert_eq!(report.budget.unwrap().used_minutes, 0.0);
+    }
+
+    #[test]
+    fn budget_counts_all_paths_and_projects_over_exact_window() {
+        let mut builder = Builder::default();
+        builder.extend(vec![sample(60.0, "CI", "test"), sample(90.0, "CI", "lint")]);
+        let until = now();
+        let window = Window {
+            since: until - Duration::minutes(90),
+            until,
+        };
+        let report = builder.finish(window, vec![], 1, Some(2500));
+        let json = serde_json::to_value(report).unwrap();
+        assert_eq!(
+            json["budget"],
+            serde_json::json!({
+                "budget_minutes": 2500,
+                "used_minutes": 2.5,
+                "used_percent": 0.1,
+                "projected_30d_minutes": 1200.0,
+                "over_budget": false,
+                "projected_over_budget": false,
+            })
+        );
+        let window = Window {
+            since: until - Duration::minutes(30),
+            until,
+        };
+        let budget = Budget::new(2500, 150.0, &window);
+        assert!(!budget.over_budget);
+        assert!(budget.projected_over_budget);
     }
 
     #[test]

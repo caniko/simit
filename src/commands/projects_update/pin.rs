@@ -214,9 +214,9 @@ fn verify_generator_move(before: &Value, after: &Value, input: &str) -> Result<(
         let timestamp = |node: &Value| node["locked"]["lastModified"].as_u64();
         // The consumer checkout has no generator Git history to prove ancestry.
         // A consumer pinned ahead of the fleet generator is skipped, not failed.
-        if !timestamp(previous)
+        if timestamp(previous)
             .zip(timestamp(next))
-            .is_some_and(|(old, new)| new >= old)
+            .is_none_or(|(old, new)| new < old)
         {
             return Err(skip("generator-pin-ahead"));
         }
@@ -456,14 +456,14 @@ fn root_inputs(source: &str) -> Result<BTreeMap<String, Input>, &'static str> {
         return Err(UNKNOWN);
     };
     let mut inputs = BTreeMap::new();
-    read_inputs(root, &[], source, &mut inputs)?;
+    read_inputs(&root, &[], source, &mut inputs)?;
     Ok(inputs)
 }
 
 // Descend only through literal containers on `inputs.<name>.{url,flake}`.
 // Never search expressions (notably `outputs`) or nested input overrides.
 fn read_inputs(
-    set: ast::AttrSet,
+    set: &ast::AttrSet,
     prefix: &[String],
     source: &str,
     inputs: &mut BTreeMap<String, Input>,
@@ -502,7 +502,7 @@ fn read_inputs(
             let Some(Expr::AttrSet(child)) = binding.value() else {
                 return Err(UNKNOWN);
             };
-            read_inputs(child, &path, source, inputs)?;
+            read_inputs(&child, &path, source, inputs)?;
         } else {
             let input = inputs.entry(path[1].clone()).or_default();
             match (path[2].as_str(), binding.value()) {
@@ -547,7 +547,7 @@ fn rewrite(source: &str, input: &str, target: &str) -> Result<String, &'static s
     let rewritten = pin_url(url, target)?;
     Ok(format!(
         "{}{}{}",
-        &source[..usize::from(range.start()) + 1],
+        &source[..=usize::from(range.start())],
         rewritten,
         &source[usize::from(range.end()) - 1..]
     ))
@@ -629,7 +629,7 @@ mod tests {
         json!({"type":"github", "owner":"caniko", "repo":"simit"})
     }
 
-    fn write_lock(root: &Path, name: &str, node: Value) {
+    fn write_lock(root: &Path, name: &str, node: &Value) {
         fs::write(
             root.join("flake.lock"),
             json!({"root":"actual_root", "nodes": {
@@ -655,7 +655,7 @@ mod tests {
         assert!(rewrites(&unsupported, "tool").is_err());
         let root = tempfile::tempdir().unwrap();
         let lock = json!({"original":github_original(),"locked":{"rev":TARGET}});
-        write_lock(root.path(), "tool", lock.clone());
+        write_lock(root.path(), "tool", &lock);
         fs::write(root.path().join("flake.nix"), &unsupported).unwrap();
         assert!(generator_input(root.path(), &generator()).is_err());
         let quoted = r#"{
@@ -663,7 +663,7 @@ mod tests {
             outputs = { self, simit }: let simit = { url = "github:caniko/simit"; };
                 inputs.simit.flake = false; in {};
         }"#;
-        write_lock(root.path(), "simit", lock);
+        write_lock(root.path(), "simit", &lock);
         for source in [quoted.to_owned(), quoted.replace("\"simit\"", "simit")] {
             fs::write(root.path().join("flake.nix"), source).unwrap();
             assert_eq!(
@@ -720,18 +720,18 @@ mod tests {
         write_lock(
             root.path(),
             "simit",
-            json!({"original":{"type":"github","owner":"other","repo":"simit"}}),
+            &json!({"original":{"type":"github","owner":"other","repo":"simit"}}),
         );
         assert!(generator_input(root.path(), &generator()).is_err());
-        write_lock(root.path(), "other", json!({"original":github_original()}));
+        write_lock(root.path(), "other", &json!({"original":github_original()}));
         assert!(generator_input(root.path(), &generator()).is_err());
         write_lock(
             root.path(),
             "simit",
-            json!({"original":github_original(), "flake":false}),
+            &json!({"original":github_original(), "flake":false}),
         );
         assert_eq!(generator_input(root.path(), &generator()).unwrap(), None);
-        write_lock(root.path(), "simit", json!({"original":github_original()}));
+        write_lock(root.path(), "simit", &json!({"original":github_original()}));
         let outside = tempfile::tempdir().unwrap();
         let target = outside.path().join("lock");
         fs::rename(&lock, &target).unwrap();
@@ -748,7 +748,7 @@ mod tests {
     fn ignores_generator_subflakes() {
         let root = tempfile::tempdir().unwrap();
         let flake = root.path().join("flake.nix");
-        write_lock(root.path(), "simit", json!({"original":github_original()}));
+        write_lock(root.path(), "simit", &json!({"original":github_original()}));
         for url in [
             "github:caniko/simit?dir=child",
             "git+https://github.com/caniko/simit?ref=main&dir=child",
@@ -759,7 +759,7 @@ mod tests {
         fs::write(&flake, r#"{ inputs.simit.url = "github:caniko/simit"; }"#).unwrap();
         let mut original = github_original();
         original["dir"] = json!("child");
-        write_lock(root.path(), "simit", json!({"original":original}));
+        write_lock(root.path(), "simit", &json!({"original":original}));
         assert_eq!(generator_input(root.path(), &generator()).unwrap(), None);
     }
 
@@ -772,7 +772,11 @@ mod tests {
         )
         .unwrap();
         assert_eq!(generator_input(root.path(), &generator()).unwrap(), None);
-        write_lock(root.path(), "simit", json!({"original": github_original()}));
+        write_lock(
+            root.path(),
+            "simit",
+            &json!({"original": github_original()}),
+        );
         let error = generator_input(root.path(), &generator()).unwrap_err();
         assert!(error.downcast_ref::<PinSkip>().is_some(), "{error:#}");
     }
@@ -812,7 +816,7 @@ mod tests {
         write_lock(
             root.path(),
             "tool",
-            json!({"original":{"type":"git","url":"https://github.com/Caniko/Simit.git"}}),
+            &json!({"original":{"type":"git","url":"https://github.com/Caniko/Simit.git"}}),
         );
         let input = generator_input(root.path(), &generator).unwrap().unwrap();
         assert_eq!(input, "tool");
@@ -855,7 +859,7 @@ mod tests {
         write_lock(
             root.path(),
             "x",
-            json!({"original":{"type":"github","owner":"o","repo":"r"}}),
+            &json!({"original":{"type":"github","owner":"o","repo":"r"}}),
         );
         assert_eq!(generator_input(root.path(), &generator).unwrap(), None);
     }

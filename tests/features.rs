@@ -126,7 +126,7 @@ fn dry_run_does_not_mutate_version_commit_or_tag() {
         before_manifest
     );
     assert_eq!(output(root, "git", &["rev-parse", "HEAD"]), before_head);
-    assert!(output(root, "git", &["tag", "--list"]).trim().is_empty());
+    assert_eq!(output(root, "git", &["tag", "--list"]).trim(), "");
 }
 
 #[test]
@@ -805,11 +805,11 @@ fn completions_and_man_are_non_empty() {
         .output()
         .unwrap();
     assert!(completions.status.success());
-    assert!(!completions.stdout.is_empty());
+    assert_ne!(completions.stdout.as_slice(), b"");
 
     let man = simit().current_dir(root).args(["man"]).output().unwrap();
     assert!(man.status.success());
-    assert!(!man.stdout.is_empty());
+    assert_ne!(man.stdout.as_slice(), b"");
 }
 
 #[test]

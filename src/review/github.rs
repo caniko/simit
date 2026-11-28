@@ -1,6 +1,9 @@
 use super::{
     canonical_digest,
-    contract::*,
+    contract::{
+        Identity, Mode, Plan, PullRequest, Request, VERSION, WORKFLOW, name, preconditions,
+        reference, repository, sha,
+    },
     process::{args, run},
     read_json,
 };
@@ -105,7 +108,7 @@ pub fn plan(
         &request.repository,
         request.revision.as_deref().unwrap_or("HEAD"),
     )?;
-    request.repository = canonical.repository.clone();
+    request.repository.clone_from(&canonical.repository);
     let (target, pr) = if let Some(number) = request.pr {
         let deadline = Instant::now() + Duration::from_secs(30);
         let endpoint = format!("repos/{}/pulls/{number}", request.repository);
@@ -156,7 +159,7 @@ pub fn plan(
     };
     if let Some(expected) = &request.expected_head {
         ensure!(
-            pr.as_ref().map(|p| &p.head).unwrap_or(&target.commit) == expected,
+            pr.as_ref().map_or(&target.commit, |p| &p.head) == expected,
             "head precondition failed"
         );
     }

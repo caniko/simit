@@ -100,7 +100,7 @@ impl Facts {
         })
     }
 
-    fn error(&mut self, subject: &str, code: &str, message: String) {
+    fn error(&mut self, subject: &str, code: &str, message: &str) {
         self.errors
             .push(json!({"subject": subject, "code": code, "message": message}));
     }
@@ -129,7 +129,7 @@ impl Facts {
     }
 
     /// A usage whose files simit generates.
-    fn generated(&mut self, coordinate: &str, kind: &'static str, state: &str, paths: Vec<String>) {
+    fn generated(&mut self, coordinate: &str, kind: &'static str, state: &str, paths: &[String]) {
         let node = self.usage(
             coordinate,
             kind,
@@ -180,12 +180,12 @@ impl Facts {
             ));
         }
         for revision in refs.revisions {
-            self.pin(&id, revision);
+            self.pin(&id, &revision);
         }
         id
     }
 
-    fn pin(&mut self, usage: &str, revision: String) {
+    fn pin(&mut self, usage: &str, revision: &str) {
         let rev = format!("rev:{SIMIT}@{revision}");
         self.node(
             rev.clone(),
@@ -199,13 +199,13 @@ impl Facts {
         let subject = path.display().to_string();
         let root = match fs::canonicalize(path) {
             Ok(root) if root.is_dir() => root,
-            Ok(_) => return self.error(&subject, "path-unreadable", "not a directory".into()),
-            Err(error) => return self.error(&subject, "path-unreadable", error.to_string()),
+            Ok(_) => return self.error(&subject, "path-unreadable", "not a directory"),
+            Err(error) => return self.error(&subject, "path-unreadable", &error.to_string()),
         };
         let coordinate = match registry::origin_coordinate(&root) {
             Ok(coordinate) => coordinate,
             Err(error) => {
-                return self.error(&subject, "coordinate-unresolved", format!("{error:#}"));
+                return self.error(&subject, "coordinate-unresolved", &format!("{error:#}"));
             }
         };
         let repo = format!("repo:{coordinate}");
@@ -213,7 +213,7 @@ impl Facts {
             return self.error(
                 &subject,
                 "duplicate-coordinate",
-                format!("{repo} was already observed"),
+                &format!("{repo} was already observed"),
             );
         }
         let host = coordinate.split('/').next().unwrap_or_default().to_owned();
@@ -243,7 +243,7 @@ impl Facts {
                 attrs.insert("ciTarget", json!(target));
             }
             Ok(None) => {}
-            Err(error) => self.error(&repo, "ci-target-unresolved", format!("{error:#}")),
+            Err(error) => self.error(&repo, "ci-target-unresolved", &format!("{error:#}")),
         }
 
         // Config sources. A flake source is never evaluated without --eval-flake.
@@ -257,7 +257,7 @@ impl Facts {
             })),
             Err(error) => {
                 explained = true;
-                self.error(&repo, "config-error", format!("{error:#}"));
+                self.error(&repo, "config-error", &format!("{error:#}"));
                 if root.join("simit.toml").is_file() {
                     sources.push("config.simit-toml");
                 }
@@ -266,7 +266,7 @@ impl Facts {
         let flake = root.join("flake.nix");
         let declares = if flake.is_file() {
             flake_declares_simit_config(&flake).unwrap_or_else(|error| {
-                self.error(&repo, "config-error", format!("{error:#}"));
+                self.error(&repo, "config-error", &format!("{error:#}"));
                 false
             })
         } else {
@@ -301,7 +301,7 @@ impl Facts {
             }
             Err(error) if !explained => {
                 explained = true;
-                self.error(&repo, "config-error", format!("{error:#}"));
+                self.error(&repo, "config-error", &format!("{error:#}"));
             }
             _ => {}
         }
@@ -326,7 +326,7 @@ impl Facts {
         let workflows = match registry::collect_workflow_files(&root) {
             Ok(workflows) => workflows,
             Err(error) => {
-                self.error(&repo, "workflows-unreadable", format!("{error:#}"));
+                self.error(&repo, "workflows-unreadable", &format!("{error:#}"));
                 Vec::new()
             }
         };
@@ -372,7 +372,12 @@ impl Facts {
                     entry.0.insert(file.relative_path.display().to_string());
                 }
                 for (kind, (paths, ..)) in kinds {
-                    self.generated(coordinate, kind, "hand-rolled", paths.into_iter().collect());
+                    self.generated(
+                        coordinate,
+                        kind,
+                        "hand-rolled",
+                        &paths.into_iter().collect::<Vec<_>>(),
+                    );
                 }
                 return;
             }
@@ -387,7 +392,7 @@ impl Facts {
             ),
             Err(error) => {
                 if !explained {
-                    self.error(&repo, "ci-audit-failed", format!("{error:#}"));
+                    self.error(&repo, "ci-audit-failed", &format!("{error:#}"));
                 }
                 ("unknown", Vec::new())
             }
@@ -456,14 +461,24 @@ impl Facts {
             } else {
                 "current"
             };
-            self.generated(coordinate, kind, state, paths.into_iter().collect());
+            self.generated(
+                coordinate,
+                kind,
+                state,
+                &paths.into_iter().collect::<Vec<_>>(),
+            );
         }
         for (kind, paths) in hand {
             if !self
                 .nodes
                 .contains_key(&format!("usage:{coordinate}#{kind}"))
             {
-                self.generated(coordinate, kind, "hand-rolled", paths.into_iter().collect());
+                self.generated(
+                    coordinate,
+                    kind,
+                    "hand-rolled",
+                    &paths.into_iter().collect::<Vec<_>>(),
+                );
             }
         }
     }
@@ -482,20 +497,20 @@ impl Facts {
         let repo = format!("repo:{coordinate}");
         let rust = root.join("Cargo.toml").is_file();
         let check = |facts: &mut Self, kind: &'static str, args: &[&str], paths: Vec<String>| {
-            let state = if !rust {
-                "unknown"
-            } else {
+            let state = if rust {
                 match check_generated(root, args, eval_flake) {
                     Ok(state) => state,
                     Err(error) => {
                         if !explained {
-                            facts.error(&repo, "check-failed", format!("{kind}: {error:#}"));
+                            facts.error(&repo, "check-failed", &format!("{kind}: {error:#}"));
                         }
                         "unknown"
                     }
                 }
+            } else {
+                "unknown"
             };
-            facts.generated(coordinate, kind, state, paths);
+            facts.generated(coordinate, kind, state, &paths);
         };
 
         let release = workflows
@@ -522,7 +537,12 @@ impl Facts {
             let args = [["init", "release", "--check"].as_slice(), &backend].concat();
             check(self, "release.workflow", &args, release_paths);
         } else if !release.is_empty() {
-            self.generated(coordinate, "release.workflow", "hand-rolled", release_paths);
+            self.generated(
+                coordinate,
+                "release.workflow",
+                "hand-rolled",
+                &release_paths,
+            );
         }
         let copr = config
             .and_then(|config| config.copr.as_ref())
@@ -553,7 +573,7 @@ impl Facts {
             paths
                 .iter()
                 .filter(|path| root.join(path).is_file())
-                .map(|path| path.to_string())
+                .map(ToString::to_string)
                 .collect::<Vec<_>>()
         };
         if fs::read_to_string(root.join("flake.nix"))
@@ -563,7 +583,7 @@ impl Facts {
                 coordinate,
                 "flake.wiring",
                 state(flake_status),
-                present(&["flake.nix", "nix/treefmt.nix"]),
+                &present(&["flake.nix", "nix/treefmt.nix"]),
             );
         }
         if registry::has_hooks_config(root) {
@@ -577,7 +597,7 @@ impl Facts {
             } else {
                 "hand-rolled"
             };
-            self.generated(coordinate, "hooks.config", hooks, paths);
+            self.generated(coordinate, "hooks.config", hooks, &paths);
         }
         if fs::read_to_string(root.join("README.md"))
             .is_ok_and(|readme| readme.contains(crate::readme_badges::START_MARKER))
@@ -587,12 +607,12 @@ impl Facts {
                 Ok(_) => "current",
                 Err(error) => {
                     if !explained {
-                        self.error(&repo, "check-failed", format!("readme.badges: {error:#}"));
+                        self.error(&repo, "check-failed", &format!("readme.badges: {error:#}"));
                     }
                     "unknown"
                 }
             };
-            self.generated(coordinate, "readme.badges", state, vec!["README.md".into()]);
+            self.generated(coordinate, "readme.badges", state, &["README.md".into()]);
         }
         // Without a loaded config (an unevaluated flake policy) neither the
         // path nor the requirement is known: report only what is on disk.
@@ -671,8 +691,8 @@ impl Facts {
                 ci_kind(&file.relative_path)
             };
             let usage = format!("usage:{coordinate}#{kind}");
-            let owned = self.nodes.contains_key(&usage);
-            let owner = if owned {
+            let has_usage = self.nodes.contains_key(&usage);
+            let owner = if has_usage {
                 usage.clone()
             } else {
                 format!("repo:{coordinate}")
@@ -711,7 +731,7 @@ impl Facts {
                         "runner",
                         Attrs::from([("forgeHost", json!(host)), ("label", json!(label))]),
                     );
-                    if owned && file.marked {
+                    if has_usage && file.marked {
                         self.edges.insert((usage.clone(), runner.clone(), "runsOn"));
                     }
                     self.edges.insert((id.clone(), runner, "runsOn"));
@@ -748,7 +768,7 @@ impl Facts {
                     self.error(
                         &subject,
                         "scripts-unreadable",
-                        format!(
+                        &format!(
                             "{}: {error}",
                             directory.strip_prefix(root).unwrap_or(&directory).display()
                         ),
@@ -933,7 +953,7 @@ impl Facts {
             Ok(text) => Some(text),
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
             Err(error) => {
-                self.error(repo, "lock-unreadable", format!("{name}: {error}"));
+                self.error(repo, "lock-unreadable", &format!("{name}: {error}"));
                 None
             }
         }
@@ -946,14 +966,14 @@ impl Facts {
             match serde_json::from_str::<Value>(&text) {
                 Ok(lock) => Some(lock),
                 Err(error) => {
-                    self.error(&repo, "lock-unreadable", format!("flake.lock: {error}"));
+                    self.error(&repo, "lock-unreadable", &format!("flake.lock: {error}"));
                     None
                 }
             }
         });
         let inputs = lock.as_ref().map_or_else(Vec::new, |lock| {
             flake_inputs(lock).unwrap_or_else(|message| {
-                self.error(&repo, "lock-unreadable", format!("flake.lock: {message}"));
+                self.error(&repo, "lock-unreadable", &format!("flake.lock: {message}"));
                 Vec::new()
             })
         });
@@ -972,7 +992,7 @@ impl Facts {
                 .id
                 .clone();
             if let Some(revision) = revision {
-                self.pin(&id, revision);
+                self.pin(&id, &revision);
             }
         }
         let cargo =
@@ -980,7 +1000,7 @@ impl Facts {
                 .and_then(|text| match text.parse::<toml_edit::DocumentMut>() {
                     Ok(lock) => Some(lock),
                     Err(error) => {
-                        self.error(&repo, "lock-unreadable", format!("Cargo.lock: {error}"));
+                        self.error(&repo, "lock-unreadable", &format!("Cargo.lock: {error}"));
                         None
                     }
                 });
@@ -1112,8 +1132,8 @@ fn flake_refs(line: &str, refs: &mut Refs) -> bool {
             .map_or(line.len(), |index| end + index);
         let prefix = &line[token_start..start];
         // A `git+` source must name github.com itself, not a host that ends in it.
-        if !prefix.eq_ignore_ascii_case("github:")
-            && !(prefix.starts_with("git+") && is_simit_repo_url(&format!("{prefix}{NAME}")))
+        if !(prefix.eq_ignore_ascii_case("github:")
+            || prefix.starts_with("git+") && is_simit_repo_url(&format!("{prefix}{NAME}")))
         {
             continue;
         }
@@ -1507,7 +1527,13 @@ struct Row {
     #[serde(skip_serializing_if = "Option::is_none")]
     fallback: Option<&'static str>,
     /// `[scope, adapter, landing]` an updater path needs; only the honesty test reads it.
-    #[cfg_attr(not(test), allow(dead_code))]
+    #[cfg_attr(
+        not(test),
+        allow(
+            dead_code,
+            reason = "Only the updater honesty test consumes this metadata"
+        )
+    )]
     #[serde(skip)]
     updater: Option<[&'static str; 3]>,
 }
@@ -2077,7 +2103,7 @@ mod tests {
             refs.variables,
             BTreeSet::from(["SIMIT_REVISION".to_owned()])
         );
-        assert!(refs.floating.is_empty());
+        assert_eq!(refs.floating, BTreeSet::new());
     }
 
     #[test]
@@ -2129,6 +2155,6 @@ mod tests {
             "root": {"inputs": {"simit": "simit"}},
             "simit": {"locked": {"type": "github", "owner": "caniko", "repo": "simit", "host": "ghe.example", "rev": "a"}}
         }});
-        assert!(flake_inputs(&ghe).unwrap().is_empty());
+        assert_eq!(flake_inputs(&ghe).unwrap().len(), 0);
     }
 }

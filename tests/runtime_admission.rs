@@ -298,7 +298,7 @@ fn sigterm_cancels_the_cli_and_retains_a_terminal_receipt() {
         std::thread::sleep(Duration::from_millis(5));
     }
     rustix::process::kill_process(
-        rustix::process::Pid::from_raw(child.id() as i32).unwrap(),
+        rustix::process::Pid::from_child(&child),
         rustix::process::Signal::TERM,
     )
     .unwrap();

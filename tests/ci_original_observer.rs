@@ -341,8 +341,8 @@ fn persistent_provider_error_retains_an_explicit_failed_receipt() {
     let r = receipt(&root);
     assert_eq!(r["capture_complete"], false);
     assert_eq!(r["qualified"], false);
-    assert!(!r["error"].as_str().unwrap().is_empty());
-    assert!(!r["members"].as_object().unwrap().is_empty());
+    assert_ne!(r["error"].as_str().unwrap(), "");
+    assert_ne!(r["members"].as_object().unwrap().len(), 0);
 }
 
 #[test]
@@ -842,10 +842,10 @@ fn missing_native_steps_duplicate_runs_and_duplicate_zip_names_are_rejected() {
             "steps" => {
                 provider.jobs = Some(
                     json!({"total_count":1,"jobs":[{"id":22,"run_id":12,"run_attempt":1,"head_sha":"a".repeat(40),"name":"test","status":"completed","conclusion":"success","steps":[]}]}),
-                )
+                );
             }
             "runs" => {
-                provider.discovery = Some(json!({"total_count":2,"workflow_runs":[run(),run()]}))
+                provider.discovery = Some(json!({"total_count":2,"workflow_runs":[run(),run()]}));
             }
             "zip" => {
                 let mut zip = zip::ZipWriter::new(Cursor::new(Vec::new()));
@@ -903,8 +903,8 @@ impl Transport for Uploaded {
     fn get(
         &mut self,
         endpoint: &str,
-        _maximum: u64,
-        _timeout: Duration,
+        maximum: u64,
+        timeout: Duration,
         cancellation: &Cancellation,
     ) -> anyhow::Result<Response> {
         cancellation.check()?;
@@ -914,9 +914,7 @@ impl Transport for Uploaded {
             || endpoint.ends_with("/attempts/1/logs")
             || endpoint.contains("actions/jobs/")
         {
-            return self
-                .provider
-                .get(endpoint, _maximum, _timeout, cancellation);
+            return self.provider.get(endpoint, maximum, timeout, cancellation);
         } else if endpoint.contains("actions/runs?") {
             serde_json::to_vec(
                 &self

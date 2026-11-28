@@ -10,11 +10,11 @@ use crate::render::pkgbuild::{self, RenderedPkgbuild};
 
 pub fn run(command: AurCommand) -> Result<()> {
     match command.action {
-        AurAction::Render(args) => render(args),
+        AurAction::Render(args) => render(&args),
     }
 }
 
-fn render(args: AurRenderArgs) -> Result<()> {
+fn render(args: &AurRenderArgs) -> Result<()> {
     let (resolved, package_version) = resolve(args.aur.as_overrides(), args.package.as_deref())?;
     let version = args.version.as_deref().unwrap_or(&package_version);
     for flavor in pkgbuild::render(&resolved, version) {

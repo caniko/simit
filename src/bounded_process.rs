@@ -51,7 +51,8 @@ struct ChildGuard<'a>(Child, &'a AtomicBool);
 impl Drop for ChildGuard<'_> {
     fn drop(&mut self) {
         #[cfg(unix)]
-        if let Some(pid) = rustix::process::Pid::from_raw(self.0.id() as i32) {
+        {
+            let pid = rustix::process::Pid::from_child(&self.0);
             let _ = rustix::process::kill_process_group(pid, rustix::process::Signal::KILL);
         }
         let _ = self.0.kill();
@@ -61,6 +62,7 @@ impl Drop for ChildGuard<'_> {
 }
 
 /// Hard bounds for one process, including retained diagnostics.
+#[derive(Clone, Copy)]
 pub struct Limits {
     /// Monotonic execution deadline relative to dispatch.
     pub timeout: Duration,
@@ -193,7 +195,7 @@ fn run_bounded(
         stdout_path,
         stderr_path,
         cancellation,
-        limits,
+        &limits,
         input,
         &mut Readers::default(),
     )
@@ -208,6 +210,13 @@ struct Readers {
 }
 
 impl Readers {
+    #[cfg_attr(
+        not(test),
+        allow(
+            clippy::unused_self,
+            reason = "The test build uses reader state to inject a capture failure"
+        )
+    )]
     fn start<'scope, 'env: 'scope>(
         &mut self,
         scope: &'scope std::thread::Scope<'scope, 'env>,
@@ -242,7 +251,7 @@ fn run_bounded_with_readers(
     stdout_path: &Path,
     stderr_path: &Path,
     cancellation: &Cancellation,
-    limits: Limits,
+    limits: &Limits,
     input: Option<File>,
     readers: &mut Readers,
 ) -> Result<i32> {
@@ -373,7 +382,7 @@ fn capture(
     stopped: &AtomicBool,
 ) -> Result<()> {
     let mut remaining = maximum;
-    let mut buffer = [0; 64 * 1024];
+    let mut buffer = vec![0; 64 * 1024];
     loop {
         // Observe cleanup before the read. If cleanup races a WouldBlock read,
         // retry once after observing it so bytes queued before child exit cannot
@@ -408,6 +417,7 @@ mod tests {
 
     #[test]
     fn cleanup_racing_a_would_block_read_does_not_drop_queued_bytes() {
+        use std::io::{Seek, SeekFrom};
         struct ExitRace<'a> {
             stopped: &'a AtomicBool,
             reads: usize,
@@ -439,7 +449,6 @@ mod tests {
             &stopped,
         )
         .unwrap();
-        use std::io::{Seek, SeekFrom};
         retained.seek(SeekFrom::Start(0)).unwrap();
         let mut raw = Vec::new();
         retained.read_to_end(&mut raw).unwrap();
@@ -552,7 +561,7 @@ mod tests {
                 &root.path().join("stdout"),
                 &root.path().join("stderr"),
                 &Cancellation::default(),
-                Limits {
+                &Limits {
                     timeout: Duration::from_secs(2),
                     stdout: 32,
                     stderr: 256,
@@ -643,15 +652,15 @@ mod tests {
             &Cancellation::default(),
             Limits {
                 timeout: Duration::from_secs(2),
-                stdout: 131072,
-                stderr: 131072,
+                stdout: 131_072,
+                stderr: 131_072,
             },
             None,
         )
         .unwrap();
         assert_eq!(status, 7);
-        assert_eq!(std::fs::read(stdout).unwrap(), vec![0; 131072]);
-        assert_eq!(std::fs::read(stderr).unwrap(), vec![0; 131072]);
+        assert_eq!(std::fs::read(stdout).unwrap(), vec![0; 131_072]);
+        assert_eq!(std::fs::read(stderr).unwrap(), vec![0; 131_072]);
     }
     #[test]
     fn nonzero_output_bytes_are_retained_and_overflow_is_denied() {
